@@ -68,8 +68,14 @@ if __name__ == '__main__':
     # Step 5 - Link merge/split tracks to main tracks
     if config['run_mergesplit']:
         finaltrackstats_filename = link_mergesplit_tracks(config)
+    
+    # Step 6 - Match precipitation to cold pools for filtering
+    if config['run_matchpf_cp']:
+        pfstats_filename = match_pf_cp_tracks(config)
+        # Automatically use precipitation-filtered tracks for mapping
+        finalstats_filebase = pfstats_filebase
 
-    # Step 6 - Map tracking to pixel files
+    # Step 7 - Map tracking to pixel files
     if config['run_mapfeature']:
         mapfeature_driver(config, trackstats_filebase=finalstats_filebase)
 

@@ -11,6 +11,8 @@ run_gettracks: True
 run_trackstats: True
 # Link merge/split tracks
 run_mergesplit: True
+# Match precipitation to cold pools for filtering
+run_matchpf_cp: True
 # Map tracking to pixel files
 run_mapfeature: True
 

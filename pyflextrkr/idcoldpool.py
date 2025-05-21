@@ -189,6 +189,9 @@ def idcoldpool(
     field_varname = config.get("field_varname")
     # field_thresh = config.get("field_thresh")
     min_size = config.get("min_size")
+    linkpf = config.get('linkpf', 0)  # Option to include precipitation data
+    pcp_varname = config.get('pcp_varname', None)  # Precipitation variable name
+    pcp_convert_factor = config.get('pcp_convert_factor', 1)  # Convert precipitation factor
     # label_method = config.get("label_method", "ndimage.label")
     buoy_thresh = config.get("buoy_thresh")
     min_cp_depth = config.get("min_cp_depth")
@@ -245,6 +248,28 @@ def idcoldpool(
     z_coord = ds.coords[z_coordname]
     time_decode = ds[time_coordname]
     field_var = ds[field_varname]
+
+    # Read precipitation data if linkpf is enabled
+    if linkpf == 1 and pcp_varname is not None:
+        if pcp_varname in ds:
+            has_precip = True
+            # Convert precipitation factor to unit [mm/hour]
+            precip_data = ds[pcp_varname].data * pcp_convert_factor
+        else:
+            has_precip = False
+            logger.warning(f"Precipitation variable '{pcp_varname}' not found in input file.")
+    else:
+        has_precip = False
+    
+    # Add precipitation to output if available
+    if has_precip:
+        # For 3D precipitation data, take the surface level
+        if precip_data.ndim == 3:  # [time, y, x]
+            pcp = precip_data[tt, :, :]
+        else:
+            pcp = precip_data
+
+
     ds.close()
 
     # Check x, y coordinate dimensions
@@ -373,6 +398,11 @@ def idcoldpool(
             "long_name": "Cold pool top height",
             "units": "m",
         }
+        precip_attrs = {
+            "long_name": "Precipitation rate",
+            "units": "mm/hour",
+            "description": f"From {pcp_varname} * {pcp_convert_factor}",
+        }
 
         # Define variable dictionary
         var2d_dims = ["time", "lat", "lon"]
@@ -384,6 +414,7 @@ def idcoldpool(
             "cp_depth": (var2d_dims, np.expand_dims(cp_dict['cp_depth'], 0), cp_depth_attrs),
             "cp_base": (var2d_dims, np.expand_dims(cp_dict['cp_base'], 0), cp_base_attrs),
             "cp_top": (var2d_dims, np.expand_dims(cp_dict['cp_top'], 0), cp_top_attrs),
+            "precipitation": (var2d_dims, np.expand_dims(pcp, 0), precip_attrs),
             feature_varname: (var2d_dims, np.expand_dims(feature_mask, 0), featuremask_attrs),
             nfeature_varname: (["time"], out_nfeatures, nfeatures_attrs),
             featuresize_varname: (["features"], npix_feature, npix_feature_attrs),
