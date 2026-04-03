@@ -127,8 +127,22 @@ def setup_dask_client(parallel, n_workers, threads_per_worker, memory_limit=None
         logger.warning("Dask not available, falling back to sequential processing")
         return None
 
+def zoom_level_from_nside(nside):
+    """
+    Calculate the zoom level from the NSIDE value.
 
-def write_zarr(ds, out_zarr, client=None, logger=None, chunksize_time=24, chunksize_cell=None):
+    Args:
+        nside (int): NSIDE value, must be a power of 2.
+    
+    Returns:
+        int: Zoom level corresponding to the NSIDE value.
+    """
+    zoom = int(np.log2(nside))
+    if 2**zoom != nside:
+        raise ValueError("NSIDE must be a power of 2.")
+    return zoom
+
+def write_zarr(ds, out_zarr, client=None, logger=None, chunksize_time=24, chunksize_cell=None, zarr_format=3):
     """
     Write dataset to Zarr with optimized chunking for HEALPix grid.
     
@@ -214,7 +228,8 @@ def write_zarr(ds, out_zarr, client=None, logger=None, chunksize_time=24, chunks
         out_zarr,
         mode="w",
         consolidated=True,  # Enable for better performance when reading
-        compute=False      # Create a delayed task
+        zarr_format=zarr_format,
+        compute=False,     # Create a delayed task
     )
     
     # Compute the task, with progress reporting
@@ -262,7 +277,7 @@ def write_zarr(ds, out_zarr, client=None, logger=None, chunksize_time=24, chunks
     logger.info(f"Zarr file complete: {out_zarr}")
 
 
-def write_zarr_simple(ds, out_zarr, logger=None):
+def write_zarr_simple(ds, out_zarr, logger=None, zarr_format=3):
     """
     Simple zarr write function without Dask optimization.
     
@@ -286,7 +301,7 @@ def write_zarr_simple(ds, out_zarr, logger=None):
         shutil.rmtree(out_zarr)
     
     logger.info(f"Writing zarr to: {out_zarr}")
-    ds.to_zarr(out_zarr, mode='w', consolidated=True)
+    ds.to_zarr(out_zarr, mode='w', consolidated=True, zarr_format=zarr_format)
     logger.info(f"Zarr write completed: {out_zarr}")
 
 

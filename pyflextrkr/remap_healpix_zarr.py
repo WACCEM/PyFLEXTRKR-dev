@@ -3,10 +3,35 @@ import numpy as np
 import os
 import glob
 import time
+import threading
+import warnings
 import logging
+import dask
 import healpy as hp
 from functools import partial
 from pyflextrkr.ft_utilities import setup_logging
+
+
+def _log_write_progress(out_zarr, logger, stop_event, interval=30):
+    """
+    Background thread that logs Zarr write progress every interval seconds.
+    Calculates bytes written by walking the Zarr store directory.
+    Exits cleanly when stop_event is set.
+    """
+    start = time.time()
+    while not stop_event.wait(interval):
+        elapsed = time.time() - start
+        try:
+            nbytes = sum(
+                os.path.getsize(os.path.join(root, f))
+                for root, _, files in os.walk(out_zarr)
+                for f in files
+            )
+            logger.info(
+                f"Writing Zarr ... elapsed: {elapsed:.0f}s, written: {nbytes / 1e9:.2f} GB"
+            )
+        except Exception:
+            logger.info(f"Writing Zarr ... elapsed: {elapsed:.0f}s")
 
 def remap_to_healpix_zarr(config):
     """
@@ -90,6 +115,8 @@ def remap_to_healpix_zarr(config):
     chunksize_lat = config.get("chunksize_lat", "auto")
     chunksize_lon = config.get("chunksize_lon", "auto")
     chunksize_cell = config.get("chunksize_cell", "auto")
+    # Zarr format version: 2 (v2, backward compatible) or 3 (v3, default)
+    zarr_format = config.get("zarr_format", 3)
     
     # ---------- VARIABLE SELECTION ----------
     # Required coordinate variables
@@ -171,33 +198,34 @@ def remap_to_healpix_zarr(config):
     # ---------- INTERMEDIATE ZARR (OPTIONAL) ----------
     if write_mask:
         logger.info(f"Writing intermediate lat/lon Zarr to: {latlon_zarr}")
-        
-        # Set proper chunking for lat/lon grid
-        chunked_ds = ds.chunk({
-            "time": chunksize_time, 
-            "lat": chunksize_lat, 
-            "lon": chunksize_lon
-        })
-        
-        # Report dataset size
-        logger.info(f"Dataset dimensions: {dict(chunked_ds.sizes)}")
-        logger.info(f"Chunking scheme: time={chunksize_time}, lat={chunksize_lat}, lon={chunksize_lon}")
-        
+
         # Write lat/lon zarr with progress tracking
         if client:
             from dask.distributed import progress
-            
-            # Write intermediate Zarr
-            write_task = chunked_ds.to_zarr(
-                latlon_zarr,
-                mode="w",
-                consolidated=True,
-                compute=False
-            )
-            
+
             try:
-                # Compute with progress tracking
-                future = client.compute(write_task)
+                # Build and write under task-based rechunking to avoid P2PRechunkLayer
+                # assertion in distributed shuffle culling.
+                with dask.config.set({"array.rechunk.method": "tasks"}):
+                    chunked_ds = ds.chunk({
+                        "time": chunksize_time,
+                        "lat": chunksize_lat,
+                        "lon": chunksize_lon,
+                    })
+                    logger.info(f"Dataset dimensions: {dict(chunked_ds.sizes)}")
+                    logger.info(f"Chunking scheme: time={chunksize_time}, lat={chunksize_lat}, lon={chunksize_lon}")
+
+                    # Write intermediate Zarr
+                    write_task = chunked_ds.to_zarr(
+                        latlon_zarr,
+                        mode="w",
+                        consolidated=True,
+                        zarr_format=zarr_format,
+                        compute=False,
+                    )
+
+                    # Compute with progress tracking
+                    future = client.compute(write_task)
                 logger.info("Writing intermediate Zarr (this may take a while)...")
                 progress(future)
                 
@@ -205,15 +233,22 @@ def remap_to_healpix_zarr(config):
                 logger.info("Intermediate Zarr write completed successfully")
                 
                 # Reload from the Zarr store to ensure everything is consistent
-                ds = xr.open_dataset(latlon_zarr, engine='zarr')
+                ds = xr.open_dataset(latlon_zarr, engine='zarr', consolidated=True)
                 
             except Exception as e:
                 logger.error(f"Intermediate Zarr write failed: {str(e)}")
                 raise
         else:
             # Compute locally
-            chunked_ds.to_zarr(latlon_zarr, mode="w", consolidated=True)
-            ds = xr.open_dataset(latlon_zarr, engine='zarr')
+            chunked_ds = ds.chunk({
+                "time": chunksize_time,
+                "lat": chunksize_lat,
+                "lon": chunksize_lon,
+            })
+            logger.info(f"Dataset dimensions: {dict(chunked_ds.sizes)}")
+            logger.info(f"Chunking scheme: time={chunksize_time}, lat={chunksize_lat}, lon={chunksize_lon}")
+            chunked_ds.to_zarr(latlon_zarr, mode="w", consolidated=True, zarr_format=zarr_format)
+            ds = xr.open_dataset(latlon_zarr, engine='zarr', consolidated=True)
     
     # ---------- HEALPIX REMAPPING ----------
     logger.info("Beginning HEALPix remapping...")
@@ -300,58 +335,95 @@ def remap_to_healpix_zarr(config):
             elif total_times % (chunks + 1) == 0:
                 chunksize_time = total_times // (chunks + 1)
     
-    # Set proper chunking for HEALPix output
-    chunked_hp = dsout_hp.chunk({
-        "time": chunksize_time, 
-        "cell": chunksize_cell, 
-    })
+    # For client mode, build chunk graph inside protected context later.
+    # For serial mode, build it here.
+    if not client:
+        chunked_hp = dsout_hp.chunk({
+            "time": chunksize_time,
+            "cell": chunksize_cell,
+        })
 
-    # Report dataset size and chunking info
-    logger.info(f"HEALPix dataset dimensions: {dict(chunked_hp.sizes)}")
-    logger.info(f"HEALPix chunking scheme: time={chunksize_time}, cell={chunksize_cell}")
+        # Report dataset size and chunking info
+        logger.info(f"HEALPix dataset dimensions: {dict(chunked_hp.sizes)}")
+        logger.info(f"HEALPix chunking scheme: time={chunksize_time}, cell={chunksize_cell}")
     
     # ---------- WRITE HEALPIX ZARR OUTPUT ----------
     logger.info(f"Starting HEALPix Zarr write to: {out_zarr}")
-    
-    # Create a delayed task for Zarr writing
-    write_task = chunked_hp.to_zarr(
-        out_zarr,
-        mode="w",        
-        consolidated=True,  # Enable for better performance when reading
-        compute=False      # Create a delayed task
+
+    # Start background thread that logs elapsed time and bytes written every 30 s.
+    # Uses only stdlib (threading, os, time) — no extra dependencies.
+    stop_event = threading.Event()
+    progress_thread = threading.Thread(
+        target=_log_write_progress,
+        args=(out_zarr, logger, stop_event),
+        kwargs={"interval": 30},
+        daemon=True,
     )
-    
-    # Compute the task, with progress reporting
-    if client:
-        from dask.distributed import progress
-        import psutil
+    progress_thread.start()
 
-        # Temporarily suppress distributed.shuffle logs during progress display
-        shuffle_logger = logging.getLogger('distributed.shuffle')
-        original_level = shuffle_logger.level
-        shuffle_logger.setLevel(logging.ERROR)  # Only show errors, not warnings
+    try:
+        if client:
+            import psutil
 
-        # Get cluster state information before processing
-        memory_usage = client.run(lambda: psutil.Process().memory_info().rss / 1e9)
-        logger.info(f"Current memory usage across workers (GB): {memory_usage}")
-               
-        try:
-            # Compute with progress tracking
-            future = client.compute(write_task)
-            logger.info("Writing HEALPix Zarr (this may take a while)...")
-            progress(future)  # Shows a progress bar in notebooks or detailed progress in terminals
+            try:
+                memory_usage = client.run(lambda: psutil.Process().memory_info().rss / 1e9)
+                logger.info(f"Current memory usage across workers (GB): {memory_usage}")
+            except Exception as e:
+                logger.warning(f"Could not get memory usage: {e}")
 
-            result = future.result()
-            logger.info("HEALPix Zarr write completed successfully")
-        except Exception as e:
-            logger.error(f"HEALPix Zarr write failed: {str(e)}")
-            raise
-        finally:
-            # Restore original log level
-            shuffle_logger.setLevel(original_level)
-    else:
-        # Compute locally if no client
-        write_task.compute()
+            # Suppress distributed.shuffle noise during write
+            shuffle_logger = logging.getLogger('distributed.shuffle')
+            original_level = shuffle_logger.level
+            shuffle_logger.setLevel(logging.ERROR)
+            try:
+                # When a distributed Client is active, dask.array.rechunk._choose_rechunk_method
+                # automatically selects "p2p" for large rechunks, injecting P2PRechunkLayer
+                # into the graph. P2PRechunkLayer.cull() has a bug: it asserts all key
+                # components after the layer name are ints, but xarray zarr-write keys
+                # contain non-int components (e.g. variable names), triggering AssertionError.
+                # Fix: force task-based rechunking via the 'array.rechunk.method' config key,
+                # which is checked FIRST in _choose_rechunk_method before the distributed
+                # client check. This must wrap both .chunk() (graph construction) and
+                # to_zarr() (graph execution) to apply to all rechunk operations.
+                with dask.config.set({"array.rechunk.method": "tasks"}):
+                    chunked_hp_safe = dsout_hp.chunk({"time": chunksize_time, "cell": chunksize_cell})
+                    logger.info(f"HEALPix dataset dimensions: {dict(chunked_hp_safe.sizes)}")
+                    logger.info(f"HEALPix chunking scheme: time={chunksize_time}, cell={chunksize_cell}")
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            message="Consolidated metadata",
+                            category=UserWarning,
+                        )
+                        chunked_hp_safe.to_zarr(
+                            out_zarr,
+                            mode="w",
+                            consolidated=True,
+                            zarr_format=zarr_format,
+                        )
+                logger.info("HEALPix Zarr write completed successfully")
+            except Exception as e:
+                logger.error(f"HEALPix Zarr write failed: {str(e)}")
+                raise
+            finally:
+                shuffle_logger.setLevel(original_level)
+        else:
+            # Serial / threaded scheduler path
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Consolidated metadata",
+                    category=UserWarning,
+                )
+                chunked_hp.to_zarr(
+                    out_zarr,
+                    mode="w",
+                    consolidated=True,
+                    zarr_format=zarr_format,
+                )
+    finally:
+        stop_event.set()
+        progress_thread.join(timeout=5)
     
     # Cleanup intermediate file if created
     # if not skip_intermediate and os.path.exists(latlon_zarr) and out_zarr != latlon_zarr:
