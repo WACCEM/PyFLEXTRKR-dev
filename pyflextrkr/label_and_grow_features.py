@@ -1,0 +1,948 @@
+"""
+Generalized feature labeling and growth for 2D scalar fields.
+
+This module provides `label_and_grow_features`, a generalized version of
+`label_and_grow_cold_clouds` that works with any 2D field (e.g., brightness
+temperature, radar reflectivity). It supports:
+
+- **core_operator='lt'**: Lower values define cores (e.g., Tb cold cores).
+- **core_operator='gt'**: Higher values define cores (e.g., Ze convective cores).
+- **growth_method='bfs'**: Original BFS-based growth via `grow_cells` (backward
+  compatible, slower for large domains).
+- **growth_method='edt'**: Voronoi-based growth via scipy `distance_transform_edt`
+  (faster, recommended for new applications). Boundary assignments may differ
+  by 1-2 pixels from BFS at equidistant boundaries.
+
+Threshold ordering convention
+-----------------------------
+Thresholds are always ordered from "most intense" (core) to "least intense"
+(edge), regardless of the operator direction:
+
+- For Tb (core_operator='lt'): [225, 241, 261, 261] means core < 225 K,
+  secondary < 241 K, tertiary < 261 K, edge < 261 K.
+- For Ze (core_operator='gt'): [30, 10, 5, 5] means core > 30 dBZ,
+  secondary > 10 dBZ, tertiary > 5 dBZ, edge > 5 dBZ.
+"""
+
+import logging
+import numpy as np
+from scipy.ndimage import label, binary_dilation, generate_binary_structure
+from astropy.convolution import Box2DKernel, convolve
+from pyflextrkr.ftfunctions import sort_renumber, grow_cells, pad_and_extend, call_adjust_axis
+
+
+def label_and_grow_features(
+    field,
+    pixel_radius,
+    thresholds,
+    area_thresh,
+    min_core_npix,
+    smooth_size,
+    expand_to_tertiary,
+    config,
+    pixel_area=None,
+    core_operator="lt",
+    growth_method="bfs",
+):
+    """
+    Label and grow features in a 2D scalar field.
+
+    Identifies intense cores, grows them outward to a secondary threshold,
+    labels remaining isolated secondary-threshold regions, combines and sorts
+    all features by size, and optionally expands to a tertiary threshold.
+
+    Args:
+        field: np.ndarray
+            2D input data array (e.g., Tb in K, or reflectivity in dBZ).
+        pixel_radius: float
+            Pixel size in km.
+        thresholds: list or np.ndarray
+            4-element list of thresholds ordered from most intense to least:
+            [core_thresh, secondary_thresh, tertiary_thresh, edge_thresh].
+        area_thresh: float
+            Minimum area to define a feature [km^2].
+        min_core_npix: int
+            Minimum number of pixels to define a core.
+        smooth_size: int
+            Window size for Box2DKernel smoothing before core detection.
+        expand_to_tertiary: int
+            Flag (0 or 1) to expand features to include tertiary region.
+        config: dict
+            Dictionary containing config parameters (for PBC settings).
+        pixel_area: float or np.ndarray, optional
+            Scalar pixel_radius^2 or 2D grid_area array (ny, nx) in km^2.
+            When 2D, area-based thresholds use actual grid cell areas.
+        core_operator: str, optional
+            Threshold comparison operator for defining cores.
+            'lt': field < threshold defines cores (e.g., Tb).
+            'gt': field > threshold defines cores (e.g., reflectivity).
+            Default: 'lt'.
+        growth_method: str, optional
+            Method for growing labeled cores outward to secondary threshold.
+            'bfs': Breadth-first search via grow_cells (original, exact backward
+                   compatibility with label_and_grow_cold_clouds).
+            'edt': Euclidean distance transform (Voronoi assignment, faster,
+                   recommended for new applications).
+            Default: 'bfs'.
+
+    Returns:
+        dict: Dictionary containing:
+            - final_nclouds (int): Number of labeled features.
+            - final_ncorepix (np.ndarray): Core pixel count per feature.
+            - final_ncoldpix (np.ndarray): Secondary region pixel count per feature.
+            - final_ncorecoldpix (np.ndarray): Core + secondary pixel count.
+            - final_nwarmpix (np.ndarray): Tertiary region pixel count per feature.
+            - final_cloudnumber (np.ndarray): 2D labeled feature array (with
+              tertiary expansion if enabled).
+            - final_cloudtype (np.ndarray): 2D pixel classification array.
+            - final_convcold_cloudnumber (np.ndarray): 2D labeled feature array
+              (core + secondary only, no tertiary).
+    """
+    logger = logging.getLogger(__name__)
+
+    # Validate inputs
+    if core_operator not in ("lt", "gt"):
+        raise ValueError(f"core_operator must be 'lt' or 'gt', got '{core_operator}'")
+    if growth_method not in ("bfs", "edt"):
+        raise ValueError(f"growth_method must be 'bfs' or 'edt', got '{growth_method}'")
+
+    # Periodic boundary conditions
+    pbc_direction = config.get("pbc_direction", "none")
+
+    # Separate thresholds
+    core_thresh = thresholds[0]       # Most intense (core)
+    secondary_thresh = thresholds[1]  # Secondary expansion
+    tertiary_thresh = thresholds[2]   # Tertiary expansion
+    edge_thresh = thresholds[3]       # Outermost boundary
+
+    # Determine dimensions
+    ny, nx = np.shape(field)
+
+    # Set pixel_area if not provided (backward compatible)
+    if pixel_area is None:
+        pixel_area = pixel_radius ** 2
+
+    # Check if pixel_area is a 2D array (latlon mode)
+    use_grid_area = isinstance(pixel_area, np.ndarray) and pixel_area.ndim == 2
+
+    # Calculate minimum number of pixels based on area threshold
+    if use_grid_area:
+        nthresh = area_thresh
+    else:
+        nthresh = area_thresh / pixel_area
+
+    ######################################################################
+    # Classify pixels by thresholds
+    (
+        secondary_flag,
+        core_flag,
+        cloud_type_map,
+    ) = classify_pixels_by_thresholds(
+        field, nx, ny, edge_thresh, secondary_thresh, core_thresh,
+        tertiary_thresh, core_operator,
+    )
+
+    #################################################################
+    # Handle periodic boundary conditions
+    if pbc_direction != "none":
+        # Save original data
+        field_orig = np.copy(field)
+        core_flag_orig = np.copy(core_flag)
+        secondary_flag_orig = np.copy(secondary_flag)
+        cloud_type_map_orig = np.copy(cloud_type_map)
+
+        # Step 1: Extend and pad data
+        field, padded_x, padded_y = pad_and_extend(field, config)
+        core_flag, _, _ = pad_and_extend(core_flag, config)
+        secondary_flag, _, _ = pad_and_extend(secondary_flag, config)
+        cloud_type_map, _, _ = pad_and_extend(cloud_type_map, config)
+        # Extend pixel_area if it's 2D
+        if use_grid_area:
+            pixel_area, _, _ = pad_and_extend(pixel_area, config)
+
+        # Update dimensions after padding
+        ny, nx = field.shape
+    else:
+        # If PBC is not applied, keep original data
+        field_orig = field
+        core_flag_orig = core_flag
+        secondary_flag_orig = secondary_flag
+        cloud_type_map_orig = cloud_type_map
+
+    # Smooth field data
+    smoothed_field = smooth_field(field, smooth_size)
+    # Label cores
+    labeled_cores, nlabelcores = find_and_label_cores(
+        smoothed_field, core_thresh, core_operator,
+    )
+
+    # Create empty arrays
+    labeled_core_secondary = np.zeros((ny, nx), dtype=int)
+    sorted_features = np.zeros((ny, nx), dtype=int)
+    final_feature_number = np.zeros((ny, nx), dtype=int)
+    labeled_core_secondary_npix = []
+    sortedcore_npix = []
+    sortedsecondary_npix = []
+    sortedtertiary_npix = []
+
+    # Check if any cores have been identified
+    if nlabelcores > 0:
+
+        # Sort cores by size and remove small cores
+        sortedcore_number2d, sortedcore_npix = sort_renumber(
+            labeled_cores, min_core_npix,
+        )
+        # Check if any of the cores passed the size threshold test
+        ivalidcores = np.array(np.where(sortedcore_npix > 0))[0]
+        ncores = len(ivalidcores)
+
+        # Check if cores satisfy size threshold
+        if ncores > 0:
+
+            #####################################################
+            # Grow cores outward until reaching secondary threshold.
+            labeled_core_secondary = np.copy(sortedcore_number2d)
+            labeled_core_secondary_npix = np.copy(sortedcore_npix)
+
+            if growth_method == "bfs":
+                # BFS growth (original method)
+                labeled_core_secondary = _grow_bfs(
+                    labeled_core_secondary, field, secondary_thresh, core_operator,
+                )
+            elif growth_method == "edt":
+                # EDT/Voronoi growth
+                labeled_core_secondary = _grow_edt(
+                    labeled_core_secondary, field, secondary_thresh, core_operator,
+                )
+
+            # Update the cloud sizes
+            cloud_indices, cloud_sizes = np.unique(
+                labeled_core_secondary, return_counts=True,
+            )
+            for index in cloud_indices:
+                if index == 0:
+                    continue
+                labeled_core_secondary_npix[index - 1] = cloud_sizes[index]
+
+        ############################################################
+        # Label secondary regions that do not have a core
+
+        # Find indices that satisfy secondary threshold or core threshold
+        # and are not labeled
+        isolated_flag = np.zeros((ny, nx), dtype=int)
+        isolated_indices = np.where(
+            (labeled_core_secondary == 0)
+            & ((secondary_flag > 0) | (core_flag > 0))
+        )
+        nisolated = np.shape(isolated_indices)[1]
+        if nisolated > 0:
+            isolated_flag[isolated_indices] = 1
+
+        labelisolated_number2d, nlabelisolated = label(isolated_flag)
+        # Sort isolated regions by size and remove small ones
+        if use_grid_area:
+            sortedisolated_number2d, sortedisolated_npix = sort_renumber(
+                labelisolated_number2d, nthresh, grid_area=pixel_area,
+            )
+        else:
+            sortedisolated_number2d, sortedisolated_npix = sort_renumber(
+                labelisolated_number2d, nthresh,
+            )
+
+        ##############################################################
+        # Combine cores+secondary with isolated secondary regions
+
+        # Add isolated features with numbers after the valid cores
+        labelcombined_number2d = np.copy(labeled_core_secondary)
+
+        sortedisolated_indices = np.where(sortedisolated_number2d > 0)
+        nsortedisolatedindices = np.shape(sortedisolated_indices)[1]
+        if nsortedisolatedindices > 0:
+            labelcombined_number2d[sortedisolated_indices] = np.copy(
+                sortedisolated_number2d[sortedisolated_indices]
+            ) + np.copy(ncores)
+
+        # Combine the npix data
+        labelcombined_npix = np.hstack(
+            (labeled_core_secondary_npix, sortedisolated_npix)
+        )
+        ncombined = len(labelcombined_npix)
+
+        # Initialize cloud numbers
+        labelcombined_number1d = np.arange(1, ncombined + 1)
+
+        # Sort clouds by size
+        order = np.argsort(labelcombined_npix)
+        order = order[::-1]
+        sortedcombined_npix = np.copy(labelcombined_npix[order])
+        sortedcombined_number1d = np.copy(labelcombined_number1d[order])
+
+        # Re-number clouds
+        sortedcombined_number2d = np.zeros((ny, nx), dtype=int)
+        final_ncorepix = np.ones(ncombined, dtype=int) * -9999
+        final_ncoldpix = np.ones(ncombined, dtype=int) * -9999
+        final_nwarmpix = np.ones(ncombined, dtype=int) * -9999
+        featurecount = 0
+        for ifeature in range(0, ncombined):
+            # Find pixels that have matching number
+            feature_indices = (
+                labelcombined_number2d == sortedcombined_number1d[ifeature]
+            )
+            nfeatureindices = np.count_nonzero(feature_indices)
+
+            if nfeatureindices == sortedcombined_npix[ifeature]:
+                featurecount = featurecount + 1
+                sortedcombined_number2d[feature_indices] = featurecount
+
+                final_ncorepix[featurecount - 1] = np.nansum(
+                    core_flag[feature_indices]
+                )
+                final_ncoldpix[featurecount - 1] = np.nansum(
+                    secondary_flag[feature_indices]
+                )
+
+        ##############################################
+        # Save final matrices
+        final_corecoldnumber = np.copy(sortedcombined_number2d)
+        final_ncorecold = np.copy(ncombined)
+
+        final_ncorepix = final_ncorepix[0:featurecount]
+        final_ncoldpix = final_ncoldpix[0:featurecount]
+
+        final_ncorecoldpix = final_ncorepix + final_ncoldpix
+
+    ######################################################################
+    # If no core is found, use secondary threshold to identify features
+    else:
+        # Label connected secondary-threshold regions
+        corecold_number2d, ncorecold = label(secondary_flag_orig)
+
+        ##########################################################
+        # Loop through features and only keep those exceeding area threshold
+        if ncorecold > 0:
+            labeled_core_secondary = np.zeros((ny, nx), dtype=int)
+            labelcore_npix = np.ones(ncorecold, dtype=int) * -9999
+            labelcold_npix = np.ones(ncorecold, dtype=int) * -9999
+            labelwarm_npix = np.ones(ncorecold, dtype=int) * -9999
+            featurecount = 0
+
+            for ifeature in range(1, ncorecold + 1):
+                feature_indices = np.where(corecold_number2d == ifeature)
+                nfeatureindices = np.shape(feature_indices)[1]
+
+                if nfeatureindices > 0:
+                    temp_core = np.copy(core_flag[feature_indices])
+                    temp_corenpix = np.nansum(temp_core)
+
+                    temp_cold = np.copy(secondary_flag[feature_indices])
+                    temp_coldnpix = np.nansum(temp_cold)
+
+                    # Check if feature exceeds area threshold
+                    if use_grid_area:
+                        feature_area = np.sum(pixel_area[feature_indices])
+                        passes_thresh = feature_area >= area_thresh
+                    else:
+                        passes_thresh = temp_corenpix + temp_coldnpix >= nthresh
+                    if passes_thresh:
+                        featurecount = featurecount + 1
+
+                        labeled_core_secondary[feature_indices] = np.copy(
+                            featurecount
+                        )
+                        labelcore_npix[featurecount - 1] = np.copy(temp_corenpix)
+                        labelcold_npix[featurecount - 1] = np.copy(temp_coldnpix)
+
+            ###############################
+            # Update feature count
+            ncorecold = np.copy(featurecount)
+            labelcorecold_number1d = (
+                np.array(np.where(labelcore_npix + labelcold_npix > 0))[0, :] + 1
+            )
+
+            ###########################################################
+            # Reduce size of final arrays so only as long as number of valid features
+            if ncorecold > 0:
+                labelcore_npix = labelcore_npix[0:ncorecold]
+                labelcold_npix = labelcold_npix[0:ncorecold]
+                labelwarm_npix = labelwarm_npix[0:ncorecold]
+
+                ##########################################################
+                # Reorder based on size, largest to smallest
+                labelcorecold_npix = labelcore_npix + labelcold_npix + labelwarm_npix
+                order = np.argsort(labelcorecold_npix)
+                order = order[::-1]
+                sortedcore_npix = np.copy(labelcore_npix[order])
+                sortedcold_npix = np.copy(labelcold_npix[order])
+                sortedwarm_npix = np.copy(labelwarm_npix[order])
+
+                sortedcorecold_npix = np.add(sortedcore_npix, sortedcold_npix)
+
+                # Re-number features
+                sortedcorecold_number1d = np.copy(labelcorecold_number1d[order])
+
+                sorted_features = np.zeros((ny, nx), dtype=int)
+                corecoldstep = 0
+                for isortedcorecold in range(0, ncorecold):
+                    sortedcorecold_indices = np.where(
+                        labeled_core_secondary
+                        == sortedcorecold_number1d[isortedcorecold]
+                    )
+                    nsortedcorecoldindices = np.shape(sortedcorecold_indices)[1]
+                    if nsortedcorecoldindices == sortedcorecold_npix[isortedcorecold]:
+                        corecoldstep = corecoldstep + 1
+                        sorted_features[sortedcorecold_indices] = np.copy(
+                            corecoldstep
+                        )
+
+            ##############################################
+            # Save final matrices
+            final_corecoldnumber = np.copy(sorted_features)
+            final_ncorecold = np.copy(ncorecold)
+            final_ncorepix = np.copy(sortedcore_npix)
+            final_ncoldpix = np.copy(sortedcold_npix)
+            final_nwarmpix = np.copy(sortedwarm_npix)
+            final_ncorecoldpix = final_ncorepix + final_ncoldpix
+        else:
+            final_corecoldnumber = np.zeros((ny, nx), dtype=int)
+            final_feature_number = np.zeros((ny, nx), dtype=int)
+            final_ncorecold = 0
+            final_ncorepix = np.zeros((1,), dtype=int)
+            final_ncoldpix = np.zeros((1,), dtype=int)
+            final_nwarmpix = np.zeros((1,), dtype=int)
+            final_ncorecoldpix = np.zeros((1,), dtype=int)
+
+    ###################################################
+    # Get tertiary expansion, if applicable
+    if final_ncorecold > 0:
+        if expand_to_tertiary == 1:
+            final_feature_number = _expand_tertiary(
+                final_corecoldnumber, final_ncorecoldpix, final_ncorecold,
+                field, tertiary_thresh, core_operator, ny, nx,
+            )
+            # Compute tertiary pixel counts
+            final_nwarmpix = np.zeros(len(final_ncorecoldpix), dtype=int)
+            for ifeature in range(1, final_ncorecold + 1):
+                idx = ifeature - 1
+                if idx < len(final_nwarmpix):
+                    total = np.count_nonzero(final_feature_number == ifeature)
+                    final_nwarmpix[idx] = total - final_ncorecoldpix[idx]
+
+        #######################################################################
+        # If not expanding to tertiary, just copy core+secondary data
+        else:
+            final_feature_number = np.copy(final_corecoldnumber)
+
+    ##################################################################
+    # Adjust axes back to original shape if PBC was applied
+    if pbc_direction != "none":
+        # Adjust labeled arrays back to original dimensions
+        final_feature_number = call_adjust_axis(
+            final_feature_number, field_orig, config, padded_x, padded_y,
+        )
+        cloud_type_map = call_adjust_axis(
+            cloud_type_map, field_orig, config, padded_x, padded_y,
+        )
+        final_corecoldnumber = call_adjust_axis(
+            final_corecoldnumber, field_orig, config, padded_x, padded_y,
+        )
+
+        # Update dimensions back to original
+        ny, nx = field_orig.shape
+
+        # Recalculate feature counts based on adjusted labels
+        labels = np.unique(final_feature_number)
+        labels = labels[labels != 0]  # Exclude background label 0
+        final_nclouds = len(labels)
+
+        # Initialize arrays to hold counts
+        final_ncorepix = np.zeros(final_nclouds, dtype=int)
+        final_ncoldpix = np.zeros(final_nclouds, dtype=int)
+        final_nwarmpix = np.zeros(final_nclouds, dtype=int)
+        final_ncorecoldpix = np.zeros(final_nclouds, dtype=int)
+
+        # Create a mapping from label to index
+        label_to_index = {lbl: idx for idx, lbl in enumerate(labels)}
+
+        # Use the original (unpadded) flag arrays for counting
+        for lbl in labels:
+            idx = label_to_index[lbl]
+            label_mask = final_feature_number == lbl
+
+            core_pixels = np.sum(core_flag_orig[label_mask])
+            cold_pixels = np.sum(secondary_flag_orig[label_mask])
+            total_pixels = np.sum(label_mask)
+            warm_pixels = total_pixels - core_pixels - cold_pixels
+
+            final_ncorepix[idx] = core_pixels
+            final_ncoldpix[idx] = cold_pixels
+            final_nwarmpix[idx] = warm_pixels
+            final_ncorecoldpix[idx] = core_pixels + cold_pixels
+    else:
+        # No adjustment needed
+        final_nclouds = final_ncorecold
+
+    ###################################################################
+    # Output data
+    return {
+        "final_nclouds": final_ncorecold,
+        "final_ncorepix": final_ncorepix,
+        "final_ncoldpix": final_ncoldpix,
+        "final_ncorecoldpix": final_ncorecoldpix,
+        "final_nwarmpix": final_nwarmpix,
+        "final_cloudnumber": final_feature_number,
+        "final_cloudtype": cloud_type_map,
+        "final_convcold_cloudnumber": final_corecoldnumber,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Growth methods
+# ---------------------------------------------------------------------------
+
+
+def _grow_bfs(labeled_cores, field, secondary_thresh, core_operator):
+    """
+    Grow labeled cores outward to secondary threshold using BFS (grow_cells).
+
+    This is the original growth method. Pixels beyond the secondary threshold
+    (or NaN) are marked as excluded (-1), and grow_cells expands seeds into
+    the remaining unlabeled (0) pixels using breadth-first search with
+    majority-voting tie-breaking.
+
+    Args:
+        labeled_cores: np.ndarray
+            2D array with labeled core regions (>0), unlabeled (0).
+        field: np.ndarray
+            2D input field.
+        secondary_thresh: float
+            Threshold for secondary region.
+        core_operator: str
+            'lt' or 'gt'.
+
+    Returns:
+        np.ndarray: 2D array with grown labels.
+    """
+    result = np.copy(labeled_cores)
+
+    # Mark excluded pixels (beyond secondary threshold or NaN)
+    if core_operator == "lt":
+        excluded = np.logical_or(field > secondary_thresh, np.isnan(field))
+    else:
+        excluded = np.logical_or(field < secondary_thresh, np.isnan(field))
+
+    temp_storage = result[excluded]
+    result[excluded] = -1
+
+    # Grow seeds outward
+    result = grow_cells(result)
+
+    # Restore excluded pixels
+    result[excluded] = temp_storage
+
+    return result
+
+
+def _grow_edt(labeled_cores, field, secondary_thresh, core_operator):
+    """
+    Grow labeled cores outward to secondary threshold using EDT (Voronoi).
+
+    Each unlabeled pixel within the secondary threshold is assigned the label
+    of its nearest core (Euclidean distance), but only within the same
+    connected component of valid pixels. Disconnected secondary-threshold
+    regions without a core remain unlabeled (0), preserving BFS connectivity
+    semantics so that the downstream isolated-feature pipeline can filter
+    them by size.
+
+    Args:
+        labeled_cores: np.ndarray
+            2D array with labeled core regions (>0), unlabeled (0).
+        field: np.ndarray
+            2D input field.
+        secondary_thresh: float
+            Threshold for secondary region.
+        core_operator: str
+            'lt' or 'gt'.
+
+    Returns:
+        np.ndarray: 2D array with grown labels.
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    result = np.copy(labeled_cores)
+
+    # Determine which pixels are valid for expansion (within secondary threshold)
+    if core_operator == "lt":
+        valid_mask = np.logical_and(field <= secondary_thresh, ~np.isnan(field))
+    else:
+        valid_mask = np.logical_and(field >= secondary_thresh, ~np.isnan(field))
+
+    # Pixels that are seeds (already labeled)
+    seed_mask = labeled_cores > 0
+
+    # If no seeds, return as-is
+    if not np.any(seed_mask):
+        return result
+
+    # Label connected components of valid_mask to respect connectivity.
+    # Only grow within connected components that contain at least one seed.
+    valid_components, n_components = label(valid_mask)
+
+    # Find which connected components contain seeds
+    seeded_component_labels = np.unique(valid_components[seed_mask])
+    # Remove background (0) if present
+    seeded_component_labels = seeded_component_labels[seeded_component_labels > 0]
+
+    if len(seeded_component_labels) == 0:
+        return result
+
+    # Process each seeded connected component independently.
+    # For each component, EDT finds the nearest seed WITHIN that component,
+    # ensuring growth never crosses invalid-pixel gaps.
+    for comp_lbl in seeded_component_labels:
+        comp_mask = valid_components == comp_lbl
+        comp_seeds = seed_mask & comp_mask
+        grow_pixels = comp_mask & ~comp_seeds
+
+        if not np.any(grow_pixels):
+            continue
+
+        # Find bounding box for this component (performance optimization)
+        rows = np.any(comp_mask, axis=1)
+        cols = np.any(comp_mask, axis=0)
+        rmin, rmax = np.where(rows)[0][[0, -1]]
+        cmin, cmax = np.where(cols)[0][[0, -1]]
+
+        # Crop to bounding box
+        sub_seeds = comp_seeds[rmin:rmax + 1, cmin:cmax + 1]
+        sub_grow = grow_pixels[rmin:rmax + 1, cmin:cmax + 1]
+        sub_cores = labeled_cores[rmin:rmax + 1, cmin:cmax + 1]
+
+        # EDT input: only this component's seeds are sources (False).
+        # All other pixels (including non-component pixels within the bbox)
+        # are True. The EDT finds the nearest seed in this component for
+        # every pixel in the sub-array.
+        edt_input = ~sub_seeds
+        _, sub_idx = distance_transform_edt(
+            edt_input, return_distances=True, return_indices=True,
+        )
+
+        # Map each pixel to the label of its nearest seed in this component
+        nearest_sub = sub_cores[sub_idx[0], sub_idx[1]]
+
+        # Assign labels only for non-seed pixels within this component
+        result[rmin:rmax + 1, cmin:cmax + 1][sub_grow] = nearest_sub[sub_grow]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Tertiary expansion
+# ---------------------------------------------------------------------------
+
+
+def _expand_tertiary(
+    final_corecoldnumber, final_ncorecoldpix, final_ncorecold,
+    field, tertiary_thresh, core_operator, ny, nx,
+):
+    """
+    Expand features to tertiary threshold using iterative binary dilation.
+
+    This replicates the original warm anvil expansion logic but generalized
+    for any field direction.
+
+    Args:
+        final_corecoldnumber: np.ndarray
+            2D labeled array (core + secondary).
+        final_ncorecoldpix: np.ndarray
+            Pixel count per feature (core + secondary).
+        final_ncorecold: int
+            Number of features.
+        field: np.ndarray
+            2D input field.
+        tertiary_thresh: float
+            Threshold for tertiary expansion.
+        core_operator: str
+            'lt' or 'gt'.
+        ny, nx: int
+            Dimensions.
+
+    Returns:
+        np.ndarray: 2D labeled array with tertiary expansion.
+    """
+    labeled_expanded = np.copy(final_corecoldnumber)
+    nexpandedpix = np.copy(final_ncorecoldpix)
+
+    keepspreading = 1
+    while keepspreading > 0:
+        keepspreading = 0
+
+        # Loop through each feature
+        for ifeature in range(1, final_ncorecold + 1):
+            # Create map of single feature
+            featuremap = np.copy(labeled_expanded)
+            featuremap[labeled_expanded != ifeature] = 0
+            featuremap[labeled_expanded == ifeature] = 1
+
+            # Find maximum extent of the feature
+            extenty = np.nansum(featuremap, axis=1)
+            extenty = np.array(np.where(extenty > 0))[0, :]
+            miny = extenty[0]
+            maxy = extenty[-1]
+
+            extentx = np.nansum(featuremap, axis=0)
+            extentx = np.array(np.where(extentx > 0))[0, :]
+            minx = extentx[0]
+            maxx = extentx[-1]
+
+            # Subset data to smaller region around feature with 10-pixel buffer
+            if minx <= 10:
+                minx = 0
+            else:
+                minx = minx - 10
+
+            if maxx >= nx - 10:
+                maxx = nx
+            else:
+                maxx = maxx + 11
+
+            if miny <= 10:
+                miny = 0
+            else:
+                miny = miny - 10
+
+            if maxy >= ny - 10:
+                maxy = ny
+            else:
+                maxy = maxy + 11
+
+            fieldsubset = field[miny:maxy, minx:maxx]
+            fullsubset = labeled_expanded[miny:maxy, minx:maxx]
+            featuresubset = featuremap[miny:maxy, minx:maxx]
+
+            # Dilate cloud region (cross-shaped, 1 pixel)
+            dilationstructure = generate_binary_structure(2, 1)
+            dilatedsubset = binary_dilation(
+                featuresubset, structure=dilationstructure, iterations=1,
+            ).astype(featuremap.dtype)
+
+            # Isolate dilated region
+            expansionzone = dilatedsubset - featuresubset
+
+            # Only keep pixels in dilated regions that satisfy tertiary threshold
+            # and are not associated with another feature
+            expansionzone[
+                np.where((expansionzone == 1) & (fullsubset != 0))
+            ] = 0
+            if core_operator == "lt":
+                expansionzone[
+                    np.where((expansionzone == 1) & (fieldsubset >= tertiary_thresh))
+                ] = 0
+            else:
+                expansionzone[
+                    np.where((expansionzone == 1) & (fieldsubset <= tertiary_thresh))
+                ] = 0
+
+            # Find indices of accepted dilated regions
+            expansionindices = np.column_stack(np.where(expansionzone == 1))
+
+            # Add accepted dilated region to the feature map
+            labeled_expanded[
+                expansionindices[:, 0] + miny, expansionindices[:, 1] + minx
+            ] = ifeature
+
+            # Add expanded pixel count
+            nexpandedpix[ifeature - 1] = (
+                len(expansionindices[:, 0]) + nexpandedpix[ifeature - 1]
+            )
+
+            # Track whether any feature is still growing
+            keepspreading = keepspreading + len(
+                np.extract(expansionzone == 1, expansionzone)
+            )
+
+    return labeled_expanded
+
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+
+def find_and_label_cores(smoothed_field, core_thresh, core_operator):
+    """
+    Label cores using ndimage.label.
+
+    Args:
+        smoothed_field: np.ndarray
+            Array containing smoothed field data.
+        core_thresh: float
+            Threshold to define cores.
+        core_operator: str
+            'lt': cores where field < threshold.
+            'gt': cores where field > threshold.
+
+    Returns:
+        labeled_cores: np.ndarray
+            Array containing labeled core numbers.
+        nlabelcores: int
+            Number of labeled cores.
+    """
+    core_mask = np.zeros(smoothed_field.shape, dtype=int)
+    if core_operator == "lt":
+        core_indices = np.where(smoothed_field < core_thresh)
+    else:
+        core_indices = np.where(smoothed_field > core_thresh)
+    ncorepix = np.shape(core_indices)[1]
+    if ncorepix > 0:
+        core_mask[core_indices] = 1
+    labeled_cores, nlabelcores = label(core_mask)
+    return labeled_cores, nlabelcores
+
+
+def smooth_field(field, smooth_size):
+    """
+    Smooth a 2D field with a box convolve filter.
+
+    Args:
+        field: np.ndarray
+            2D input data array.
+        smooth_size: int
+            Width of the Box2DKernel filter.
+
+    Returns:
+        np.ndarray: Smoothed field.
+    """
+    kernel = Box2DKernel(smooth_size)
+    smoothed = convolve(
+        field, kernel, boundary="extend",
+        nan_treatment="interpolate", preserve_nan=True,
+    )
+    return smoothed
+
+
+def classify_pixels_by_thresholds(
+    field, nx, ny, edge_thresh, secondary_thresh, core_thresh,
+    tertiary_thresh, core_operator,
+):
+    """
+    Classify pixels into categories based on thresholds.
+
+    Categories:
+        1 = Core (most intense)
+        2 = Secondary
+        3 = Tertiary
+        4 = Other cloud (between tertiary and edge)
+        5 = Clear (beyond edge)
+
+    For core_operator='lt': lower values are more intense.
+    For core_operator='gt': higher values are more intense.
+
+    Args:
+        field: np.ndarray
+            2D input data array.
+        nx, ny: int
+            Dimensions.
+        edge_thresh: float
+            Outermost boundary threshold.
+        secondary_thresh: float
+            Secondary region threshold.
+        core_thresh: float
+            Core threshold.
+        tertiary_thresh: float
+            Tertiary region threshold.
+        core_operator: str
+            'lt' or 'gt'.
+
+    Returns:
+        secondary_flag: np.ndarray
+            Binary flag for secondary region pixels.
+        core_flag: np.ndarray
+            Binary flag for core pixels.
+        cloud_type_map: np.ndarray
+            Pixel classification (1-5).
+    """
+    cloud_type_map = np.zeros((ny, nx), dtype=int)
+    core_flag = np.zeros((ny, nx), dtype=int)
+    secondary_flag = np.zeros((ny, nx), dtype=int)
+
+    if core_operator == "lt":
+        # Lower values are more intense
+        # Core: field < core_thresh
+        core_indices = np.where(field < core_thresh)
+        ncorepix = np.shape(core_indices)[1]
+        if ncorepix > 0:
+            core_flag[core_indices] = 1
+            cloud_type_map[core_indices] = 1
+
+        # Secondary: core_thresh <= field < secondary_thresh
+        secondary_indices = np.where(
+            (field >= core_thresh) & (field < secondary_thresh)
+        )
+        nsecondarypix = np.shape(secondary_indices)[1]
+        if nsecondarypix > 0:
+            secondary_flag[secondary_indices] = 1
+            cloud_type_map[secondary_indices] = 2
+
+        # Tertiary: secondary_thresh <= field < tertiary_thresh
+        tertiary_indices = np.where(
+            (field >= secondary_thresh) & (field < tertiary_thresh)
+        )
+        ntertiarypix = np.shape(tertiary_indices)[1]
+        if ntertiarypix > 0:
+            cloud_type_map[tertiary_indices] = 3
+
+        # Other: tertiary_thresh <= field < edge_thresh
+        other_indices = np.where(
+            (field >= tertiary_thresh) & (field < edge_thresh)
+        )
+        notherpix = np.shape(other_indices)[1]
+        if notherpix > 0:
+            cloud_type_map[other_indices] = 4
+
+        # Clear: field >= edge_thresh
+        clear_indices = np.where(field >= edge_thresh)
+        nclearpix = np.shape(clear_indices)[1]
+        if nclearpix > 0:
+            cloud_type_map[clear_indices] = 5
+
+    else:
+        # Higher values are more intense (e.g., reflectivity)
+        # Core: field > core_thresh
+        core_indices = np.where(field > core_thresh)
+        ncorepix = np.shape(core_indices)[1]
+        if ncorepix > 0:
+            core_flag[core_indices] = 1
+            cloud_type_map[core_indices] = 1
+
+        # Secondary: secondary_thresh < field <= core_thresh
+        secondary_indices = np.where(
+            (field <= core_thresh) & (field > secondary_thresh)
+        )
+        nsecondarypix = np.shape(secondary_indices)[1]
+        if nsecondarypix > 0:
+            secondary_flag[secondary_indices] = 1
+            cloud_type_map[secondary_indices] = 2
+
+        # Tertiary: tertiary_thresh < field <= secondary_thresh
+        tertiary_indices = np.where(
+            (field <= secondary_thresh) & (field > tertiary_thresh)
+        )
+        ntertiarypix = np.shape(tertiary_indices)[1]
+        if ntertiarypix > 0:
+            cloud_type_map[tertiary_indices] = 3
+
+        # Other: edge_thresh < field <= tertiary_thresh
+        other_indices = np.where(
+            (field <= tertiary_thresh) & (field > edge_thresh)
+        )
+        notherpix = np.shape(other_indices)[1]
+        if notherpix > 0:
+            cloud_type_map[other_indices] = 4
+
+        # Clear: field <= edge_thresh
+        clear_indices = np.where(field <= edge_thresh)
+        nclearpix = np.shape(clear_indices)[1]
+        if nclearpix > 0:
+            cloud_type_map[clear_indices] = 5
+
+    return secondary_flag, core_flag, cloud_type_map
