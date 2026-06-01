@@ -584,8 +584,9 @@ def _grow_edt(labeled_cores, field, secondary_thresh, core_operator):
         return result
 
     # Label connected components of valid_mask to respect connectivity.
-    # Only grow within connected components that contain at least one seed.
-    valid_components, n_components = label(valid_mask)
+    # Only grow within 8-connected components that contain at least one seed.
+    struct_8conn = np.ones((3, 3), dtype=bool)
+    valid_components, n_components = label(valid_mask, structure=struct_8conn)
 
     # Find which connected components contain seeds
     seeded_component_labels = np.unique(valid_components[seed_mask])
