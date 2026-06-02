@@ -327,15 +327,15 @@ def idclouds_tbpf(
 
                     ######################################################
                     # Separate output into the separate variables
-                    final_nclouds = int(clouddata["final_nclouds"])
-                    # final_ncorepix = clouddata["final_ncorepix"] not used
-                    # final_ncoldpix = clouddata["final_ncoldpix"] not used
-                    final_ncorecoldpix = clouddata["final_ncorecoldpix"]
-                    # final_nwarmpix = clouddata["final_nwarmpix"] not used
-                    final_cloudtype = np.array([clouddata["final_cloudtype"]])
-                    final_cloudnumber = np.array([clouddata["final_cloudnumber"]])
+                    final_nclouds = int(clouddata["final_nFeature"])
+                    # final_Core_npix = clouddata["final_Core_npix"] not used
+                    # final_Secondary_npix = clouddata["final_Secondary_npix"] not used
+                    final_ncorecoldpix = clouddata["final_CoreSecondary_npix"]
+                    # final_Tertiary_npix = clouddata["final_Tertiary_npix"] not used
+                    final_cloudtype = np.array([clouddata["final_Feature_Type"]])
+                    final_cloudnumber = np.array([clouddata["final_Feature_Number"]])
                     final_convcold_cloudnumber = np.array(
-                        [clouddata["final_convcold_cloudnumber"]]
+                        [clouddata["final_CoreSecondary_Number"]]
                     )
 
                     # Option to linkpf

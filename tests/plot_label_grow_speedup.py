@@ -223,7 +223,7 @@ def time_methods(tb_arrays, demo_spec, outdir):
         bfs_t = timings["bfs"][-1]
         edt_t = timings["edt"][-1]
         speedup = bfs_t / max(edt_t, 1e-9)
-        n_features = result_bfs["final_nclouds"]
+        n_features = result_bfs["final_nFeature"]
         print(
             f"    {fname}: {ny}x{nx}, {n_features} features, "
             f"BFS={bfs_t:.3f}s, EDT={edt_t:.3f}s, speedup={speedup:.1f}x"
@@ -238,16 +238,16 @@ def time_methods(tb_arrays, demo_spec, outdir):
     for fname, result in results_bfs:
         np.savez_compressed(
             os.path.join(bfs_dir, fname.replace(".nc", ".npz")),
-            cloudnumber=result["final_cloudnumber"],
-            convcold_cloudnumber=result["final_convcold_cloudnumber"],
-            cloudtype=result["final_cloudtype"],
+            cloudnumber=result["final_Feature_Number"],
+            convcold_cloudnumber=result["final_CoreSecondary_Number"],
+            cloudtype=result["final_Feature_Type"],
         )
     for fname, result in results_edt:
         np.savez_compressed(
             os.path.join(edt_dir, fname.replace(".nc", ".npz")),
-            cloudnumber=result["final_cloudnumber"],
-            convcold_cloudnumber=result["final_convcold_cloudnumber"],
-            cloudtype=result["final_cloudtype"],
+            cloudnumber=result["final_Feature_Number"],
+            convcold_cloudnumber=result["final_CoreSecondary_Number"],
+            cloudtype=result["final_Feature_Type"],
         )
 
     print(f"  Saved cloudid arrays to {bfs_dir} and {edt_dir}")

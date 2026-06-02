@@ -390,8 +390,8 @@ class TestLabelGrowEdtVsBfs:
                 growth_method="edt",
             )
 
-            n_bfs = result_bfs["final_nclouds"]
-            n_edt = result_edt["final_nclouds"]
+            n_bfs = result_bfs["final_nFeature"]
+            n_edt = result_edt["final_nFeature"]
             assert n_bfs == n_edt, (
                 f"Feature count mismatch for {os.path.basename(filepath)}: "
                 f"BFS={n_bfs}, EDT={n_edt}"
@@ -441,8 +441,8 @@ class TestLabelGrowEdtVsBfs:
                 growth_method="edt",
             )
 
-            bfs_labels = result_bfs["final_convcold_cloudnumber"]
-            edt_labels = result_edt["final_convcold_cloudnumber"]
+            bfs_labels = result_bfs["final_CoreSecondary_Number"]
+            edt_labels = result_edt["final_CoreSecondary_Number"]
 
             if not np.any(bfs_labels > 0) and not np.any(edt_labels > 0):
                 continue
@@ -509,8 +509,8 @@ class TestLabelGrowEdtVsBfs:
                 growth_method="edt",
             )
 
-            bfs_labels = result_bfs["final_convcold_cloudnumber"]
-            edt_labels = result_edt["final_convcold_cloudnumber"]
+            bfs_labels = result_bfs["final_CoreSecondary_Number"]
+            edt_labels = result_edt["final_CoreSecondary_Number"]
 
             # Use feature-matched diff: label-number swaps do not count as
             # real spatial differences.
@@ -593,15 +593,15 @@ class TestLabelGrowOperatorGt:
         )
 
         # Should detect at least 2 features
-        assert result["final_nclouds"] >= 2, (
+        assert result["final_nFeature"] >= 2, (
             f"Expected >= 2 features, got {result['final_nclouds']}"
         )
 
         # Core pixels should be present
-        assert np.sum(result["final_ncorepix"]) > 0, "No core pixels detected"
+        assert np.sum(result["final_Core_npix"]) > 0, "No core pixels detected"
 
         # Labels should be non-zero where field is strong
-        cloud_number = result["final_cloudnumber"]
+        cloud_number = result["final_Feature_Number"]
         # The core regions should be labeled
         assert np.all(cloud_number[25:35, 25:35] > 0), "Core 1 not labeled"
         assert np.all(cloud_number[65:75, 65:75] > 0), "Core 2 not labeled"
@@ -632,14 +632,14 @@ class TestLabelGrowOperatorGt:
         )
 
         # Same number of features
-        assert result_bfs["final_nclouds"] == result_edt["final_nclouds"], (
+        assert result_bfs["final_nFeature"] == result_edt["final_nFeature"], (
             f"Feature count: BFS={result_bfs['final_nclouds']}, "
             f"EDT={result_edt['final_nclouds']}"
         )
 
         # High pixel agreement
-        bfs_labels = result_bfs["final_cloudnumber"]
-        edt_labels = result_edt["final_cloudnumber"]
+        bfs_labels = result_bfs["final_Feature_Number"]
+        edt_labels = result_edt["final_Feature_Number"]
         agreement = np.count_nonzero(bfs_labels == edt_labels) / bfs_labels.size
         assert agreement > 0.95, f"Agreement only {agreement:.3f}"
 
@@ -684,13 +684,13 @@ class TestLabelGrowOperatorGt:
         )
 
         # Same number of features
-        assert result_lt["final_nclouds"] == result_gt["final_nclouds"], (
+        assert result_lt["final_nFeature"] == result_gt["final_nFeature"], (
             f"lt={result_lt['final_nclouds']}, gt={result_gt['final_nclouds']}"
         )
 
         # Same labeled pixels (labels might be in different order if sizes differ)
-        lt_labeled = result_lt["final_cloudnumber"] > 0
-        gt_labeled = result_gt["final_cloudnumber"] > 0
+        lt_labeled = result_lt["final_Feature_Number"] > 0
+        gt_labeled = result_gt["final_Feature_Number"] > 0
         assert np.array_equal(lt_labeled, gt_labeled), (
             "Labeled pixel masks differ between lt and inverted gt"
         )

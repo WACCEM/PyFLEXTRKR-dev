@@ -136,7 +136,7 @@ def label_and_grow_features(
     (
         secondary_flag,
         core_flag,
-        cloud_type_map,
+        feature_type_map,
     ) = classify_pixels_by_thresholds(
         field, nx, ny, edge_thresh, secondary_thresh, core_thresh,
         tertiary_thresh, core_operator,
@@ -149,13 +149,13 @@ def label_and_grow_features(
         field_orig = np.copy(field)
         core_flag_orig = np.copy(core_flag)
         secondary_flag_orig = np.copy(secondary_flag)
-        cloud_type_map_orig = np.copy(cloud_type_map)
+        feature_type_map_orig = np.copy(feature_type_map)
 
         # Step 1: Extend and pad data
         field, padded_x, padded_y = pad_and_extend(field, config)
         core_flag, _, _ = pad_and_extend(core_flag, config)
         secondary_flag, _, _ = pad_and_extend(secondary_flag, config)
-        cloud_type_map, _, _ = pad_and_extend(cloud_type_map, config)
+        feature_type_map, _, _ = pad_and_extend(feature_type_map, config)
         # Extend pixel_area if it's 2D
         if use_grid_area:
             pixel_area, _, _ = pad_and_extend(pixel_area, config)
@@ -167,7 +167,7 @@ def label_and_grow_features(
         field_orig = field
         core_flag_orig = core_flag
         secondary_flag_orig = secondary_flag
-        cloud_type_map_orig = cloud_type_map
+        feature_type_map_orig = feature_type_map
 
     # Smooth field data
     smoothed_field = smooth_field(field, smooth_size)
@@ -277,11 +277,11 @@ def label_and_grow_features(
         sortedcombined_npix = np.copy(labelcombined_npix[order])
         sortedcombined_number1d = np.copy(labelcombined_number1d[order])
 
-        # Re-number clouds
+        # Re-number features
         sortedcombined_number2d = np.zeros((ny, nx), dtype=int)
-        final_ncorepix = np.ones(ncombined, dtype=int) * -9999
-        final_ncoldpix = np.ones(ncombined, dtype=int) * -9999
-        final_nwarmpix = np.ones(ncombined, dtype=int) * -9999
+        final_Core_npix = np.ones(ncombined, dtype=int) * -9999
+        final_Secondary_npix = np.ones(ncombined, dtype=int) * -9999
+        final_Tertiary_npix = np.ones(ncombined, dtype=int) * -9999
         featurecount = 0
         for ifeature in range(0, ncombined):
             # Find pixels that have matching number
@@ -294,55 +294,55 @@ def label_and_grow_features(
                 featurecount = featurecount + 1
                 sortedcombined_number2d[feature_indices] = featurecount
 
-                final_ncorepix[featurecount - 1] = np.nansum(
+                final_Core_npix[featurecount - 1] = np.nansum(
                     core_flag[feature_indices]
                 )
-                final_ncoldpix[featurecount - 1] = np.nansum(
+                final_Secondary_npix[featurecount - 1] = np.nansum(
                     secondary_flag[feature_indices]
                 )
 
         ##############################################
         # Save final matrices
-        final_corecoldnumber = np.copy(sortedcombined_number2d)
-        final_ncorecold = np.copy(ncombined)
+        final_CoreSecondary_Number = np.copy(sortedcombined_number2d)
+        final_nFeature = np.copy(ncombined)
 
-        final_ncorepix = final_ncorepix[0:featurecount]
-        final_ncoldpix = final_ncoldpix[0:featurecount]
+        final_Core_npix = final_Core_npix[0:featurecount]
+        final_Secondary_npix = final_Secondary_npix[0:featurecount]
 
-        final_ncorecoldpix = final_ncorepix + final_ncoldpix
+        final_CoreSecondary_npix = final_Core_npix + final_Secondary_npix
 
     ######################################################################
     # If no core is found, use secondary threshold to identify features
     else:
         # Label connected secondary-threshold regions
-        corecold_number2d, ncorecold = label(secondary_flag_orig)
+        feature_number2d, nFeature = label(secondary_flag_orig)
 
         ##########################################################
         # Loop through features and only keep those exceeding area threshold
-        if ncorecold > 0:
+        if nFeature > 0:
             labeled_core_secondary = np.zeros((ny, nx), dtype=int)
-            labelcore_npix = np.ones(ncorecold, dtype=int) * -9999
-            labelcold_npix = np.ones(ncorecold, dtype=int) * -9999
-            labelwarm_npix = np.ones(ncorecold, dtype=int) * -9999
+            labelcore_npix = np.ones(nFeature, dtype=int) * -9999
+            labelSecondary_npix = np.ones(nFeature, dtype=int) * -9999
+            labelTertiary_npix = np.ones(nFeature, dtype=int) * -9999
             featurecount = 0
 
-            for ifeature in range(1, ncorecold + 1):
-                feature_indices = np.where(corecold_number2d == ifeature)
+            for ifeature in range(1, nFeature + 1):
+                feature_indices = np.where(feature_number2d == ifeature)
                 nfeatureindices = np.shape(feature_indices)[1]
 
                 if nfeatureindices > 0:
                     temp_core = np.copy(core_flag[feature_indices])
                     temp_corenpix = np.nansum(temp_core)
 
-                    temp_cold = np.copy(secondary_flag[feature_indices])
-                    temp_coldnpix = np.nansum(temp_cold)
+                    temp_secondary = np.copy(secondary_flag[feature_indices])
+                    temp_secondary_npix = np.nansum(temp_secondary)
 
                     # Check if feature exceeds area threshold
                     if use_grid_area:
                         feature_area = np.sum(pixel_area[feature_indices])
                         passes_thresh = feature_area >= area_thresh
                     else:
-                        passes_thresh = temp_corenpix + temp_coldnpix >= nthresh
+                        passes_thresh = temp_corenpix + temp_secondary_npix >= nthresh
                     if passes_thresh:
                         featurecount = featurecount + 1
 
@@ -350,87 +350,87 @@ def label_and_grow_features(
                             featurecount
                         )
                         labelcore_npix[featurecount - 1] = np.copy(temp_corenpix)
-                        labelcold_npix[featurecount - 1] = np.copy(temp_coldnpix)
+                        labelSecondary_npix[featurecount - 1] = np.copy(temp_secondary_npix)
 
             ###############################
             # Update feature count
-            ncorecold = np.copy(featurecount)
-            labelcorecold_number1d = (
-                np.array(np.where(labelcore_npix + labelcold_npix > 0))[0, :] + 1
+            nFeature = np.copy(featurecount)
+            labelFeature_number1d = (
+                np.array(np.where(labelcore_npix + labelSecondary_npix > 0))[0, :] + 1
             )
 
             ###########################################################
             # Reduce size of final arrays so only as long as number of valid features
-            if ncorecold > 0:
-                labelcore_npix = labelcore_npix[0:ncorecold]
-                labelcold_npix = labelcold_npix[0:ncorecold]
-                labelwarm_npix = labelwarm_npix[0:ncorecold]
+            if nFeature > 0:
+                labelcore_npix = labelcore_npix[0:nFeature]
+                labelSecondary_npix = labelSecondary_npix[0:nFeature]
+                labelTertiary_npix = labelTertiary_npix[0:nFeature]
 
                 ##########################################################
                 # Reorder based on size, largest to smallest
-                labelcorecold_npix = labelcore_npix + labelcold_npix + labelwarm_npix
-                order = np.argsort(labelcorecold_npix)
+                labelFeature_npix = labelcore_npix + labelSecondary_npix + labelTertiary_npix
+                order = np.argsort(labelFeature_npix)
                 order = order[::-1]
                 sortedcore_npix = np.copy(labelcore_npix[order])
-                sortedcold_npix = np.copy(labelcold_npix[order])
-                sortedwarm_npix = np.copy(labelwarm_npix[order])
+                sortedSecondary_npix = np.copy(labelSecondary_npix[order])
+                sortedTertiary_npix = np.copy(labelTertiary_npix[order])
 
-                sortedcorecold_npix = np.add(sortedcore_npix, sortedcold_npix)
+                sortedFeature_npix = np.add(sortedcore_npix, sortedSecondary_npix)
 
                 # Re-number features
-                sortedcorecold_number1d = np.copy(labelcorecold_number1d[order])
+                sortedFeature_number1d = np.copy(labelFeature_number1d[order])
 
                 sorted_features = np.zeros((ny, nx), dtype=int)
-                corecoldstep = 0
-                for isortedcorecold in range(0, ncorecold):
-                    sortedcorecold_indices = np.where(
+                featureStep = 0
+                for isortedFeature in range(0, nFeature):
+                    sortedFeature_indices = np.where(
                         labeled_core_secondary
-                        == sortedcorecold_number1d[isortedcorecold]
+                        == sortedFeature_number1d[isortedFeature]
                     )
-                    nsortedcorecoldindices = np.shape(sortedcorecold_indices)[1]
-                    if nsortedcorecoldindices == sortedcorecold_npix[isortedcorecold]:
-                        corecoldstep = corecoldstep + 1
-                        sorted_features[sortedcorecold_indices] = np.copy(
-                            corecoldstep
+                    nsortedFeatureIndices = np.shape(sortedFeature_indices)[1]
+                    if nsortedFeatureIndices == sortedFeature_npix[isortedFeature]:
+                        featureStep = featureStep + 1
+                        sorted_features[sortedFeature_indices] = np.copy(
+                            featureStep
                         )
 
             ##############################################
             # Save final matrices
-            final_corecoldnumber = np.copy(sorted_features)
-            final_ncorecold = np.copy(ncorecold)
-            final_ncorepix = np.copy(sortedcore_npix)
-            final_ncoldpix = np.copy(sortedcold_npix)
-            final_nwarmpix = np.copy(sortedwarm_npix)
-            final_ncorecoldpix = final_ncorepix + final_ncoldpix
+            final_CoreSecondary_Number = np.copy(sorted_features)
+            final_nFeature = np.copy(nFeature)
+            final_Core_npix = np.copy(sortedcore_npix)
+            final_Secondary_npix = np.copy(sortedSecondary_npix)
+            final_Tertiary_npix = np.copy(sortedTertiary_npix)
+            final_CoreSecondary_npix = final_Core_npix + final_Secondary_npix
         else:
-            final_corecoldnumber = np.zeros((ny, nx), dtype=int)
+            final_CoreSecondary_Number = np.zeros((ny, nx), dtype=int)
             final_feature_number = np.zeros((ny, nx), dtype=int)
-            final_ncorecold = 0
-            final_ncorepix = np.zeros((1,), dtype=int)
-            final_ncoldpix = np.zeros((1,), dtype=int)
-            final_nwarmpix = np.zeros((1,), dtype=int)
-            final_ncorecoldpix = np.zeros((1,), dtype=int)
+            final_nFeature = 0
+            final_Core_npix = np.zeros((1,), dtype=int)
+            final_Secondary_npix = np.zeros((1,), dtype=int)
+            final_Tertiary_npix = np.zeros((1,), dtype=int)
+            final_CoreSecondary_npix = np.zeros((1,), dtype=int)
 
     ###################################################
     # Get tertiary expansion, if applicable
-    if final_ncorecold > 0:
+    if final_nFeature > 0:
         if expand_to_tertiary == 1:
             final_feature_number = _expand_tertiary(
-                final_corecoldnumber, final_ncorecoldpix, final_ncorecold,
+                final_CoreSecondary_Number, final_CoreSecondary_npix, final_nFeature,
                 field, tertiary_thresh, core_operator, ny, nx,
             )
             # Compute tertiary pixel counts
-            final_nwarmpix = np.zeros(len(final_ncorecoldpix), dtype=int)
-            for ifeature in range(1, final_ncorecold + 1):
+            final_Tertiary_npix = np.zeros(len(final_CoreSecondary_npix), dtype=int)
+            for ifeature in range(1, final_nFeature + 1):
                 idx = ifeature - 1
-                if idx < len(final_nwarmpix):
+                if idx < len(final_Tertiary_npix):
                     total = np.count_nonzero(final_feature_number == ifeature)
-                    final_nwarmpix[idx] = total - final_ncorecoldpix[idx]
+                    final_Tertiary_npix[idx] = total - final_CoreSecondary_npix[idx]
 
         #######################################################################
         # If not expanding to tertiary, just copy core+secondary data
         else:
-            final_feature_number = np.copy(final_corecoldnumber)
+            final_feature_number = np.copy(final_CoreSecondary_Number)
 
     ##################################################################
     # Adjust axes back to original shape if PBC was applied
@@ -439,11 +439,11 @@ def label_and_grow_features(
         final_feature_number = call_adjust_axis(
             final_feature_number, field_orig, config, padded_x, padded_y,
         )
-        cloud_type_map = call_adjust_axis(
-            cloud_type_map, field_orig, config, padded_x, padded_y,
+        feature_type_map = call_adjust_axis(
+            feature_type_map, field_orig, config, padded_x, padded_y,
         )
-        final_corecoldnumber = call_adjust_axis(
-            final_corecoldnumber, field_orig, config, padded_x, padded_y,
+        final_CoreSecondary_Number = call_adjust_axis(
+            final_CoreSecondary_Number, field_orig, config, padded_x, padded_y,
         )
 
         # Update dimensions back to original
@@ -452,13 +452,13 @@ def label_and_grow_features(
         # Recalculate feature counts based on adjusted labels
         labels = np.unique(final_feature_number)
         labels = labels[labels != 0]  # Exclude background label 0
-        final_nclouds = len(labels)
+        final_nFeature = len(labels)
 
         # Initialize arrays to hold counts
-        final_ncorepix = np.zeros(final_nclouds, dtype=int)
-        final_ncoldpix = np.zeros(final_nclouds, dtype=int)
-        final_nwarmpix = np.zeros(final_nclouds, dtype=int)
-        final_ncorecoldpix = np.zeros(final_nclouds, dtype=int)
+        final_Core_npix = np.zeros(final_nFeature, dtype=int)
+        final_Secondary_npix = np.zeros(final_nFeature, dtype=int)
+        final_Tertiary_npix = np.zeros(final_nFeature, dtype=int)
+        final_CoreSecondary_npix = np.zeros(final_nFeature, dtype=int)
 
         # Create a mapping from label to index
         label_to_index = {lbl: idx for idx, lbl in enumerate(labels)}
@@ -473,25 +473,25 @@ def label_and_grow_features(
             total_pixels = np.sum(label_mask)
             warm_pixels = total_pixels - core_pixels - cold_pixels
 
-            final_ncorepix[idx] = core_pixels
-            final_ncoldpix[idx] = cold_pixels
-            final_nwarmpix[idx] = warm_pixels
-            final_ncorecoldpix[idx] = core_pixels + cold_pixels
+            final_Core_npix[idx] = core_pixels
+            final_Secondary_npix[idx] = cold_pixels
+            final_Tertiary_npix[idx] = warm_pixels
+            final_CoreSecondary_npix[idx] = core_pixels + cold_pixels
     else:
         # No adjustment needed
-        final_nclouds = final_ncorecold
+        final_nFeature = final_nFeature
 
     ###################################################################
     # Output data
     return {
-        "final_nclouds": final_ncorecold,
-        "final_ncorepix": final_ncorepix,
-        "final_ncoldpix": final_ncoldpix,
-        "final_ncorecoldpix": final_ncorecoldpix,
-        "final_nwarmpix": final_nwarmpix,
-        "final_cloudnumber": final_feature_number,
-        "final_cloudtype": cloud_type_map,
-        "final_convcold_cloudnumber": final_corecoldnumber,
+        "final_nFeature": final_nFeature,
+        "final_Core_npix": final_Core_npix,
+        "final_Secondary_npix": final_Secondary_npix,
+        "final_CoreSecondary_npix": final_CoreSecondary_npix,
+        "final_Tertiary_npix": final_Tertiary_npix,
+        "final_Feature_Number": final_feature_number,
+        "final_Feature_Type": feature_type_map,
+        "final_CoreSecondary_Number": final_CoreSecondary_Number,
     }
 
 
