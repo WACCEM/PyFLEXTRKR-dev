@@ -79,7 +79,9 @@ def idfeature_driver(config):
             # TODO: make file search more robust
             in_file = sorted(glob.glob(f"{healpix_path}{healpix_basename}*.zarr"))[0]
             # Read in Zarr data directly
-            ds = xr.open_zarr(in_file)
+            # consolidated=None: auto-detect v2 (.zmetadata) or v3 (zarr.json) consolidated metadata
+            zarr_consolidated = config.get("zarr_consolidated", None)
+            ds = xr.open_zarr(in_file, consolidated=zarr_consolidated)
 
         # Make a list of required variables based on feature_type
         if "tb_pf" in feature_type:

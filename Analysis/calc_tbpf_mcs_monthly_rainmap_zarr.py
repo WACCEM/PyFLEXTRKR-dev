@@ -186,9 +186,9 @@ if __name__ == "__main__":
         sys.exit('Code will exit now.')
 
     # Read mask Zarr store, subset times
-    ds_m = xr.open_zarr(mask_file).sel(time=slice(start_datetime, end_datetime))
+    ds_m = xr.open_zarr(mask_file, consolidated=None).sel(time=slice(start_datetime, end_datetime))
     # Read Tb/precipitation Zarr store, subset times
-    ds_p = xr.open_zarr(tbpr_file).sel(time=slice(start_datetime, end_datetime))
+    ds_p = xr.open_zarr(tbpr_file, consolidated=None).sel(time=slice(start_datetime, end_datetime))
     # Merge datasets
     ds = xr.merge([ds_p, ds_m], combine_attrs='override')
     # import pdb; pdb.set_trace()

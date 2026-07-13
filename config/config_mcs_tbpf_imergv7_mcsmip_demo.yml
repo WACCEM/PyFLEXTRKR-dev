@@ -13,12 +13,12 @@ run_matchpf : True           # parallel
 run_robustmcs : True         # serial
 run_mapfeature : True        # parallel
 run_speed : True             # parallel
-run_remap_healpix: False       # parallel
+run_remap_healpix: True       # parallel
 
 # Parallel processing set up
 # run_parallel: 1 (local cluster), 2 (Dask MPI)
 run_parallel: 1
-nprocesses : 128  # Number of processors to use if run_parallel=1
+nprocesses : 48  # Number of processors to use if run_parallel=1
 dask_tmp_dir: /tmp  # Dask temporary directory if run_parallel=1
 timeout: 3600  # [seconds] Dask timeout limit
 
@@ -169,6 +169,7 @@ max_speed_for_trajectory_smoothing: 40  # [m/s] Max speed for smoothing lat/lon 
 
 # MCSMIP standardized outputs (Zarr)
 overwrite_zarr: True  # Overwrite existing Zarr files
+zarr_format: 3  # Zarr format version: 2 (v2, backward compatible) or 3 (v3, default)
 # Zarr chunk sizes (default: auto)
 chunksize_time: 24  # time
 chunksize_lat: 240  # y

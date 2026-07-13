@@ -2,10 +2,11 @@ import xarray as xr
 import os
 import glob
 import time
+import warnings
 import logging
 from pyflextrkr.ft_utilities import setup_logging
 
-def convert_mask_to_zarr(config, output_preset='mask'):
+def convert_mask_to_zarr(config, output_preset='full'):
     """
     Convert pixel-level tracking mask NetCDF files to Zarr format.
 
@@ -54,7 +55,7 @@ def convert_mask_to_zarr(config, output_preset='mask'):
     
     # Build output filename
     out_zarr = f"{outpath}{out_filebase}{startdate}_{enddate}.zarr"
-    
+
     # Check if output exists and should be overwritten
     overwrite = preset_config.get("overwrite", config.get("overwrite_zarr", True))
     if os.path.exists(out_zarr) and not overwrite:
@@ -65,6 +66,8 @@ def convert_mask_to_zarr(config, output_preset='mask'):
     chunksize_time = config.get("chunksize_time", "auto")
     chunksize_lat = config.get("chunksize_lat", "auto")
     chunksize_lon = config.get("chunksize_lon", "auto")
+    # Zarr format version: 2 (v2, backward compatible) or 3 (v3, default)
+    zarr_format = config.get("zarr_format", 3)
     
     # Output variable list
     # Required coordinate variables
@@ -153,11 +156,12 @@ def convert_mask_to_zarr(config, output_preset='mask'):
     logger.info(f"Starting Zarr write to: {out_zarr}")
     write_task = chunked_ds.to_zarr(
         out_zarr,
-        mode="w",        
+        mode="w",
         consolidated=True,  # Enable for better performance when reading
-        compute=False      # Create a delayed task
+        zarr_format=zarr_format,
+        compute=False,     # Create a delayed task
     )
-    
+
     # Compute the task, with progress reporting
     if client:
         from dask.distributed import progress
@@ -166,13 +170,13 @@ def convert_mask_to_zarr(config, output_preset='mask'):
         shuffle_logger = logging.getLogger("distributed.shuffle._scheduler_plugin")
         original_level = shuffle_logger.level
         shuffle_logger.setLevel(logging.ERROR)  # Only show errors, not warnings
-        
+
         try:
             # Compute with progress tracking
             future = client.compute(write_task)
             logger.info("Writing to Zarr (this may take a while)...")
             progress(future)  # Shows a progress bar in notebooks or detailed progress in terminals
-            
+
             result = future.result()
             logger.info("Zarr write completed successfully")
         except Exception as e:
@@ -183,7 +187,13 @@ def convert_mask_to_zarr(config, output_preset='mask'):
             shuffle_logger.setLevel(original_level)
     else:
         # Compute locally if no client
-        write_task.compute()
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Consolidated metadata",
+                category=UserWarning,
+            )
+            write_task.compute()
     
     logger.info(f"Conversion to Zarr complete: {out_zarr}")
 

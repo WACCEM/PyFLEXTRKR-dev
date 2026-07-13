@@ -44,6 +44,12 @@ if __name__ == '__main__':
         cluster = LocalCluster(n_workers=config['nprocesses'], threads_per_worker=1)
         client = Client(cluster)
         client.run(setup_logging)
+        client.wait_for_workers(config["nprocesses"], timeout=60)
+        # Report requested vs actual workers for easier diagnostics on shared systems.
+        actual_workers = len(client.scheduler_info().get('workers', {}))
+        logger.info(
+            f"LocalCluster requested n_workers={config['nprocesses']}, actual connected workers={actual_workers}"
+        )
     elif run_parallel == 2:
         # Dask scheduler
         # Get the scheduler filename from input argument
@@ -54,6 +60,8 @@ if __name__ == '__main__':
             client = Client(scheduler_file=scheduler_file, timeout=timeout)
             client.run(setup_logging)
             logger.info("Successfully connected to Dask scheduler")
+            actual_workers = len(client.scheduler_info().get('workers', {}))
+            logger.info(f"Connected scheduler currently has {actual_workers} workers")
         except Exception as e:
             logger.error(f"Failed to connect to Dask scheduler: {e}")
             sys.exit(1)
@@ -103,7 +111,9 @@ if __name__ == '__main__':
 
     # Step 10 - Remap MCS mask to HEALPix grid
     if config.get('run_remap_healpix', False):
-        remap_to_healpix_zarr(config)
+        # Scope this workaround to remap only so earlier steps keep default rechunk behavior.
+        with dask.config.set({"array.rechunk.method": "tasks"}):
+            remap_to_healpix_zarr(config)
 
     # Clean up resources
     if run_parallel >= 1:
