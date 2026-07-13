@@ -23,7 +23,7 @@ authors:
   given-names: "Zhixiao"
   orcid: ""
 title: "PyFLEXTRKR: a flexible feature tracking Python software for convective cloud analysis"
-version: 2023.10.0
+version: 2026.07.0
 doi: 10.5194/gmd-16-2753-2023
-date-released: 2022-12-12
+date-released: 2026-07-12
 url: "https://github.com/FlexTRKR/PyFLEXTRKR"

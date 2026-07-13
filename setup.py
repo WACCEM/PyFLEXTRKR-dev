@@ -34,7 +34,7 @@ setuptools.setup(
         "Topic :: Scientific/Engineering :: Atmospheric Science"
     ],
     install_requires=required,
-    python_requires='>=3.10',
+    python_requires='>=3.11',
     include_package_data=True,
     project_urls={
         "Bug Tracker": "https://github.com/FlexTRKR/PyFLEXTRKR/issues",
