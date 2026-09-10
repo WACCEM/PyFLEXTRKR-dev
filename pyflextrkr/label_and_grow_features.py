@@ -87,15 +87,15 @@ def label_and_grow_features(
 
     Returns:
         dict: Dictionary containing:
-            - final_nclouds (int): Number of labeled features.
-            - final_ncorepix (np.ndarray): Core pixel count per feature.
-            - final_ncoldpix (np.ndarray): Secondary region pixel count per feature.
-            - final_ncorecoldpix (np.ndarray): Core + secondary pixel count.
-            - final_nwarmpix (np.ndarray): Tertiary region pixel count per feature.
-            - final_cloudnumber (np.ndarray): 2D labeled feature array (with
+            - final_nFeature (int): Number of labeled features.
+            - final_Core_npix (np.ndarray): Core pixel count per feature.
+            - final_Secondary_npix (np.ndarray): Secondary region pixel count per feature.
+            - final_CoreSecondary_npix (np.ndarray): Core + secondary pixel count.
+            - final_Tertiary_npix (np.ndarray): Tertiary region pixel count per feature.
+            - final_Feature_Number (np.ndarray): 2D labeled feature array (with
               tertiary expansion if enabled).
-            - final_cloudtype (np.ndarray): 2D pixel classification array.
-            - final_convcold_cloudnumber (np.ndarray): 2D labeled feature array
+            - final_Feature_Type (np.ndarray): 2D pixel classification array.
+            - final_CoreSecondary_Number (np.ndarray): 2D labeled feature array
               (core + secondary only, no tertiary).
     """
     logger = logging.getLogger(__name__)
@@ -219,10 +219,10 @@ def label_and_grow_features(
             cloud_indices, cloud_sizes = np.unique(
                 labeled_core_secondary, return_counts=True,
             )
-            for index in cloud_indices:
+            for i, index in enumerate(cloud_indices):
                 if index == 0:
                     continue
-                labeled_core_secondary_npix[index - 1] = cloud_sizes[index]
+                labeled_core_secondary_npix[index - 1] = cloud_sizes[i]
 
         ############################################################
         # Label secondary regions that do not have a core
@@ -304,7 +304,13 @@ def label_and_grow_features(
         ##############################################
         # Save final matrices
         final_CoreSecondary_Number = np.copy(sortedcombined_number2d)
-        final_nFeature = np.copy(ncombined)
+        # Use featurecount (post size-consistency-filter), not ncombined
+        # (pre-filter): a rejected feature at the check above means
+        # ncombined can exceed featurecount, which previously made
+        # final_nFeature bigger than the (already trimmed) npix arrays
+        # below - and, further downstream, bigger than the label values
+        # actually present in final_CoreSecondary_Number.
+        final_nFeature = np.copy(featurecount)
 
         final_Core_npix = final_Core_npix[0:featurecount]
         final_Secondary_npix = final_Secondary_npix[0:featurecount]
@@ -449,10 +455,38 @@ def label_and_grow_features(
         # Update dimensions back to original
         ny, nx = field_orig.shape
 
-        # Recalculate feature counts based on adjusted labels
-        labels = np.unique(final_feature_number)
+        # Recalculate feature counts based on adjusted labels.
+        # The cropped label set can be sparse (e.g. [8, 11] instead of
+        # [1, 2]) since only a subset of the padded domain's labels survive
+        # the crop. Renumber both label arrays to contiguous 1..N *before*
+        # counting, so every downstream `label - 1` positional read (in
+        # gettracks.py, netcdf_io.py, tracksingle_drift.py) stays valid -
+        # previously only final_nFeature/the npix arrays were recomputed
+        # here, while the label arrays themselves kept their sparse values.
+        labels = np.unique(
+            np.concatenate(
+                [final_feature_number.ravel(), final_CoreSecondary_Number.ravel()]
+            )
+        )
         labels = labels[labels != 0]  # Exclude background label 0
         final_nFeature = len(labels)
+
+        label_to_index = {lbl: idx for idx, lbl in enumerate(labels)}
+        lut = np.zeros(
+            int(labels.max()) + 1 if final_nFeature > 0 else 1,
+            dtype=final_feature_number.dtype,
+        )
+        for lbl in labels:
+            lut[lbl] = label_to_index[lbl] + 1
+
+        def _densify(arr):
+            out = np.zeros_like(arr)
+            nz = arr > 0
+            out[nz] = lut[arr[nz]]
+            return out
+
+        final_feature_number = _densify(final_feature_number)
+        final_CoreSecondary_Number = _densify(final_CoreSecondary_Number)
 
         # Initialize arrays to hold counts
         final_Core_npix = np.zeros(final_nFeature, dtype=int)
@@ -460,13 +494,12 @@ def label_and_grow_features(
         final_Tertiary_npix = np.zeros(final_nFeature, dtype=int)
         final_CoreSecondary_npix = np.zeros(final_nFeature, dtype=int)
 
-        # Create a mapping from label to index
-        label_to_index = {lbl: idx for idx, lbl in enumerate(labels)}
-
-        # Use the original (unpadded) flag arrays for counting
-        for lbl in labels:
-            idx = label_to_index[lbl]
-            label_mask = final_feature_number == lbl
+        # Use the original (unpadded) flag arrays for counting, now against
+        # the renumbered final_feature_number so idx lines up with
+        # new_label - 1 directly.
+        for new_label in range(1, final_nFeature + 1):
+            idx = new_label - 1
+            label_mask = final_feature_number == new_label
 
             core_pixels = np.sum(core_flag_orig[label_mask])
             cold_pixels = np.sum(secondary_flag_orig[label_mask])

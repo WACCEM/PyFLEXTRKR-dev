@@ -48,9 +48,19 @@ def label_and_grow_cold_clouds(
 
     Returns:
         Dictionary:
-            Containing labeled cloud array and sizes.
+            Containing labeled cloud array and sizes, using the legacy key
+            names below (translated from label_and_grow_features's
+            field-agnostic keys, shown in parentheses):
+            - final_nclouds (final_nFeature)
+            - final_ncorepix (final_Core_npix)
+            - final_ncoldpix (final_Secondary_npix)
+            - final_ncorecoldpix (final_CoreSecondary_npix)
+            - final_nwarmpix (final_Tertiary_npix)
+            - final_cloudnumber (final_Feature_Number)
+            - final_cloudtype (final_Feature_Type)
+            - final_convcold_cloudnumber (final_CoreSecondary_Number)
     """
-    return label_and_grow_features(
+    result = label_and_grow_features(
         field=ir,
         pixel_radius=pixel_radius,
         thresholds=tb_threshs,
@@ -63,6 +73,20 @@ def label_and_grow_cold_clouds(
         core_operator='lt',
         growth_method='bfs',
     )
+    # Translate the generalized module's field-agnostic keys back to the
+    # legacy names this wrapper's remaining callers still read by
+    # (tests/test_area_method_clouds.py, pyflextrkr/depreciated/idclouds*.py) -
+    # without this, those callers KeyError on every call.
+    return {
+        "final_nclouds": result["final_nFeature"],
+        "final_ncorepix": result["final_Core_npix"],
+        "final_ncoldpix": result["final_Secondary_npix"],
+        "final_ncorecoldpix": result["final_CoreSecondary_npix"],
+        "final_nwarmpix": result["final_Tertiary_npix"],
+        "final_cloudnumber": result["final_Feature_Number"],
+        "final_cloudtype": result["final_Feature_Type"],
+        "final_convcold_cloudnumber": result["final_CoreSecondary_Number"],
+    }
 
 
 def find_and_label_cold_cores(smoothir, thresh_core):

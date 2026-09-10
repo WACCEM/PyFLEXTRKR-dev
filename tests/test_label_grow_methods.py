@@ -550,6 +550,45 @@ class TestLabelGrowEdtVsBfs:
 # ---------------------------------------------------------------------------
 
 
+def _assert_labels_contiguous_and_npix_correct(
+    result, mask_key="final_Feature_Number", npix_key="final_CoreSecondary_npix",
+):
+    """
+    Shared invariant check for label_and_grow_features output, added as a
+    regression guard for GitHub issue #146 and the related nclouds/npix and
+    PBC-crop defects found in the same audit:
+
+    - final_nFeature must equal the length of the returned npix array.
+    - The labels actually present in the 2D mask must be exactly
+      {1, ..., final_nFeature} - no gaps, nothing left sparse after a
+      periodic-boundary crop.
+    - Every npix value must equal the actual pixel count for that label -
+      this is what the original cloud_sizes[index]-vs-cloud_sizes[i]
+      confusion got wrong.
+    """
+    nfeature = result["final_nFeature"]
+    npix = result[npix_key]
+    mask = result[mask_key]
+
+    assert len(npix) == nfeature, (
+        f"{npix_key} length {len(npix)} != final_nFeature {nfeature}"
+    )
+
+    labels_present = np.unique(mask)
+    labels_present = labels_present[labels_present != 0]
+    assert np.array_equal(labels_present, np.arange(1, nfeature + 1)), (
+        f"Labels in {mask_key} are not contiguous 1..{nfeature}: "
+        f"{labels_present}"
+    )
+
+    for k in range(1, nfeature + 1):
+        actual = np.count_nonzero(mask == k)
+        assert npix[k - 1] == actual, (
+            f"label {k}: {npix_key} reports {npix[k - 1]}, "
+            f"actual pixel count is {actual}"
+        )
+
+
 class TestLabelGrowOperatorGt:
     """
     Verify that core_operator='gt' correctly labels features where higher
@@ -594,7 +633,7 @@ class TestLabelGrowOperatorGt:
 
         # Should detect at least 2 features
         assert result["final_nFeature"] >= 2, (
-            f"Expected >= 2 features, got {result['final_nclouds']}"
+            f"Expected >= 2 features, got {result['final_nFeature']}"
         )
 
         # Core pixels should be present
@@ -605,6 +644,8 @@ class TestLabelGrowOperatorGt:
         # The core regions should be labeled
         assert np.all(cloud_number[25:35, 25:35] > 0), "Core 1 not labeled"
         assert np.all(cloud_number[65:75, 65:75] > 0), "Core 2 not labeled"
+
+        _assert_labels_contiguous_and_npix_correct(result)
 
     def test_gt_operator_edt(self):
         """EDT method should also work with core_operator='gt'."""
@@ -633,8 +674,8 @@ class TestLabelGrowOperatorGt:
 
         # Same number of features
         assert result_bfs["final_nFeature"] == result_edt["final_nFeature"], (
-            f"Feature count: BFS={result_bfs['final_nclouds']}, "
-            f"EDT={result_edt['final_nclouds']}"
+            f"Feature count: BFS={result_bfs['final_nFeature']}, "
+            f"EDT={result_edt['final_nFeature']}"
         )
 
         # High pixel agreement
@@ -642,6 +683,9 @@ class TestLabelGrowOperatorGt:
         edt_labels = result_edt["final_Feature_Number"]
         agreement = np.count_nonzero(bfs_labels == edt_labels) / bfs_labels.size
         assert agreement > 0.95, f"Agreement only {agreement:.3f}"
+
+        _assert_labels_contiguous_and_npix_correct(result_bfs)
+        _assert_labels_contiguous_and_npix_correct(result_edt)
 
     def test_lt_vs_inverted_gt(self):
         """
@@ -685,7 +729,7 @@ class TestLabelGrowOperatorGt:
 
         # Same number of features
         assert result_lt["final_nFeature"] == result_gt["final_nFeature"], (
-            f"lt={result_lt['final_nclouds']}, gt={result_gt['final_nclouds']}"
+            f"lt={result_lt['final_nFeature']}, gt={result_gt['final_nFeature']}"
         )
 
         # Same labeled pixels (labels might be in different order if sizes differ)
@@ -694,3 +738,95 @@ class TestLabelGrowOperatorGt:
         assert np.array_equal(lt_labeled, gt_labeled), (
             "Labeled pixel masks differ between lt and inverted gt"
         )
+
+        _assert_labels_contiguous_and_npix_correct(result_lt)
+        _assert_labels_contiguous_and_npix_correct(result_gt)
+
+    def test_all_cold_domain_no_background(self):
+        """
+        Regression test for GitHub issue #146.
+
+        Reported traceback: label_and_grow_cold_clouds.py:170 (pre-refactor)
+        / label_and_grow_features.py:225 (this module),
+        IndexError: index N is out of bounds for axis 0 with size N.
+
+        The issue's stated root cause ("two cold cores merge during growth")
+        does not hold: grow_cells()/EDT growth cannot make a core label
+        vanish by merging - they never overwrite an existing positive
+        label. The actual trigger is a domain/tile with no pixel warmer
+        than the secondary threshold, so background label 0 is absent from
+        the grown label array - before the fix, cloud_sizes[index] assumed
+        cloud_indices is exactly [0, 1, ..., N] (position == label value),
+        which breaks as soon as 0 is missing. Tested for both growth
+        methods, since both funnel through the same counting loop.
+        """
+        ny, nx = 30, 30
+        tb = np.full((ny, nx), 230.0, dtype=np.float32)  # colder than secondary=241 everywhere
+        tb[5:12, 5:12] = 210.0  # core 1
+        tb[18:26, 18:26] = 208.0  # core 2
+
+        thresholds = [225.0, 241.0, 261.0, 261.0]
+        config = {"pbc_direction": "none"}
+
+        for growth_method in ("bfs", "edt"):
+            result = label_and_grow_features(
+                tb, 10.0, thresholds, 100.0,
+                min_core_npix=4, smooth_size=3, expand_to_tertiary=0,
+                config=config, core_operator="lt", growth_method=growth_method,
+            )
+            assert result["final_nFeature"] == 2, (
+                f"[{growth_method}] expected 2 features, got {result['final_nFeature']}"
+            )
+            _assert_labels_contiguous_and_npix_correct(result)
+
+    def test_pbc_crop_produces_contiguous_labels(self):
+        """
+        Regression test for the PBC-crop label-contiguity defect found in
+        the same audit as issue #146.
+
+        Before the fix, label_and_grow_features's periodic-boundary crop
+        path recomputed final_nFeature and the npix arrays correctly, but
+        never renumbered the 2D label arrays themselves - so surviving
+        labels could be an arbitrary sparse subset of the padded domain's
+        label range (e.g. [8, 11] instead of [1, 2]), breaking every
+        downstream `label - 1` positional read (gettracks.py,
+        netcdf_io.py, tracksingle_drift.py).
+        """
+        np.random.seed(7)
+        ny, nx = 40, 40
+        tb = np.full((ny, nx), 280.0, dtype=np.float32)
+        # Scatter several small cold cores, including near every edge, so
+        # periodic-boundary padding/cropping produces a genuinely sparse
+        # surviving label set.
+        cores = [
+            (2, 2), (2, 36), (36, 2), (36, 36), (18, 18),
+            (5, 20), (20, 5), (30, 10), (10, 30),
+        ]
+        for (y, x) in cores:
+            y0, y1 = max(0, y - 2), min(ny, y + 2)
+            x0, x1 = max(0, x - 2), min(nx, x + 2)
+            tb[y0:y1, x0:x1] = 210.0
+
+        thresholds = [225.0, 241.0, 261.0, 261.0]
+        config = {
+            "pbc_direction": "both",
+            "pbc_extended_fraction": 1.0,
+            "pixel_radius": 10.0,
+            "area_thresh": 100.0,
+        }
+
+        for growth_method in ("bfs", "edt"):
+            result = label_and_grow_features(
+                tb, 10.0, thresholds, 100.0,
+                min_core_npix=1, smooth_size=1, expand_to_tertiary=0,
+                config=config, core_operator="lt", growth_method=growth_method,
+            )
+            assert result["final_nFeature"] > 0, (
+                f"[{growth_method}] expected at least 1 feature"
+            )
+            _assert_labels_contiguous_and_npix_correct(result)
+            # final_CoreSecondary_Number must be renumbered the same way as
+            # final_Feature_Number, not just final_Feature_Number.
+            _assert_labels_contiguous_and_npix_correct(
+                result, mask_key="final_CoreSecondary_Number",
+            )
