@@ -345,6 +345,105 @@ class TestLabelGrowBfsBackwardCompat:
 
 
 # ---------------------------------------------------------------------------
+# Test: PBC+bfs deliberately diverges from the (buggy) frozen reference
+# ---------------------------------------------------------------------------
+
+
+def test_pbc_bfs_deliberately_diverges_from_reference():
+    """
+    Documents that bit-identical reproduction of the pre-refactor algorithm
+    is NOT the goal when pbc_direction != 'none', because the pre-refactor
+    algorithm itself (frozen in tests/reference/, and unchanged on
+    public/main today) has two bugs in its PBC-crop path:
+
+    1. Its returned final_nclouds is the stale pre-crop count
+       (final_ncorecold), not the post-crop count it computes locally
+       (final_nclouds = len(labels)) and then never uses in the return dict.
+    2. Its returned 2D label arrays (final_cloudnumber,
+       final_convcold_cloudnumber) are never renumbered after cropping, so
+       they can hold an arbitrary sparse subset of the padded domain's
+       label range (e.g. [1, 7, 9, 12, 14] instead of [1..5]) while the
+       npix arrays are a dense 0-indexed array of length 5 - so a caller
+       doing npix[label - 1] with the real (sparse) label value, the
+       standard pattern used everywhere else in this codebase (see
+       gettracks.py), gets a wrong count or an IndexError. Same crash
+       class as issue #146, gated behind pbc_direction != 'none' plus a
+       non-contiguous post-crop label set - reachable today by any config
+       with pbc_direction set and growth_method left at its bfs default
+       (e.g. config_mcs_pbc_idealized_demo.yml).
+
+    label_and_grow_features's PBC-crop fix (LUT-densify both the label
+    arrays and the npix arrays from the same post-crop `labels`) means the
+    live bfs wrapper is *correct* where the frozen reference is buggy - so
+    this test asserts the reference exhibits both bugs (so it flags loudly,
+    for the right reason, if either is ever independently fixed upstream)
+    and the live wrapper does not.
+    """
+    from pyflextrkr.label_and_grow_cold_clouds import label_and_grow_cold_clouds
+    from tests.reference.label_and_grow_cold_clouds_reference import (
+        label_and_grow_cold_clouds_reference,
+    )
+
+    ny, nx = 40, 60
+    ir = np.full((ny, nx), 280.0)
+    # Core straddling the PBC-wrapped x edge (same physical feature under
+    # periodic boundaries), plus several unrelated interior cores - pushes
+    # the padded-domain label numbering high enough that the surviving
+    # post-crop labels are a genuinely sparse subset.
+    ir[10:16, 55:60] = 210.0
+    ir[10:16, 0:3] = 210.0
+    ir[5:9, 10:14] = 208.0
+    ir[20:25, 20:26] = 207.0
+    ir[30:35, 40:46] = 206.0
+    ir[2:6, 45:50] = 209.0
+
+    thresholds = [225.0, 241.0, 261.0, 261.0]
+    config = {"pbc_direction": "x", "pixel_radius": 10.0, "area_thresh": 100.0}
+    common_args = dict(
+        pixel_radius=10.0, tb_threshs=thresholds, area_thresh=100.0,
+        mincoldcorepix=4, smoothsize=3, warmanvilexpansion=0, config=config,
+    )
+
+    result_ref = label_and_grow_cold_clouds_reference(ir, **common_args)
+    result_new = label_and_grow_cold_clouds(ir, **common_args)
+
+    # --- Reference (frozen, pre-refactor) exhibits both known bugs ---
+    ref_npix = result_ref["final_ncorecoldpix"]
+    assert result_ref["final_nclouds"] != len(ref_npix), (
+        "Frozen reference's final_nclouds now matches its npix array "
+        "length - bug 1 appears fixed upstream; update this test's "
+        "docstring/assertions (and consider un-skipping bit-identical "
+        "comparison for PBC) rather than deleting this check."
+    )
+    ref_labels = np.unique(result_ref["final_cloudnumber"])
+    ref_labels = ref_labels[ref_labels != 0]
+    assert not np.array_equal(ref_labels, np.arange(1, len(ref_labels) + 1)), (
+        "Frozen reference's final_cloudnumber is now contiguous - bug 2 "
+        "appears fixed upstream; update this test rather than deleting it."
+    )
+
+    # --- Live wrapper (this branch) has neither bug ---
+    new_nclouds = result_new["final_nclouds"]
+    new_npix = result_new["final_ncorecoldpix"]
+    assert new_nclouds == len(new_npix), (
+        f"final_nclouds ({new_nclouds}) must match the npix array length "
+        f"({len(new_npix)})"
+    )
+    new_labels = np.unique(result_new["final_cloudnumber"])
+    new_labels = new_labels[new_labels != 0]
+    assert np.array_equal(new_labels, np.arange(1, new_nclouds + 1)), (
+        f"final_cloudnumber labels {new_labels} are not contiguous "
+        f"1..{new_nclouds}"
+    )
+    for k in range(1, new_nclouds + 1):
+        actual = np.count_nonzero(result_new["final_cloudnumber"] == k)
+        assert new_npix[k - 1] == actual, (
+            f"label {k}: final_ncorecoldpix reports {new_npix[k - 1]}, "
+            f"actual pixel count is {actual}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test: EDT vs BFS comparison
 # ---------------------------------------------------------------------------
 

@@ -23,7 +23,21 @@ def label_and_grow_cold_clouds(
     This is a backward-compatible wrapper around the generalized
     :func:`~pyflextrkr.label_and_grow_features.label_and_grow_features`.
     It calls the generalized function with ``core_operator='lt'`` and
-    ``growth_method='bfs'`` to reproduce the original algorithm exactly.
+    ``growth_method='bfs'`` to reproduce the original algorithm exactly -
+    **when** ``config['pbc_direction']`` **is** ``'none'``, verified
+    bit-identical against a frozen copy of the pre-refactor algorithm (see
+    ``tests/test_label_grow_methods.py::TestLabelGrowBfsBackwardCompat``).
+
+    When ``pbc_direction != 'none'``, this wrapper's output *intentionally*
+    diverges from the pre-refactor algorithm: the original has two bugs in
+    its PBC-crop path (returns a stale pre-crop ``final_nclouds`` that
+    doesn't match its own npix arrays' length, and never renumbers the
+    returned label arrays to be contiguous after cropping - so a caller
+    indexing ``npix[label - 1]`` with the real, sparse label value gets a
+    wrong count or an ``IndexError``, the same crash class as issue #146).
+    This wrapper fixes both. Do not "fix" this wrapper to match the
+    original's PBC-path output - see
+    ``tests/test_label_grow_methods.py::test_pbc_bfs_deliberately_diverges_from_reference``.
 
     Args:
         ir: np.ndarray()
