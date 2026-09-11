@@ -108,7 +108,10 @@ DEMOS = {
         "thresholds": [225.0, 241.0, 261.0, 261.0],
         "area_thresh": 800.0,
         "min_core_npix": 4,
-        "smooth_size": 5,
+        # Matches smoothwindowdimensions in config/config_imerg_mcs_tbpf_example.yml
+        # (the actual config this demo runs with) - not 5, which is only
+        # correct for the idealized demo's config_mcs_idealized.yml.
+        "smooth_size": 10,
         "expand_to_tertiary": 0,
         "config": {"pbc_direction": "none"},
     },

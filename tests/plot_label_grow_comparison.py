@@ -285,8 +285,11 @@ def compare_stats(bfs_stats_dir, edt_stats_dir):
     n_edt = edt_ds.dims.get("tracks", 0)
     print(f"  {'Number of tracks':<30} {n_bfs:>10} {n_edt:>10} {n_edt - n_bfs:>+10}")
 
-    # Compare common variables
-    for var in ["track_duration", "movement_distance_total"]:
+    # Compare common variables. Note: "movement_distance" (not
+    # "movement_distance_total" - that variable doesn't exist in
+    # mcs_tracks_final_*.nc, so it was silently skipped by the `if var in
+    # ds` guard below rather than raising).
+    for var in ["track_duration", "mcs_duration", "movement_distance"]:
         if var in bfs_ds and var in edt_ds:
             bfs_mean = float(bfs_ds[var].mean())
             edt_mean = float(edt_ds[var].mean())
