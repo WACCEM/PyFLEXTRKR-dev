@@ -40,9 +40,21 @@ Usage
 
 import glob
 import os
+import sys
 
 import numpy as np
 import pytest
+
+# CI runs bare `pytest tests/` (no `-m`), and tests/ has no __init__.py, so
+# pytest's prepend import mode puts tests/ itself - not the repo root - on
+# sys.path when collecting this file. Without this, `from reference....`
+# below would only resolve by accident, if the active environment's editable
+# install happens to also leak the repo root onto sys.path (older
+# egg-link-style installs do; modern PEP 660 finder-based ones, used by CI
+# and pyflex26.3, do not). Matches the same pattern already used by
+# test_area_method_clouds.py, test_area_method_utils.py, and
+# test_ftfunctions_link_pf.py.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from pyflextrkr.label_and_grow_features import label_and_grow_features
 
@@ -380,7 +392,7 @@ def test_pbc_bfs_deliberately_diverges_from_reference():
     and the live wrapper does not.
     """
     from pyflextrkr.label_and_grow_cold_clouds import label_and_grow_cold_clouds
-    from tests.reference.label_and_grow_cold_clouds_reference import (
+    from reference.label_and_grow_cold_clouds_reference import (
         label_and_grow_cold_clouds_reference,
     )
 
