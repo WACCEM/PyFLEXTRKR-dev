@@ -954,3 +954,42 @@ class TestLabelGrowOperatorGt:
             _assert_labels_contiguous_and_npix_correct(
                 result, mask_key="final_CoreSecondary_Number",
             )
+
+    def test_no_core_subthreshold_secondary_does_not_crash(self):
+        """
+        Regression test for an UnboundLocalError found while stress-testing
+        with tests/plot_label_grow_synthetic.py's varied synthetic frames.
+
+        Trigger: no pixel anywhere crosses the core threshold (nlabelcores
+        == 0, so label_and_grow_features falls into its "no core" fallback
+        branch, which instead labels connected secondary-threshold regions
+        directly), and at least one such region exists but is smaller than
+        area_thresh. The fallback branch's inner `if nFeature > 0:` (after
+        re-purposing nFeature to mean "count that passed the area filter")
+        only assigns sortedcore_npix/sortedSecondary_npix/sortedTertiary_npix
+        inside that if - with no else, so when every candidate region is
+        rejected by the area filter (nFeature reset to 0), the following
+        `final_Secondary_npix = np.copy(sortedSecondary_npix)` raises
+        UnboundLocalError: the top-of-function defaults use different
+        casing (sortedsecondary_npix/sortedtertiary_npix) and are never
+        consulted, so nothing else binds these names in that path.
+        """
+        ny, nx = 40, 40
+        tb = np.full((ny, nx), 290.0)
+        # Crosses secondary (241 K) but not core (225 K); 4 px < the
+        # 8-pixel area threshold (area_thresh=800 / pixel_radius^2=100).
+        tb[10:12, 10:12] = 235.0
+
+        thresholds = [225.0, 241.0, 261.0, 261.0]
+        config = {"pbc_direction": "none"}
+
+        for growth_method in ("bfs", "edt"):
+            result = label_and_grow_features(
+                tb, 10.0, thresholds, 800.0,
+                min_core_npix=4, smooth_size=5, expand_to_tertiary=0,
+                config=config, core_operator="lt", growth_method=growth_method,
+            )
+            assert result["final_nFeature"] == 0, (
+                f"[{growth_method}] expected 0 features (sub-threshold "
+                f"secondary region only), got {result['final_nFeature']}"
+            )

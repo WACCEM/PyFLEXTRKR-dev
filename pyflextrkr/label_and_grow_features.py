@@ -399,6 +399,21 @@ def label_and_grow_features(
                         sorted_features[sortedFeature_indices] = np.copy(
                             featureStep
                         )
+            else:
+                # label() found >=1 connected secondary-threshold component
+                # (outer nFeature was >0 on entry to this branch), but none
+                # of them passed the area threshold, so featurecount stayed
+                # 0 and nFeature was reset to 0 just above. sortedcore_npix/
+                # sortedSecondary_npix/sortedTertiary_npix are only assigned
+                # inside this if - without this else they're unbound here
+                # (crashing with UnboundLocalError on the very next lines),
+                # since the top-of-function defaults use different casing
+                # (sortedsecondary_npix/sortedtertiary_npix) and are never
+                # consulted. Empty-features case - same convention as the
+                # "outer nFeature == 0 from the start" branch below.
+                sortedcore_npix = np.zeros((1,), dtype=int)
+                sortedSecondary_npix = np.zeros((1,), dtype=int)
+                sortedTertiary_npix = np.zeros((1,), dtype=int)
 
             ##############################################
             # Save final matrices
