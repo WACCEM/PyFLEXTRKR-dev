@@ -251,8 +251,15 @@ def feature_matched_diff_mask(labels_a, labels_b, a_to_b, b_to_a):
 @pytest.mark.local
 class TestLabelGrowBfsBackwardCompat:
     """
-    Verify that label_and_grow_features with growth_method='bfs' produces
-    bit-identical results to the original label_and_grow_cold_clouds.
+    Verify that the live label_and_grow_cold_clouds wrapper (which calls the
+    generalized label_and_grow_features with growth_method='bfs') produces
+    bit-identical results to the original, pre-refactor algorithm.
+
+    The ground truth here is tests/reference/label_and_grow_cold_clouds_reference.py,
+    a frozen, independent copy of the pre-refactor implementation - not the
+    live wrapper compared against itself, and not label_and_grow_features
+    compared against the very function that calls it. Either of those would
+    be tautological (cannot fail by construction); this comparison can.
     """
 
     INPUT_DIR = demo_path("mcs_tbpf", "idealized", "test4", "input")
@@ -267,9 +274,12 @@ class TestLabelGrowBfsBackwardCompat:
         return files
 
     def test_bfs_matches_original(self, input_files, capsys):
-        """New BFS must produce bit-identical output to original across all frames."""
+        """Live wrapper must produce bit-identical output to the frozen original across all frames."""
         from pyflextrkr.label_and_grow_cold_clouds import (
             label_and_grow_cold_clouds,
+        )
+        from tests.reference.label_and_grow_cold_clouds_reference import (
+            label_and_grow_cold_clouds_reference,
         )
 
         n_tested = 0
@@ -283,8 +293,8 @@ class TestLabelGrowBfsBackwardCompat:
             if np.count_nonzero(np.isnan(tb)) / (ny * nx) >= 0.4:
                 continue
 
-            # Run original
-            result_orig = label_and_grow_cold_clouds(
+            # Run the frozen pre-refactor reference implementation
+            result_orig = label_and_grow_cold_clouds_reference(
                 tb,
                 _IDEALIZED_PARAMS["pixel_radius"],
                 _IDEALIZED_PARAMS["thresholds"],
@@ -295,8 +305,8 @@ class TestLabelGrowBfsBackwardCompat:
                 _IDEALIZED_CONFIG,
             )
 
-            # Run new function with BFS
-            result_new = label_and_grow_features(
+            # Run the live backward-compatible wrapper
+            result_new = label_and_grow_cold_clouds(
                 tb,
                 _IDEALIZED_PARAMS["pixel_radius"],
                 _IDEALIZED_PARAMS["thresholds"],
@@ -305,11 +315,14 @@ class TestLabelGrowBfsBackwardCompat:
                 _IDEALIZED_PARAMS["smooth_size"],
                 _IDEALIZED_PARAMS["expand_to_tertiary"],
                 _IDEALIZED_CONFIG,
-                core_operator="lt",
-                growth_method="bfs",
             )
 
-            # Compare all keys
+            # Both return the same legacy key set - compare all of them
+            assert set(result_orig.keys()) == set(result_new.keys()), (
+                f"Key set mismatch for {os.path.basename(filepath)}: "
+                f"reference={sorted(result_orig.keys())}, "
+                f"wrapper={sorted(result_new.keys())}"
+            )
             for key in result_orig:
                 orig_val = result_orig[key]
                 new_val = result_new[key]
@@ -327,7 +340,7 @@ class TestLabelGrowBfsBackwardCompat:
             n_tested += 1
 
         with capsys.disabled():
-            print(f"\n  [BFS compat] Tested {n_tested} file(s): all bit-identical")
+            print(f"\n  [BFS compat] Tested {n_tested} file(s) against frozen reference: all bit-identical")
         assert n_tested > 0, "No files were tested"
 
 
