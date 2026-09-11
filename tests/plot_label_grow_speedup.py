@@ -3,12 +3,16 @@
 Measure and visualize performance of BFS vs EDT growth methods in label_and_grow_features.
 
 For each demo dataset this script:
-  1. Loads input Tb files and preprocesses them (same as idclouds_tbpf).
+  1. Loads input Tb files and preprocesses them (same as idclouds_tbpf), yielding one
+     frame per *time index* in each file - not just the first, so e.g. the idealized
+     demo's 26 hourly times per test file are all included, not only hour 0.
   2. Times `label_and_grow_features` with growth_method='bfs' and 'edt'.
   3. Produces a two-panel bar-chart PNG:
        Top panel    : absolute timing (BFS / EDT bars)
        Bottom panel : speedup (BFS / EDT) on log scale
-  4. Saves cloudid arrays from both methods for comparison.
+  4. Saves cloudid arrays from both methods for comparison, one .npz per frame,
+     including that frame's own tb/lat/lon so plot_label_grow_comparison.py can plot
+     it directly without re-matching back to the original input file.
 
 Demos supported
 ---------------
@@ -24,14 +28,13 @@ Usage
   python tests/plot_label_grow_speedup.py \\
       --demo demo_mcs_tbpf_idealized \\
       --data_root ~/data/demo \\
-      --outdir ~/data/demo/benchmark_results/
+      --outdir ~/data/demo/benchmark_results/idealized/
 
   # 3. Run benchmark on global IMERG (large domain, performance test)
   python tests/plot_label_grow_speedup.py \\
       --demo demo_mcs_imerg \\
       --data_root ~/data/demo \\
-      --nfiles 5 \\
-      --outdir ~/data/demo/benchmark_results/
+      --outdir ~/data/demo/benchmark_results/imerg/
 
   # 4. Both methods' cloudid outputs saved to:
   #    <outdir>/cloudid_bfs/
@@ -80,7 +83,15 @@ parser.add_argument(
     "--nfiles",
     type=int,
     default=0,
-    help="Number of files to time (0 = all available)",
+    help="Number of input files to time (0 = all available)",
+)
+parser.add_argument(
+    "--ntimes",
+    type=int,
+    default=0,
+    help="Number of time indices per file to time (0 = all; each demo's input "
+         "files hold multiple times - idealized has 26 hourly per test file, "
+         "IMERG has 2 half-hourly per hourly file)",
 )
 args = parser.parse_args()
 
@@ -118,8 +129,20 @@ DEMOS = {
 }
 
 
-def load_tb_files(demo_spec, data_root, nfiles):
-    """Load and preprocess Tb data from demo input files."""
+def load_tb_files(demo_spec, data_root, nfiles, ntimes=0):
+    """
+    Load and preprocess Tb data from demo input files.
+
+    Yields one frame per *time index* within each file, not just the first -
+    each demo's input files hold multiple times (idealized: 26 hourly per
+    test file; IMERG: 2 half-hourly per hourly file), and earlier versions of
+    this script silently dropped everything but index 0.
+
+    Returns a list of (tb, frame_name, lat, lon) tuples. frame_name is
+    "<file_stem>_<YYYYMMDDTHHMM>" - built from the file's own time
+    coordinate, so per-timestep frames get unique, sortable names instead of
+    colliding on the input filename.
+    """
     import xarray as xr
     from scipy.signal import medfilt2d
 
@@ -155,27 +178,54 @@ def load_tb_files(demo_spec, data_root, nfiles):
             ds.close()
             continue
 
-        tb = ds[varname].values
-        ds.close()
+        tb_all = ds[varname].values
+        lat = ds["lat"].values if "lat" in ds else None
+        lon = ds["lon"].values if "lon" in ds else None
 
-        # Handle 3D (take first time)
-        if tb.ndim == 3:
-            tb = tb[0, :, :]
-
-        # Preprocess (same as idclouds_tbpf)
-        tb_filt = medfilt2d(tb.astype(np.float64), kernel_size=5)
-        out_tb = np.copy(tb)
-        missmask = np.isnan(tb)
-        out_tb[missmask] = tb_filt[missmask]
-        out_tb[out_tb < 160] = np.nan
-        out_tb[out_tb > 330] = np.nan
-
-        # Skip frames with too much missing data
-        ny, nx = out_tb.shape
-        if np.count_nonzero(np.isnan(out_tb)) / (ny * nx) >= 0.4:
+        # Normalize to always have a time axis, so the loop below is uniform
+        # whether the file is 2D (single time, no time dim) or 3D.
+        if tb_all.ndim == 2:
+            tb_all = tb_all[np.newaxis, :, :]
+            time_vals = [None]
+        elif tb_all.ndim == 3:
+            time_vals = (
+                ds["time"].values if "time" in ds else [None] * tb_all.shape[0]
+            )
+        else:
+            ds.close()
             continue
 
-        tb_arrays.append((out_tb, os.path.basename(filepath)))
+        file_stem = os.path.basename(filepath).rsplit(".nc", 1)[0]
+        n_times = tb_all.shape[0]
+        time_indices = range(n_times) if ntimes <= 0 else range(min(ntimes, n_times))
+
+        for it in time_indices:
+            tb = tb_all[it, :, :]
+
+            # Preprocess (same as idclouds_tbpf)
+            tb_filt = medfilt2d(tb.astype(np.float64), kernel_size=5)
+            out_tb = np.copy(tb)
+            missmask = np.isnan(tb)
+            out_tb[missmask] = tb_filt[missmask]
+            out_tb[out_tb < 160] = np.nan
+            out_tb[out_tb > 330] = np.nan
+
+            # Skip frames with too much missing data
+            ny, nx = out_tb.shape
+            if np.count_nonzero(np.isnan(out_tb)) / (ny * nx) >= 0.4:
+                continue
+
+            tval = time_vals[it]
+            if tval is not None:
+                ts = np.datetime_as_string(np.datetime64(tval), unit="m")
+                ts = ts.replace("-", "").replace(":", "").replace("T", "T")
+                frame_name = f"{file_stem}_{ts}"
+            else:
+                frame_name = file_stem
+
+            tb_arrays.append((out_tb, frame_name, lat, lon))
+
+        ds.close()
 
     return tb_arrays
 
@@ -196,7 +246,7 @@ def time_methods(tb_arrays, demo_spec, outdir):
         "config": demo_spec["config"],
     }
 
-    for tb, fname in tb_arrays:
+    for tb, fname, lat, lon in tb_arrays:
         ny, nx = tb.shape
 
         # Time BFS
@@ -219,8 +269,8 @@ def time_methods(tb_arrays, demo_spec, outdir):
         )
         timings["edt"].append(time.perf_counter() - t0)
 
-        results_bfs.append((fname, result_bfs))
-        results_edt.append((fname, result_edt))
+        results_bfs.append((fname, result_bfs, tb, lat, lon))
+        results_edt.append((fname, result_edt, tb, lat, lon))
 
         # Print per-file summary
         bfs_t = timings["bfs"][-1]
@@ -232,26 +282,33 @@ def time_methods(tb_arrays, demo_spec, outdir):
             f"BFS={bfs_t:.3f}s, EDT={edt_t:.3f}s, speedup={speedup:.1f}x"
         )
 
-    # Save cloudid arrays
+    # Save cloudid arrays - one .npz per frame, including that frame's own
+    # tb/lat/lon so plot_label_grow_comparison.py can plot it directly
+    # without re-matching back to the original input file by filename.
     bfs_dir = os.path.join(outdir, "cloudid_bfs")
     edt_dir = os.path.join(outdir, "cloudid_edt")
     os.makedirs(bfs_dir, exist_ok=True)
     os.makedirs(edt_dir, exist_ok=True)
 
-    for fname, result in results_bfs:
-        np.savez_compressed(
-            os.path.join(bfs_dir, fname.replace(".nc", ".npz")),
-            cloudnumber=result["final_Feature_Number"],
-            convcold_cloudnumber=result["final_CoreSecondary_Number"],
-            cloudtype=result["final_Feature_Type"],
+    def _save(save_dir, fname, result, tb, lat, lon):
+        kwargs = dict(
+            # int32 is ample for label counts and halves array size vs the
+            # int64 label_and_grow_features returns by default.
+            cloudnumber=result["final_Feature_Number"].astype(np.int32),
+            convcold_cloudnumber=result["final_CoreSecondary_Number"].astype(np.int32),
+            cloudtype=result["final_Feature_Type"].astype(np.int32),
+            tb=tb.astype(np.float32),
         )
-    for fname, result in results_edt:
-        np.savez_compressed(
-            os.path.join(edt_dir, fname.replace(".nc", ".npz")),
-            cloudnumber=result["final_Feature_Number"],
-            convcold_cloudnumber=result["final_CoreSecondary_Number"],
-            cloudtype=result["final_Feature_Type"],
-        )
+        if lat is not None:
+            kwargs["lat"] = lat.astype(np.float32)
+        if lon is not None:
+            kwargs["lon"] = lon.astype(np.float32)
+        np.savez_compressed(os.path.join(save_dir, f"{fname}.npz"), **kwargs)
+
+    for fname, result, tb, lat, lon in results_bfs:
+        _save(bfs_dir, fname, result, tb, lat, lon)
+    for fname, result, tb, lat, lon in results_edt:
+        _save(edt_dir, fname, result, tb, lat, lon)
 
     print(f"  Saved cloudid arrays to {bfs_dir} and {edt_dir}")
     return timings
@@ -263,9 +320,12 @@ def make_figure(demo_name, timings, outdir, nfiles):
     edt_times = np.array(timings["edt"])
     n = len(bfs_times)
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
+    # Widen the figure for large frame counts (now one bar-pair per
+    # timestep, not per file, so idealized/IMERG both run into the hundreds).
+    fig_width = max(10, min(n * 0.15, 40))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(fig_width, 7), constrained_layout=True)
     fig.suptitle(
-        f"label_and_grow_features: BFS vs EDT — {demo_name} (n={n} files)",
+        f"label_and_grow_features: BFS vs EDT — {demo_name} (n={n} frames)",
         fontsize=12,
     )
 
@@ -275,8 +335,8 @@ def make_figure(demo_name, timings, outdir, nfiles):
     # Top panel: absolute timing
     ax1.bar(x - width / 2, bfs_times, width, label="BFS", color="steelblue")
     ax1.bar(x + width / 2, edt_times, width, label="EDT", color="forestgreen")
-    ax1.set_ylabel("Time per file (s)")
-    ax1.set_xlabel("File index")
+    ax1.set_ylabel("Time per frame (s)")
+    ax1.set_xlabel("Frame index")
     ax1.legend()
     ax1.set_title("Absolute timing")
     ax1.grid(axis="y", alpha=0.3)
@@ -298,12 +358,15 @@ def make_figure(demo_name, timings, outdir, nfiles):
     # Bottom panel: speedup ratio
     speedups = bfs_times / np.maximum(edt_times, 1e-9)
     bars = ax2.bar(x, speedups, color="darkorange", alpha=0.85)
-    for xi, sp in zip(x, speedups):
-        lbl = f"{sp:.0f}x" if sp >= 10 else f"{sp:.1f}x"
-        ax2.text(xi, sp * 1.05, lbl, ha="center", va="bottom", fontsize=7)
+    # Per-bar labels get unreadable once there are many frames (all-timeframe
+    # runs land in the 90-100+ range) - the mean in the title covers it then.
+    if n <= 30:
+        for xi, sp in zip(x, speedups):
+            lbl = f"{sp:.0f}x" if sp >= 10 else f"{sp:.1f}x"
+            ax2.text(xi, sp * 1.05, lbl, ha="center", va="bottom", fontsize=7)
     ax2.axhline(1, color="k", linewidth=0.8, linestyle="--")
     ax2.set_ylabel("Speedup (BFS / EDT)")
-    ax2.set_xlabel("File index")
+    ax2.set_xlabel("Frame index")
     ax2.set_yscale("log")
     ax2.set_title(f"Speedup ratio (mean = {np.mean(speedups):.1f}x)")
     ax2.grid(axis="y", alpha=0.3, which="both")
@@ -327,7 +390,7 @@ if __name__ == "__main__":
     print(f"{'='*60}")
 
     # Load data
-    tb_arrays = load_tb_files(demo_spec, args.data_root, args.nfiles)
+    tb_arrays = load_tb_files(demo_spec, args.data_root, args.nfiles, args.ntimes)
     print(f"  Loaded {len(tb_arrays)} preprocessed Tb frame(s)")
 
     if not tb_arrays:
@@ -341,7 +404,7 @@ if __name__ == "__main__":
     bfs_mean = np.mean(timings["bfs"])
     edt_mean = np.mean(timings["edt"])
     speedup_mean = bfs_mean / max(edt_mean, 1e-9)
-    print(f"\n  Summary ({len(tb_arrays)} files):")
+    print(f"\n  Summary ({len(tb_arrays)} frames):")
     print(f"    BFS mean: {bfs_mean:.3f}s")
     print(f"    EDT mean: {edt_mean:.3f}s")
     print(f"    Mean speedup: {speedup_mean:.1f}x")
