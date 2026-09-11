@@ -283,7 +283,10 @@ def link_pf_tb(
         pf_cloud_mask = np.zeros(tb.shape, dtype=int)
 
         # Loop over each PF
-        for ipf in range(1, npf):
+        # Note: npf is the largest PF label (1-indexed after sort_renumber), so the
+        # loop must include ipf == npf or the smallest surviving PF is silently
+        # skipped every frame.
+        for ipf in range(1, npf + 1):
 
             # Find pixel index for this PF
             pfidx = np.where(pf_number == ipf)
