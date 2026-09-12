@@ -237,6 +237,24 @@ def test_float_dtype_with_nan():
     assert np.array_equal(np.sort(new_npix)[::-1], [9, 4])
 
 
+def test_negative_labels():
+    """Negative values must resolve to background (0), matching the frozen
+    reference: its loop only ever tests `== ilabelcell` for ilabelcell in
+    [1, nlabelcells], so a negative value never matches any positive label
+    and is implicitly background.
+
+    This is a real regression check, not just a hypothetical: the version
+    of sort_renumber pushed earlier in this same PR (commit 64c49f9, before
+    the shared _labels_as_int helper existed) fed the raw int array straight
+    into np.bincount without clamping negatives first, and np.bincount
+    raises ValueError on negative input - verified directly against that
+    commit. _labels_as_int's negative-clamp (added alongside the
+    sort_renumber2vars fix) restores parity with the true original
+    behavior here."""
+    arr = np.array([[1, -5, 2], [0, 1, 2]])
+    _assert_equivalent(arr, min_size=0, label="negative_labels")
+
+
 def test_large_label_count():
     """Many small, individually-labeled single-pixel cells - stresses the
     per-label bookkeeping (bincount/LUT sizing) at a larger label count than
