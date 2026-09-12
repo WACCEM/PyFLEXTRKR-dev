@@ -39,33 +39,64 @@ def sort_renumber(
 
     # Check if there is any cells identified
     if nlabelcells > 0:
+        nlabelcells = int(nlabelcells)
 
+        # Integer, NaN-safe working copy for the unique/bincount/lookup-table
+        # operations below, which all require integer input (fancy indexing,
+        # bincount), while the incoming array may be float with NaN (the
+        # nanmax above already anticipates that). NaN -> 0 (background):
+        # NaN never equals any positive ilabelcell in the original ==
+        # comparisons either, so NaN pixels were never counted toward, or
+        # renumbered into, any cell before this change.
+        if np.issubdtype(labelcell_number2d.dtype, np.floating):
+            labelcell_int = np.nan_to_num(labelcell_number2d, nan=0).astype(np.int64)
+        else:
+            labelcell_int = labelcell_number2d.astype(np.int64, copy=False)
+
+        # Count pixels (or, if grid_area is given, total area) per label in a
+        # single pass, instead of one np.count_nonzero(... == ilabelcell)
+        # scan of the *entire* domain per label - O(n_labels x domain_size),
+        # confirmed via profiling to be the dominant cost of this function on
+        # large domains with many labels (~500s/frame on a 1200x3600 global
+        # Tb field with ~1000+ core labels, vs milliseconds below).
+        #
+        # A plain `np.unique(labelcell_number2d, return_counts=True)` was
+        # tried here before and reverted (see the preserved comment below) -
+        # its result is positional (cellnum[i]/counts[i] line up by position
+        # in the unique-values array), so a gap in label numbering silently
+        # misaligns indexing by position instead of by label value. bincount
+        # sidesteps that entirely: its bin index *is* the label value, so
+        # there is no positional-alignment risk regardless of gaps - same
+        # fix pattern (value-indexed lookup, not positional) as Bug A/B
+        # elsewhere in this PR.
         labelcell_npix = np.full(nlabelcells, -999, dtype=int)
-        # Loop over each labeled cell
-        for ilabelcell in range(1, nlabelcells + 1):
-            # Count number of pixels for the cell
-            ilabelcell_npix = np.count_nonzero(labelcell_number2d == ilabelcell)
-            # Check if grid_area is supplied
-            if grid_area is None:
-                # If cell npix > min size threshold
-                if ilabelcell_npix > min_size:
-                    labelcell_npix[ilabelcell - 1] = ilabelcell_npix
-            else:
-                # If grid_area is supplied, sum grid area for the cell
-                ilabelcell_area = np.sum(grid_area[labelcell_number2d == ilabelcell])
-                # If cell area > min size threshold
-                if ilabelcell_area > min_size:
-                    labelcell_npix[ilabelcell - 1] = ilabelcell_npix
+        npix_by_label = np.bincount(labelcell_int.ravel(), minlength=nlabelcells + 1)
+        if grid_area is None:
+            # If cell npix > min size threshold
+            keep = npix_by_label[1:nlabelcells + 1] > min_size
+        else:
+            # If grid_area is supplied, sum grid area for each cell the same
+            # value-indexed way, via bincount's weights.
+            area_by_label = np.bincount(
+                labelcell_int.ravel(), weights=grid_area.ravel(),
+                minlength=nlabelcells + 1,
+            )
+            # If cell area > min size threshold
+            keep = area_by_label[1:nlabelcells + 1] > min_size
+        labelcell_npix[keep] = npix_by_label[1:nlabelcells + 1][keep]
 
-
-        # # This faster approach does not work
-        # # Because when labelcell_number2d is not sequentially numbered (e.g., when some cells are removed)
-        # # This approach does not get the same sequence with the above one
-        # # Count number of pixels for each unique cells
-        # cellnum, labelcell_npix = np.unique(labelcell_number2d, return_counts=True)
-        # # Remove background and cells below size threshold
-        # labelcell_npix = labelcell_npix[(cellnum > 0)]
-        # labelcell_npix[(labelcell_npix <= min_size)] = -999
+        # # Original per-label loop, replaced by the value-indexed bincount
+        # # approach above (equivalence covered by
+        # # tests/test_sort_renumber_equivalence.py):
+        # for ilabelcell in range(1, nlabelcells + 1):
+        #     ilabelcell_npix = np.count_nonzero(labelcell_number2d == ilabelcell)
+        #     if grid_area is None:
+        #         if ilabelcell_npix > min_size:
+        #             labelcell_npix[ilabelcell - 1] = ilabelcell_npix
+        #     else:
+        #         ilabelcell_area = np.sum(grid_area[labelcell_number2d == ilabelcell])
+        #         if ilabelcell_area > min_size:
+        #             labelcell_npix[ilabelcell - 1] = ilabelcell_npix
 
         # Check if any of the cells passes the size threshold test
         ivalidcells = np.where(labelcell_npix > 0)[0]
@@ -86,20 +117,29 @@ def sort_renumber(
             sortedcell_npix = np.copy(labelcell_npix[order])
             sortedcell_number1d = np.copy(labelcell_number1d[order])
 
-            # Loop over the 2D cell number to re-number them by size
-            cellstep = 0
-            for icell in range(0, ncells):
-                # Find 2D indices that match the cell number
-                sortedcell_indices = np.where(
-                    labelcell_number2d == sortedcell_number1d[icell]
-                )
-                # Get one of the dimensions from the 2D indices to count the size
-                nsortedcellindices = len(sortedcell_indices[1])
-                # Check if the size matches the sorted cell size
-                if nsortedcellindices == sortedcell_npix[icell]:
-                    # Renumber the cell in 2D
-                    cellstep += 1
-                    sortedlabelcell_number2d[sortedcell_indices] = np.copy(cellstep)
+            # Renumber the 2D cell labels by size via a single lookup-table
+            # pass, instead of one np.where(... == label) full-domain scan
+            # per surviving cell - the second O(n_labels x domain_size) cost
+            # in this function (same LUT-densify pattern as Bug B in
+            # label_and_grow_features.py's PBC-crop path).
+            lut = np.zeros(nlabelcells + 1, dtype=int)
+            lut[sortedcell_number1d] = np.arange(1, ncells + 1)
+            sortedlabelcell_number2d = lut[labelcell_int]
+
+            # # Original per-cell loop, replaced by the LUT above:
+            # cellstep = 0
+            # for icell in range(0, ncells):
+            #     # Find 2D indices that match the cell number
+            #     sortedcell_indices = np.where(
+            #         labelcell_number2d == sortedcell_number1d[icell]
+            #     )
+            #     # Get one of the dimensions from the 2D indices to count the size
+            #     nsortedcellindices = len(sortedcell_indices[1])
+            #     # Check if the size matches the sorted cell size
+            #     if nsortedcellindices == sortedcell_npix[icell]:
+            #         # Renumber the cell in 2D
+            #         cellstep += 1
+            #         sortedlabelcell_number2d[sortedcell_indices] = np.copy(cellstep)
 
         else:
             # Return an empty array
@@ -578,27 +618,62 @@ def calc_extension(size, ext_frac):
     """
     return int(size * ext_frac)
 
+class _LazyLabelPositions(dict):
+    """
+    dict subclass that computes np.where(segments == label) lazily, on the
+    first access of each label, instead of eagerly for every unique label
+    up front.
+
+    adjust_axis (the only caller of cache_label_positions) only ever looks
+    up a small subset of a labeled array's full label set: the handful of
+    labels straddling a PBC seam, plus whichever labels happen to appear in
+    the single row/column being examined at each step of its
+    boundary-refinement search. The original cache_label_positions computed
+    np.where(segments == label) for *every* label up front regardless -
+    O(n_labels x domain_size), profiled directly as the dominant cost
+    (~77% of total runtime) once sort_renumber's identical pattern was
+    fixed. Since dict's __getitem__ calls __missing__ exactly once per
+    absent key and then stores whatever it returns, every label that *is*
+    looked up here gets the exact same np.where(...) value as the eager
+    version would have computed (verified in
+    tests/test_cache_label_positions_equivalence.py); labels that are never
+    looked up simply never get computed, which is the entire point.
+    """
+
+    def __init__(self, segments):
+        super().__init__()
+        self._segments = segments
+
+    def __missing__(self, label):
+        if label == 0:
+            # Original never populated background at all (explicit `if
+            # label != 0` guard) - preserve that as a KeyError, not a
+            # silently-computed background mask, since it's never actually
+            # looked up in practice (both call sites filter 0 out first)
+            # and computing it would be its own O(domain_size) surprise.
+            raise KeyError(0)
+        value = np.where(self._segments == label)
+        self[label] = value
+        return value
+
+
 def cache_label_positions(segments):
     """
-    Cache the positions of labels in segments (features).
-    
+    Cache the positions of labels in segments (features), computed lazily
+    per label on first access (see _LazyLabelPositions) rather than eagerly
+    for every label up front.
+
     Args:
         segments: np.array
-            A 2D array where each element represents a label assigned to a segment 
+            A 2D array where each element represents a label assigned to a segment
             (feature). The background is assumed to be represented by 0.
 
     Returns:
-        label_positions_cache: dict
-            A dictionary mapping each label (non-zero) to a tuple of arrays containing 
-            the indices where the label occurs.
+        label_positions_cache: dict-like
+            Maps each label (non-zero) to a tuple of arrays containing the
+            indices where the label occurs - populated on demand.
     """
-    label_positions_cache = {}
-    unique_labels = np.unique(segments)
-    for label in unique_labels:
-        if label != 0:  # Ignore background
-            label_positions = np.where(segments == label)
-            label_positions_cache[label] = label_positions
-    return label_positions_cache
+    return _LazyLabelPositions(segments)
 
 def adjust_axis(segments, axis, original_shape, ext_frac, config):
     """
