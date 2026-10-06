@@ -408,7 +408,15 @@ def get_composite_reflectivity_generic(input_filename, config):
     round_time_to_second = config.get('round_time_to_second', False)  # Flag to round time coordinate to nearest second
     
     # Read input file
-    if input_format == 'netcdf':
+    if isinstance(input_filename, xr.Dataset) and input_format != 'zarr':
+        # Already-open Cartesian Dataset (e.g., a single-time slice handed in
+        # by idfeature_driver's combine_files batching path for
+        # feature_type='radar_feature'). Use it directly, bypassing the
+        # open_dataset/HEALPix-remap logic below, which still applies only to
+        # a filename string (netcdf) or a HEALPix Dataset passed with
+        # input_format='zarr' (unchanged existing behavior).
+        ds = input_filename
+    elif input_format == 'netcdf':
         ds = xr.open_dataset(input_filename)
     elif input_format == 'zarr':
         ds_hp = input_filename

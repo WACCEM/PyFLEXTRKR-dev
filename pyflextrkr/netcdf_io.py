@@ -471,3 +471,276 @@ def write_radar_cellid(
         path=cloudid_outfile, mode='w', format='NETCDF4', unlimited_dims='time', encoding=encoding
     )
     return cloudid_outfile
+
+# ----------------------------------------------------------------------------------
+def write_radar_featureid(
+        cloudid_outfile,
+        file_basetime,
+        file_datestring,
+        file_timestring,
+        out_lon,
+        out_lat,
+        x_coords,
+        y_coords,
+        dbz_comp,
+        dbz_lowlevel,
+        convsf,
+        conv_core,
+        cell_number,
+        feature_pixel_type,
+        echotop10,
+        echotop20,
+        echotop30,
+        echotop40,
+        echotop50,
+        feature_number,
+        npix_feature,
+        nfeatures,
+        reflectivity_file,
+        config,
+        **kwargs,
+):
+    """
+    Writes radar reflectivity-based MCS candidate feature (cloudid) variables
+    to netCDF file.
+
+    Unlike write_radar_cellid (which labels individual convective cells for
+    cell tracking), this writes contiguous convective-system "features"
+    identified by the Tb-style detect-and-grow approach (label_and_grow_features)
+    applied to column-maximum reflectivity, plus the Steiner convective/
+    stratiform classification and a labeled convective cell-count map
+    (cell_number) used downstream to classify each feature as MCS, multi-cell,
+    isolated-cell, or non-convective.
+
+    Args:
+        cloudid_outfile: str
+            Output cloudid netCDF file name.
+        file_basetime: np.array(float)
+            Base time in epoch seconds.
+        file_datestring: str
+            Date string in 'YYYYMMDD' format.
+        file_timestring: str
+            Time string in 'HHMMSS' format.
+        out_lon: xr.DataArray(float)
+            Output longitude 2D array.
+        out_lat: xr.DataArray(float)
+            Output latitude 2D array.
+        x_coords: np.array(float)
+            X coordinates array [m].
+        y_coords: np.array(float)
+            Y coordinates array [m].
+        dbz_comp: xr.DataArray(float)
+            Composite (column-maximum) reflectivity 2D array.
+        dbz_lowlevel: xr.DataArray(float)
+            Low-level composite reflectivity 2D array.
+        convsf: np.ndarray(int)
+            Steiner convective/stratiform classification 2D array.
+        conv_core: np.ndarray(int)
+            Steiner convective core mask 2D array (score, after small-core
+            removal).
+        cell_number: np.ndarray(int)
+            Labeled, size-sorted convective cell ID 2D array (derived from the
+            Steiner score_orig/score_dilate diagnostic mask; 0 = not a cell).
+        feature_pixel_type: np.ndarray(int)
+            Per-pixel feature classification from label_and_grow_features
+            (1=core, 2=secondary, 3=tertiary, 4=other, 5=clear) 2D array.
+        echotop10, echotop20, echotop30, echotop40, echotop50: np.ndarray(float)
+            Echo-top height 2D arrays for 10/20/30/40/50 dBZ thresholds [m].
+        feature_number: np.ndarray(int)
+            Labeled, size-sorted convective-system feature number 2D array
+            (largest = 1; 0 = not part of any feature).
+        npix_feature: np.ndarray(int)
+            Number of pixels for each labeled feature, 1D array.
+        nfeatures: int
+            Number of labeled features.
+        reflectivity_file: str or xr.Dataset
+            Input reflectivity file name, or Xarray Dataset for in-memory
+            (e.g. combined multi-file batched) input.
+        config: dict
+            Configuration dictionary.
+        **kwargs: optional arguments
+            feature_params: dict
+                label_and_grow_features parameters, written as global attrs.
+            steiner_params: dict
+                Steiner classification parameters, written as global attrs.
+            refl_bkg: np.ndarray(float)
+                Steiner background reflectivity 2D array.
+            peakedness: np.ndarray(float)
+                Steiner peakedness 2D array.
+            ds_pass: xarray.Dataset
+                Additional dataset to pass through to output.
+
+    Returns:
+        cloudid_outfile: str
+            Output cloudid netCDF file name.
+    """
+    feature_varname = config.get("feature_varname", "feature_number")
+    nfeature_varname = config.get("nfeature_varname", "nfeatures")
+    featuresize_varname = config.get("featuresize_varname", "npix_feature")
+
+    def _values(da):
+        return da.data if hasattr(da, "data") else da
+
+    # Define output variables
+    dim3d = ["time", "lat", "lon"]
+    var_dict = {
+        'base_time': (["time"], file_basetime),
+        'longitude': (['lat', 'lon'], _values(out_lon)),
+        'latitude': (['lat', 'lon'], _values(out_lat)),
+        'x': (['lon'], x_coords),
+        'y': (['lat'], y_coords),
+        'dbz_comp': (dim3d, np.expand_dims(_values(dbz_comp), axis=0)),
+        'dbz_lowlevel': (dim3d, np.expand_dims(_values(dbz_lowlevel), axis=0)),
+        'convsf': (dim3d, np.expand_dims(convsf, axis=0)),
+        'conv_core': (dim3d, np.expand_dims(conv_core, axis=0)),
+        'cell_number': (dim3d, np.expand_dims(cell_number, axis=0)),
+        'feature_pixel_type': (dim3d, np.expand_dims(feature_pixel_type, axis=0)),
+        'echotop10': (dim3d, np.expand_dims(echotop10, axis=0)),
+        'echotop20': (dim3d, np.expand_dims(echotop20, axis=0)),
+        'echotop30': (dim3d, np.expand_dims(echotop30, axis=0)),
+        'echotop40': (dim3d, np.expand_dims(echotop40, axis=0)),
+        'echotop50': (dim3d, np.expand_dims(echotop50, axis=0)),
+        feature_varname: (dim3d, np.expand_dims(feature_number, axis=0)),
+        nfeature_varname: (["time"], np.atleast_1d(nfeatures)),
+        featuresize_varname: (["features"], npix_feature),
+    }
+
+    # Output coordinates
+    coord_dict = {
+        'time': (['time'], file_basetime),
+        'lon': (['lon'], np.squeeze(_values(out_lon)[0, :])),
+        'lat': (['lat'], np.squeeze(_values(out_lat)[:, 0])),
+        'features': (['features'], np.arange(1, int(np.squeeze(nfeatures)) + 1),),
+    }
+
+    # Handle input file attribute for both netCDF string and in-memory Dataset
+    if isinstance(reflectivity_file, str):
+        input_file_attr = reflectivity_file
+    else:
+        # For a combined/in-memory Dataset (e.g. combine_files batching), note
+        # the time this frame came from instead of a source filename.
+        input_file_attr = f"In-memory Dataset (time: {file_datestring}_{file_timestring})"
+
+    # Output global attributes
+    gattr_dict = {
+        "Title": "Cloudid file from "
+        + file_datestring[0:4]
+        + "-"
+        + file_datestring[4:6]
+        + "-"
+        + file_datestring[6:8]
+        + " "
+        + file_timestring[0:2]
+        + ":"
+        + file_timestring[2:4]
+        + " UTC",
+        'Contact': 'Zhe Feng, zhe.feng@pnnl.gov',
+        'Institution': 'Pacific Northwest National Laboratory',
+        'Created_on': time.ctime(time.time()),
+        'Input_File': input_file_attr,
+    }
+    # Check for optional keyword feature_params
+    if 'feature_params' in kwargs:
+        for key, value in kwargs['feature_params'].items():
+            gattr_dict[key] = value
+    # Check for optional keyword steiner_params
+    if 'steiner_params' in kwargs:
+        for key, value in kwargs['steiner_params'].items():
+            gattr_dict[key] = value
+
+    # Check for optional keyword ds_pass
+    if 'ds_pass' in kwargs:
+        ds_pass = kwargs['ds_pass']
+        if ds_pass is not None:
+            pass_varname = list(ds_pass.data_vars)
+            for ivar in pass_varname:
+                var_dict[ivar] = (dim3d, ds_pass[ivar].data, ds_pass[ivar].attrs)
+
+    # Define xarray dataset
+    ds_out = xr.Dataset(var_dict, coords=coord_dict, attrs=gattr_dict)
+
+    # Define variable attributes
+    ds_out['x'].attrs['long_name'] = 'X distance on the projection plane from the origin'
+    ds_out['x'].attrs['units'] = 'm'
+    ds_out['y'].attrs['long_name'] = 'Y distance on the projection plane from the origin'
+    ds_out['y'].attrs['units'] = 'm'
+    ds_out['lat'].attrs['long_name'] = 'Latitudes, y-coordinate in Cartesian system'
+    ds_out['lat'].attrs['standard_name'] = 'latitude'
+    ds_out['lat'].attrs['units'] = 'degrees_north'
+    ds_out['lon'].attrs['long_name'] = 'Longitudes, x-coordinate in Cartesian system'
+    ds_out['lon'].attrs['standard_name'] = 'longitude'
+    ds_out['lon'].attrs['units'] = 'degrees_east'
+    ds_out['time'].attrs['long_name'] = 'Base time in Epoch'
+    ds_out['time'].attrs['units'] = 'Seconds since 1970-1-1'
+    ds_out['base_time'].attrs['long_name'] = 'Base time in Epoch'
+    ds_out['base_time'].attrs['units'] = 'Seconds since 1970-1-1'
+    if hasattr(out_lon, 'attrs'):
+        ds_out['longitude'].attrs = out_lon.attrs
+    if hasattr(out_lat, 'attrs'):
+        ds_out['latitude'].attrs = out_lat.attrs
+    ds_out['dbz_comp'].attrs['long_name'] = 'Composite (column-maximum) reflectivity'
+    ds_out['dbz_comp'].attrs['units'] = 'dBZ'
+    ds_out['dbz_comp'].attrs['_FillValue'] = np.nan
+    ds_out['dbz_lowlevel'].attrs['long_name'] = 'Low-level composite reflectivity'
+    ds_out['dbz_lowlevel'].attrs['units'] = 'dBZ'
+    ds_out['dbz_lowlevel'].attrs['_FillValue'] = np.nan
+    ds_out['convsf'].attrs['long_name'] = 'Steiner Convective/Stratiform classification'
+    ds_out['convsf'].attrs['units'] = 'unitless'
+    ds_out['convsf'].attrs['comment'] = 'NAN:0, NO_SURF_ECHO:1, WEAK_ECHO:2, STRATIFORM:3, CONVECTIVE:4'
+    ds_out['conv_core'].attrs['long_name'] = \
+        'Convective core mask after reflectivity threshold and peakedness steps ' + \
+        '(1 = convective, 0 = not convective)'
+    ds_out['conv_core'].attrs['units'] = 'unitless'
+    ds_out['cell_number'].attrs['long_name'] = \
+        'Labeled convective cell number, sorted by size (largest=1; derived from Steiner score)'
+    ds_out['cell_number'].attrs['units'] = 'unitless'
+    ds_out['cell_number'].attrs['_FillValue'] = 0
+    ds_out['feature_pixel_type'].attrs['long_name'] = \
+        'Per-pixel feature classification: 1=core, 2=secondary, 3=tertiary, 4=other, 5=clear'
+    ds_out['feature_pixel_type'].attrs['units'] = 'unitless'
+    ds_out['echotop10'].attrs['long_name'] = '10dBZ echo-top height'
+    ds_out['echotop10'].attrs['units'] = 'm'
+    ds_out['echotop10'].attrs['_FillValue'] = np.nan
+    ds_out['echotop20'].attrs['long_name'] = '20dBZ echo-top height'
+    ds_out['echotop20'].attrs['units'] = 'm'
+    ds_out['echotop20'].attrs['_FillValue'] = np.nan
+    ds_out['echotop30'].attrs['long_name'] = '30dBZ echo-top height'
+    ds_out['echotop30'].attrs['units'] = 'm'
+    ds_out['echotop30'].attrs['_FillValue'] = np.nan
+    ds_out['echotop40'].attrs['long_name'] = '40dBZ echo-top height'
+    ds_out['echotop40'].attrs['units'] = 'm'
+    ds_out['echotop40'].attrs['_FillValue'] = np.nan
+    ds_out['echotop50'].attrs['long_name'] = '50dBZ echo-top height'
+    ds_out['echotop50'].attrs['units'] = 'm'
+    ds_out['echotop50'].attrs['_FillValue'] = np.nan
+    ds_out[feature_varname].attrs['long_name'] = \
+        'Labeled convective-system feature number for tracking (detect-and-grow on column-max reflectivity)'
+    ds_out[feature_varname].attrs['units'] = 'unitless'
+    ds_out[feature_varname].attrs['_FillValue'] = 0
+    ds_out[nfeature_varname].attrs['long_name'] = 'Number of features labeled'
+    ds_out[nfeature_varname].attrs['units'] = 'unitless'
+    ds_out[featuresize_varname].attrs['long_name'] = 'Number of pixels for each feature'
+    ds_out[featuresize_varname].attrs['units'] = 'unitless'
+
+    # Now check for optional diagnostic arguments
+    if 'refl_bkg' in kwargs and kwargs['refl_bkg'] is not None:
+        ds_out['refl_bkg'] = (dim3d, np.expand_dims(kwargs['refl_bkg'], axis=0))
+        ds_out['refl_bkg'].attrs['long_name'] = 'Steiner background reflectivity'
+        ds_out['refl_bkg'].attrs['units'] = 'dBZ'
+    if 'peakedness' in kwargs and kwargs['peakedness'] is not None:
+        ds_out['peakedness'] = (dim3d, np.expand_dims(kwargs['peakedness'], axis=0))
+        ds_out['peakedness'].attrs['long_name'] = 'Peakedness above background reflectivity'
+        ds_out['peakedness'].attrs['units'] = 'dB'
+
+    # Set encoding/compression for all variables
+    comp = dict(zlib=True)
+    encoding = {var: comp for var in ds_out.data_vars}
+
+    # Touch output file so HDF5 1.14.x H5Fis_accessible() probe does not
+    # fail with ENOENT and emit spurious diagnostics to stderr
+    open(cloudid_outfile, 'ab').close()
+    # Write to netcdf file
+    ds_out.to_netcdf(
+        path=cloudid_outfile, mode='w', format='NETCDF4', unlimited_dims='time', encoding=encoding
+    )
+    return cloudid_outfile
