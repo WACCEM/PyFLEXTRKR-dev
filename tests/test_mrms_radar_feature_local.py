@@ -26,10 +26,22 @@ CELLTRACKING_CONFIG = (
     "/global/u1/f/feng045/program/airscape/conus_tracking/config/config/"
     "config_celltracking_3km_MRMS_202505.yaml"
 )
-RADAR3D_CONFIG = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "config", "config_mcs_3km_MRMS.yaml",
+# The MRMS radar3D MCS run config is kept with the airscape CONUS tracking jobs
+# (not in this repo).
+RADAR3D_CONFIG = (
+    "/global/homes/f/feng045/program/airscape/conus_tracking/config/"
+    "config_mcs_3km_MRMS.yaml"
 )
+
+
+# Parameters the reference cell-tracking cloudid file records as global
+# attributes; the parity comparison pins these to the reference's values.
+PARITY_PARAM_KEYS = [
+    "absConvThres", "minZdiff", "truncZconvThres", "mindBZuse",
+    "dBZforMaxConvRadius", "conv_rad_increment", "conv_rad_start",
+    "bkg_refl_increment", "maxConvRadius", "weakEchoThres", "bkgrndRadius",
+    "min_corearea", "echotop_gap", "sfc_dz_min", "sfc_dz_max",
+]
 
 
 def _data_available():
@@ -37,6 +49,7 @@ def _data_available():
         os.environ.get("PYFLEXTRKR_TEST_DATA") is not None
         and os.path.isfile(INPUT_FILE)
         and os.path.isfile(REFERENCE_CELLID_FILE)
+        and os.path.isfile(RADAR3D_CONFIG)
     )
 
 
@@ -63,6 +76,17 @@ def radar_feature_output(tmp_path_factory):
     config = load_config(tmp_config_file)
     config["input_format"] = "netcdf"
     config["combine_files"] = False
+
+    # This is a parity test against the cell-tracking output, so pin the
+    # Steiner / echo-top parameters to the values recorded in that reference
+    # file's global attributes. Otherwise the test would depend on whatever
+    # the run config is currently tuned to (e.g. echotop_gap: 2 in the run
+    # config vs 1 in the reference changes ~0.13% of echo-top pixels).
+    with xr.open_dataset(REFERENCE_CELLID_FILE, decode_times=False) as ds_ref:
+        for key in PARITY_PARAM_KEYS:
+            if key in ds_ref.attrs:
+                val = ds_ref.attrs[key]
+                config[key] = val.item() if hasattr(val, "item") else val
 
     outfile = idfeature_radar3d(INPUT_FILE, config)
     assert outfile is not None
