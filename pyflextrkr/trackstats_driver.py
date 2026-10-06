@@ -194,7 +194,8 @@ def trackstats_driver(config):
                      "track_status",
                      "track_interruptions",
                      "merge_tracknumbers",
-                     "split_tracknumbers"]
+                     "split_tracknumbers",
+                     "ncells"]
     # Loop over variable list to create the dictionary entry
     for ivar in var_names:
         out_dict[ivar] = np.array([])
@@ -442,6 +443,14 @@ def adjust_positions_for_tracks(out_dict, thresh_x,thresh_y, pbc_max_domain_frac
         variable_names = [
             'core_meanlat', 'core_meanlon', 'core_mean_y', 'core_mean_x',
             'cell_meanlat', 'cell_meanlon', 'cell_mean_y', 'cell_mean_x'
+        ]
+    elif feature_type == 'radar_feature':
+        # mean_x/mean_y and x/y_weightedcentroid are projected [km] positions,
+        # not lat/lon-like, and are intentionally left out here (same
+        # limitation as radar_cells' core_mean_x/y use of pixel-count
+        # thresholds against km values - not PBC-unwrapped for this type).
+        variable_names = [
+            'meanlat', 'meanlon', 'lat_weightedcentroid', 'lon_weightedcentroid',
         ]
     else:
         variable_names = ['meanlat', 'meanlon']

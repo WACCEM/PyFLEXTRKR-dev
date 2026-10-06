@@ -4,6 +4,7 @@ import xarray as xr
 import sys
 import logging
 import warnings
+from skimage.measure import regionprops
 from pyflextrkr.ftfunctions import circular_mean
 from pyflextrkr.ft_utilities import get_pixel_area
 
@@ -119,6 +120,31 @@ def calc_stats_singlefile(
             file_tb = ds["tb"].squeeze().values
             file_cloudtype = ds["cloudtype"].squeeze().values
 
+        # Radar-based MCS candidate features (detect-and-grow on column-max
+        # reflectivity; see idfeature_radar3d.py). Unlike radar_cells, the
+        # feature boundary itself (file_corecold_cloudnumber) is NOT replaced
+        # here - it stays as feature_number, since that detect-and-grow
+        # region (not the convective mask) is the "feature" for this type.
+        if feature_type == "radar_feature":
+            ref_varname = config.get("ref_varname", "dbz_comp")
+            dbz_area_threshs = config.get("trackstats_dbz_area_threshs", [45, 50])
+            # Convert x,y units to [km]
+            x_coords = ds["x"].values / 1000.
+            y_coords = ds["y"].values / 1000.
+            x_coords_min = np.nanmin(x_coords)
+            x_coords_max = np.nanmax(x_coords)
+            y_coords_min = np.nanmin(y_coords)
+            y_coords_max = np.nanmax(y_coords)
+            file_dbz = ds[ref_varname].squeeze().values
+            file_convsf = ds["convsf"].squeeze().values
+            file_cellnumber = ds["cell_number"].squeeze().values
+            # Convert echo-top height units to [km]
+            file_echotop10 = ds["echotop10"].squeeze().values / 1000.
+            file_echotop20 = ds["echotop20"].squeeze().values / 1000.
+            file_echotop30 = ds["echotop30"].squeeze().values / 1000.
+            file_echotop40 = ds["echotop40"].squeeze().values / 1000.
+            file_echotop50 = ds["echotop50"].squeeze().values / 1000.
+
         # ds.close()
 
         # Find unique track numbers
@@ -160,6 +186,38 @@ def calc_stats_singlefile(
             out_core_area = np.full(numtracks, fillval_f, dtype=np.float32)
             out_cell_area = np.full(numtracks, fillval_f, dtype=np.float32)
             out_cell_rangeflag = np.full(numtracks, fillval, dtype=np.short)
+
+        # Radar-based MCS candidate features
+        if feature_type == "radar_feature":
+            out_mean_x = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_mean_y = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_lat_weightedcentroid = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_lon_weightedcentroid = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_x_weightedcentroid = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_y_weightedcentroid = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_max_dbz = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_majoraxis = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_minoraxis = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_aspectratio = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_orientation = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_eccentricity = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_conv_area = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_strat_area = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_ncells = np.full(numtracks, fillval, dtype=np.int32)
+            out_maxETH10 = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_maxETH20 = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_maxETH30 = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_maxETH40 = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_maxETH50 = np.full(numtracks, fillval_f, dtype=np.float32)
+            # Dynamic dBZ-threshold area variables (whole-feature and
+            # convective-only), one pair of arrays per threshold in
+            # config['trackstats_dbz_area_threshs']
+            out_area_dbz = {
+                t: np.full(numtracks, fillval_f, dtype=np.float32) for t in dbz_area_threshs
+            }
+            out_conv_area_dbz = {
+                t: np.full(numtracks, fillval_f, dtype=np.float32) for t in dbz_area_threshs
+            }
 
         # Satellite Tb
         if "tb" in feature_type:
@@ -206,6 +264,36 @@ def calc_stats_singlefile(
             # pdb.set_trace()
             # plt.pcolormesh(Zm)
 
+        if feature_type == "radar_feature":
+            # Steiner classification codes (idfeature_radar3d.py): 1=NO_SURF_ECHO,
+            # 2=WEAK_ECHO, 3=STRATIFORM, 4=CONVECTIVE
+            core_cloudnumber_mask = file_corecold_cloudnumber * (file_convsf == 4)
+            corenumber1d_uniq, corenumber1d_counts, \
+            ast_corearea, cumcounts_corearea = pre_sort_cloudnumber(core_cloudnumber_mask)
+
+            strat_cloudnumber_mask = file_corecold_cloudnumber * (file_convsf == 3)
+            stratnumber1d_uniq, stratnumber1d_counts, \
+            ast_stratarea, cumcounts_stratarea = pre_sort_cloudnumber(strat_cloudnumber_mask)
+
+            # Shape statistics (major/minor axis, orientation, eccentricity) and
+            # reflectivity-weighted centroid: computed once for every labeled
+            # feature in this file via a single regionprops call (skimage crops
+            # each label to its own bounding box internally), then looked up by
+            # label per track below - much cheaper than one regionprops call
+            # per track.
+            # Caveat: for a feature that wraps around a periodic (PBC) domain
+            # boundary, this gives a misleading bounding box/orientation, since
+            # no roll-correction is applied here (unlike matchtbradar_func.py's
+            # per-PF roll handling). Not expected to matter for the primary
+            # (non-periodic, CONUS) use case; flagged here for awareness.
+            file_dbz_filled = np.copy(file_dbz)
+            file_dbz_filled[np.isnan(file_dbz_filled)] = -9999.
+            feature_regionprops = regionprops(file_corecold_cloudnumber, intensity_image=file_dbz_filled)
+            props_by_label = {p.label: p for p in feature_regionprops}
+            if area_method == "latlon":
+                mean_pixelength = np.sqrt(np.nanmean(pixel_area))
+            else:
+                mean_pixelength = pixel_radius
 
         # Loop over unique tracknumbers
         for itrack in range(numtracks):
@@ -385,6 +473,113 @@ def calc_stats_singlefile(
                         out_cell_rangeflag[itrack] = np.min(
                             rangemask[dilatedcell_indices[0], dilatedcell_indices[1]])
 
+                # Calculate feature specific statistics
+                # Radar-based MCS candidate features
+                if feature_type == "radar_feature":
+                    # Get convective pixel location indices (within this feature)
+                    core_npix, core_indices = get_loc_indices(
+                        corenumber1d_uniq, corenumber1d_counts,
+                        ast_corearea, cumcounts_corearea,
+                        cloudnumber_map, nx, ny,
+                    )
+                    # Get stratiform pixel location indices (within this feature)
+                    strat_npix, strat_indices = get_loc_indices(
+                        stratnumber1d_uniq, stratnumber1d_counts,
+                        ast_stratarea, cumcounts_stratarea,
+                        cloudnumber_map, nx, ny,
+                    )
+
+                    # Mean x/y position (projected coordinates, [km])
+                    feature_y = y_coords[corecold_indices[0]]
+                    feature_x = x_coords[corecold_indices[1]]
+                    if pbc_direction in ['x', 'both']:
+                        out_mean_x[itrack] = circular_mean(feature_x, x_coords_min, x_coords_max)
+                    else:
+                        out_mean_x[itrack] = np.nanmean(feature_x)
+                    if pbc_direction in ['y', 'both']:
+                        out_mean_y[itrack] = circular_mean(feature_y, y_coords_min, y_coords_max)
+                    else:
+                        out_mean_y[itrack] = np.nanmean(feature_y)
+
+                    # Max reflectivity in the whole feature
+                    out_max_dbz[itrack] = np.nanmax(
+                        file_dbz[corecold_indices[0], corecold_indices[1]]
+                    )
+
+                    # Convective / stratiform area
+                    if area_method == "latlon":
+                        out_conv_area[itrack] = np.nansum(pixel_area[core_indices[0], core_indices[1]]) if core_npix > 0 else 0
+                        out_strat_area[itrack] = np.nansum(pixel_area[strat_indices[0], strat_indices[1]]) if strat_npix > 0 else 0
+                    else:
+                        out_conv_area[itrack] = core_npix * pixel_radius ** 2
+                        out_strat_area[itrack] = strat_npix * pixel_radius ** 2
+
+                    # Number of unique convective cells within this feature
+                    feature_cellnumber = file_cellnumber[corecold_indices[0], corecold_indices[1]]
+                    unique_cells = np.unique(feature_cellnumber[feature_cellnumber > 0])
+                    out_ncells[itrack] = len(unique_cells)
+
+                    # Whole-feature and convective-only area exceeding each
+                    # configured dBZ threshold
+                    feature_dbz_vals = file_dbz[corecold_indices[0], corecold_indices[1]]
+                    core_dbz_vals = file_dbz[core_indices[0], core_indices[1]] if core_npix > 0 else None
+                    for t in dbz_area_threshs:
+                        mask_t = feature_dbz_vals > t
+                        if area_method == "latlon":
+                            feature_pixel_area = pixel_area[corecold_indices[0], corecold_indices[1]]
+                            out_area_dbz[t][itrack] = np.nansum(feature_pixel_area[mask_t]) if np.any(mask_t) else 0
+                        else:
+                            out_area_dbz[t][itrack] = np.count_nonzero(mask_t) * pixel_radius ** 2
+                        if core_npix > 0:
+                            mask_tc = core_dbz_vals > t
+                            if area_method == "latlon":
+                                core_pixel_area = pixel_area[core_indices[0], core_indices[1]]
+                                out_conv_area_dbz[t][itrack] = np.nansum(core_pixel_area[mask_tc]) if np.any(mask_tc) else 0
+                            else:
+                                out_conv_area_dbz[t][itrack] = np.count_nonzero(mask_tc) * pixel_radius ** 2
+                        else:
+                            out_conv_area_dbz[t][itrack] = 0
+
+                    # Max echo-top heights, restricted to convective pixels
+                    # within this feature
+                    if core_npix > 0:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore", category=RuntimeWarning)
+                            out_maxETH10[itrack] = np.nanmax(file_echotop10[core_indices[0], core_indices[1]])
+                            out_maxETH20[itrack] = np.nanmax(file_echotop20[core_indices[0], core_indices[1]])
+                            out_maxETH30[itrack] = np.nanmax(file_echotop30[core_indices[0], core_indices[1]])
+                            out_maxETH40[itrack] = np.nanmax(file_echotop40[core_indices[0], core_indices[1]])
+                            out_maxETH50[itrack] = np.nanmax(file_echotop50[core_indices[0], core_indices[1]])
+
+                    # Shape statistics and reflectivity-weighted centroid,
+                    # looked up from the whole-file regionprops computed above
+                    fp = props_by_label.get(cloudnumber_map, None)
+                    if fp is not None:
+                        out_eccentricity[itrack] = fp.eccentricity
+                        out_majoraxis[itrack] = fp.axis_major_length * mean_pixelength
+                        try:
+                            out_minoraxis[itrack] = fp.axis_minor_length * mean_pixelength
+                        except ValueError:
+                            pass
+                        if (not np.isnan(out_minoraxis[itrack])) and (out_minoraxis[itrack] > 0):
+                            out_aspectratio[itrack] = out_majoraxis[itrack] / out_minoraxis[itrack]
+                        out_orientation[itrack] = fp.orientation * (180. / np.pi)
+
+                        # Reflectivity-weighted centroid: guard against NaN,
+                        # which regionprops can return when the intensity
+                        # image has no valid positive weights in this label
+                        # (shouldn't happen here since every feature pixel
+                        # has dbz_comp > secondary_thresh by construction,
+                        # but guarded defensively).
+                        _cw = fp.centroid_weighted
+                        if not (np.isnan(_cw[0]) or np.isnan(_cw[1])):
+                            yc, xc = int(round(_cw[0])), int(round(_cw[1]))
+                            if (0 <= yc < ny) and (0 <= xc < nx):
+                                out_lat_weightedcentroid[itrack] = latitude[yc, xc]
+                                out_lon_weightedcentroid[itrack] = longitude[yc, xc]
+                                out_y_weightedcentroid[itrack] = y_coords[yc]
+                                out_x_weightedcentroid[itrack] = x_coords[xc]
+
             out_basetime[itrack] = file_basetime
             out_cloudnumber[itrack] = cloudnumber_map
             # out_cloudidfile[itrack][:] = fname
@@ -457,6 +652,24 @@ def calc_stats_singlefile(
                                                       out_core_mean_x, out_core_mean_y,
                                                       out_core_meanlat, out_core_meanlon,
                                                       rangemask_varname)
+            # Merge with the baseline dictionaries
+            out_dict.update(out_dict_extra)
+            out_dict_attrs.update(out_dict_attrs_extra)
+
+        if feature_type == "radar_feature":
+            out_dict_attrs_extra, \
+            out_dict_extra = define_extra_radar_feature(
+                fillval, fillval_f,
+                out_mean_x, out_mean_y,
+                out_lat_weightedcentroid, out_lon_weightedcentroid,
+                out_x_weightedcentroid, out_y_weightedcentroid,
+                out_max_dbz,
+                out_majoraxis, out_minoraxis, out_aspectratio,
+                out_orientation, out_eccentricity,
+                out_conv_area, out_strat_area, out_ncells,
+                out_maxETH10, out_maxETH20, out_maxETH30, out_maxETH40, out_maxETH50,
+                dbz_area_threshs, out_area_dbz, out_conv_area_dbz,
+            )
             # Merge with the baseline dictionaries
             out_dict.update(out_dict_extra)
             out_dict_attrs.update(out_dict_attrs_extra)
@@ -808,6 +1021,193 @@ def define_extra_radar_cells(fillval, fillval_f, out_cell_area, out_cell_maxETH1
             "rangemask_varname": str(rangemask_varname),
         },
     }
+    return out_dict_attrs_extra, out_dict_extra
+
+
+def define_extra_radar_feature(
+        fillval, fillval_f,
+        out_mean_x, out_mean_y,
+        out_lat_weightedcentroid, out_lon_weightedcentroid,
+        out_x_weightedcentroid, out_y_weightedcentroid,
+        out_max_dbz,
+        out_majoraxis, out_minoraxis, out_aspectratio,
+        out_orientation, out_eccentricity,
+        out_conv_area, out_strat_area, out_ncells,
+        out_maxETH10, out_maxETH20, out_maxETH30, out_maxETH40, out_maxETH50,
+        dbz_area_threshs, out_area_dbz, out_conv_area_dbz,
+):
+    """
+    Define extra output variables and attributes dictionary for radar-based
+    MCS candidate features (feature_type='radar_feature').
+
+    Args:
+        fillval:
+        fillval_f:
+        out_mean_x, out_mean_y: np.array
+            Mean x/y position of a feature [km].
+        out_lat_weightedcentroid, out_lon_weightedcentroid: np.array
+            Reflectivity-weighted centroid lat/lon of a feature.
+        out_x_weightedcentroid, out_y_weightedcentroid: np.array
+            Reflectivity-weighted centroid x/y position of a feature [km].
+        out_max_dbz: np.array
+            Maximum reflectivity in a feature.
+        out_majoraxis, out_minoraxis, out_aspectratio, out_orientation, out_eccentricity: np.array
+            Shape statistics of a feature (regionprops).
+        out_conv_area, out_strat_area: np.array
+            Convective / stratiform area of a feature.
+        out_ncells: np.array
+            Number of unique convective cells within a feature.
+        out_maxETH10 ... out_maxETH50: np.array
+            Maximum echo-top heights in convective pixels of a feature.
+        dbz_area_threshs: list
+            dBZ thresholds for the dynamic area_<T>dbz / conv_area_<T>dbz variables.
+        out_area_dbz, out_conv_area_dbz: dict {threshold: np.array}
+            Whole-feature / convective-only area exceeding each threshold.
+
+    Returns:
+        out_dict_attrs_extra: dictionary.
+            Output variable attributes dictionary.
+        out_dict_extra: dictionary.
+            Output variable dictionary.
+    """
+    out_dict_extra = {
+        "mean_x": out_mean_x,
+        "mean_y": out_mean_y,
+        "lat_weightedcentroid": out_lat_weightedcentroid,
+        "lon_weightedcentroid": out_lon_weightedcentroid,
+        "x_weightedcentroid": out_x_weightedcentroid,
+        "y_weightedcentroid": out_y_weightedcentroid,
+        "max_dbz": out_max_dbz,
+        "majoraxis": out_majoraxis,
+        "minoraxis": out_minoraxis,
+        "aspectratio": out_aspectratio,
+        "orientation": out_orientation,
+        "eccentricity": out_eccentricity,
+        "conv_area": out_conv_area,
+        "strat_area": out_strat_area,
+        "ncells": out_ncells,
+        "maxETH_10dbz": out_maxETH10,
+        "maxETH_20dbz": out_maxETH20,
+        "maxETH_30dbz": out_maxETH30,
+        "maxETH_40dbz": out_maxETH40,
+        "maxETH_50dbz": out_maxETH50,
+    }
+    out_dict_attrs_extra = {
+        "mean_x": {
+            "long_name": "Mean x-distance of a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
+        },
+        "mean_y": {
+            "long_name": "Mean y-distance of a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
+        },
+        "lat_weightedcentroid": {
+            "long_name": "Reflectivity-weighted centroid latitude of a feature",
+            "units": "degrees_north",
+            "_FillValue": fillval_f,
+        },
+        "lon_weightedcentroid": {
+            "long_name": "Reflectivity-weighted centroid longitude of a feature",
+            "units": "degrees_east",
+            "_FillValue": fillval_f,
+        },
+        "x_weightedcentroid": {
+            "long_name": "Reflectivity-weighted centroid x-distance of a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
+        },
+        "y_weightedcentroid": {
+            "long_name": "Reflectivity-weighted centroid y-distance of a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
+        },
+        "max_dbz": {
+            "long_name": "Maximum reflectivity in a feature",
+            "units": "dBZ",
+            "_FillValue": fillval_f,
+        },
+        "majoraxis": {
+            "long_name": "Major axis length of a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
+        },
+        "minoraxis": {
+            "long_name": "Minor axis length of a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
+        },
+        "aspectratio": {
+            "long_name": "Aspect ratio (major axis / minor axis) of a feature",
+            "units": "unitless",
+            "_FillValue": fillval_f,
+        },
+        "orientation": {
+            "long_name": "Orientation of major axis of a feature",
+            "units": "degrees",
+            "_FillValue": fillval_f,
+        },
+        "eccentricity": {
+            "long_name": "Eccentricity of a feature",
+            "units": "unitless",
+            "_FillValue": fillval_f,
+        },
+        "conv_area": {
+            "long_name": "Convective area of a feature",
+            "units": "km^2",
+            "_FillValue": fillval_f,
+        },
+        "strat_area": {
+            "long_name": "Stratiform area of a feature",
+            "units": "km^2",
+            "_FillValue": fillval_f,
+        },
+        "ncells": {
+            "long_name": "Number of unique convective cells in a feature",
+            "units": "unitless",
+            "_FillValue": fillval,
+        },
+        "maxETH_10dbz": {
+            "long_name": "Maximum 10dBZ echo-top height in convective pixels of a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
+        },
+        "maxETH_20dbz": {
+            "long_name": "Maximum 20dBZ echo-top height in convective pixels of a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
+        },
+        "maxETH_30dbz": {
+            "long_name": "Maximum 30dBZ echo-top height in convective pixels of a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
+        },
+        "maxETH_40dbz": {
+            "long_name": "Maximum 40dBZ echo-top height in convective pixels of a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
+        },
+        "maxETH_50dbz": {
+            "long_name": "Maximum 50dBZ echo-top height in convective pixels of a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
+        },
+    }
+    # Dynamic dBZ-threshold area variables, one pair per configured threshold
+    for t in dbz_area_threshs:
+        out_dict_extra[f"area_{t}dbz"] = out_area_dbz[t]
+        out_dict_extra[f"conv_area_{t}dbz"] = out_conv_area_dbz[t]
+        out_dict_attrs_extra[f"area_{t}dbz"] = {
+            "long_name": f"Area of a feature with reflectivity > {t} dBZ",
+            "units": "km^2",
+            "_FillValue": fillval_f,
+        }
+        out_dict_attrs_extra[f"conv_area_{t}dbz"] = {
+            "long_name": f"Convective area of a feature with reflectivity > {t} dBZ",
+            "units": "km^2",
+            "_FillValue": fillval_f,
+        }
     return out_dict_attrs_extra, out_dict_extra
 
 
