@@ -7,9 +7,8 @@ from pyflextrkr.idfeature_driver import idfeature_driver
 from pyflextrkr.tracksingle_driver import tracksingle_driver
 from pyflextrkr.gettracks import gettracknumbers
 from pyflextrkr.trackstats_driver import trackstats_driver
-# Phase 3/4 additions (not yet implemented):
-# from pyflextrkr.identifymcs_radar import identifymcs_radar
-# from pyflextrkr.mapfeature_driver import mapfeature_driver
+from pyflextrkr.identifymcs_radar import identifymcs_radar
+from pyflextrkr.mapfeature_driver import mapfeature_driver
 
 """
 Run MCS tracking directly from 3D (or 2D) Cartesian radar reflectivity
@@ -75,14 +74,12 @@ if __name__ == '__main__':
         trackstats_filename = trackstats_driver(config)
 
     # Step 5 - Identify MCS from radar statistics (lifecycle, merge/split folding)
-    # [Phase 3] Not yet implemented.
-    # if config.get('run_identifymcs', False):
-    #     mcsstats_filename = identifymcs_radar(config)
+    if config.get('run_identifymcs', False):
+        mcsstats_filename = identifymcs_radar(config)
 
     # Step 6 - Map tracking to pixel files
-    # [Phase 4] Not yet implemented.
-    # if config.get('run_mapfeature', False):
-    #     mapfeature_driver(config, trackstats_filebase=config['finalstats_filebase'])
+    if config.get('run_mapfeature', False):
+        mapfeature_driver(config, trackstats_filebase=config['finalstats_filebase'])
 
     # Clean up resources
     if run_parallel >= 1:

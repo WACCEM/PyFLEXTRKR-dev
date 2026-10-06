@@ -15,9 +15,9 @@ run_idfeature : True         # parallel (batched by time frame, see combine_file
 run_tracksingle : True       # parallel
 run_gettracks : True         # serial
 run_trackstats : True        # parallel
-run_identifymcs : False      # [Phase 3] serial - not yet implemented
-run_mapfeature : False       # [Phase 4] parallel - not yet implemented
-run_speed : False            # optional, parallel - not yet implemented
+run_identifymcs : True       # serial
+run_mapfeature : True        # parallel
+run_speed : False            # optional, not yet wired into run_mcs_radar3d.py
 
 # Parallel processing set up
 # run_parallel: 0 (serial), 1 (local cluster), 2 (Dask distributed scheduler)

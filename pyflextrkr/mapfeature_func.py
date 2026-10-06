@@ -18,6 +18,7 @@ def map_feature(
         config,
         pixeltracking_outpath,
         pixeltracking_filebase,
+        file_featureclass=None,
 ):
     """
     Map track numbers to pixel level files for all feature tracking.
@@ -49,6 +50,12 @@ def map_feature(
             Output directory for pixel-level files.
         pixeltracking_filebase: string
             Output pixel-level file basename.
+        file_featureclass: np.array, optional, default=None
+            Per-cloud feature classification for this time (e.g.
+            identifymcs_radar.py's feature_class: 1=MCS, 2=multi-cell,
+            3=isolated-cell, 4=non-convective). When provided, a
+            feature_class pixel map is written, with merge/split fragment
+            pixels taking their parent track's class.
 
     Returns:
         tracksmap_outfile: string
@@ -99,6 +106,9 @@ def map_feature(
     trackmap_merge = np.zeros((1, ny, nx), dtype=int)
     trackmap_split = np.zeros((1, ny, nx), dtype=int)
 
+    if file_featureclass is not None:
+        featureclassmap = np.full((1, ny, nx), fillval, dtype=int)
+
     # Check number of matched features
     nmatchcloud = len(file_cloudnumber)
     if nmatchcloud > 0:
@@ -118,6 +128,8 @@ def map_feature(
                 trackmap[0, cmask] = file_trackindex[jj] + 1
                 trackmap_include_ms[0, cmask] = file_trackindex[jj] + 1
                 statusmap[0, cmask] = jjstatus
+                if file_featureclass is not None:
+                    featureclassmap[0, cmask] = file_featureclass[jj]
             else:
                 logger.warning(f"Warning: No matching cloud pixel found: {jjcloudnumber}")
 
@@ -134,6 +146,9 @@ def map_feature(
                     if np.count_nonzero(s_cmask) > 0:
                         trackmap_include_ms[0, s_cmask] = file_trackindex[jj] + 1
                         trackmap_split[0, s_cmask] = file_trackindex[jj] + 1
+                        # Split fragment pixels take their parent track's class
+                        if file_featureclass is not None:
+                            featureclassmap[0, s_cmask] = file_featureclass[jj]
                     else:
                         logger.warning(f"Warning: No matching splitting cloud found: {is_number}")
 
@@ -150,6 +165,9 @@ def map_feature(
                     if np.count_nonzero(m_cmask) > 0:
                         trackmap_include_ms[0, m_cmask] = file_trackindex[jj] + 1
                         trackmap_merge[0, m_cmask] = file_trackindex[jj] + 1
+                        # Merge fragment pixels take their parent track's class
+                        if file_featureclass is not None:
+                            featureclassmap[0, m_cmask] = file_featureclass[jj]
                     else:
                         logger.warning(f"Warning: No matching merging cloud found: {im_number}")
 
@@ -190,6 +208,13 @@ def map_feature(
     if "radar3d" in feature_type:
         dbz_thresh = config["dbz_thresh"]
         reflectivity = ds_in["reflectivity_comp"]
+        dbztrackmap = (reflectivity.data > dbz_thresh) * trackmap_include_ms
+    # Exact match (not substring), to avoid any ambiguity with the "radar3d"
+    # substring check above, which belongs to the separate Tb+SL3D pipeline.
+    if feature_type == "radar_feature":
+        dbz_thresh = config.get("dbz_thresh", 10)
+        ref_varname = config.get("ref_varname", "dbz_comp")
+        reflectivity = ds_in[ref_varname]
         dbztrackmap = (reflectivity.data > dbz_thresh) * trackmap_include_ms
 
 
@@ -267,6 +292,22 @@ def map_feature(
             "reflectivity_threshold": dbz_thresh,
         }
         dbztrackmap = xr.DataArray(dbztrackmap, coords=coords, dims=dims_keep, attrs=dbztrackmap_attrs)
+    if feature_type == "radar_feature":
+        dbztrackmap_attrs = {
+            "long_name": "Track number including merge/split for composite reflectivity",
+            "units": "unitless",
+            "_FillValue": 0,
+            "reflectivity_threshold": dbz_thresh,
+        }
+        dbztrackmap = xr.DataArray(dbztrackmap, coords=coords, dims=dims_keep, attrs=dbztrackmap_attrs)
+        if file_featureclass is not None:
+            featureclassmap_attrs = {
+                "long_name": "Feature class: 1=MCS, 2=multi-cell, 3=isolated-cell, 4=non-convective",
+                "units": "unitless",
+                "_FillValue": fillval,
+                "comments": "Merge/split fragment pixels take their parent track's class.",
+            }
+            featureclassmap = xr.DataArray(featureclassmap, coords=coords, dims=dims_keep, attrs=featureclassmap_attrs)
 
     # Create a copy of the input dataset
     ds_out = ds_in.copy(deep=True)
@@ -283,6 +324,10 @@ def map_feature(
         ds_out = ds_out.assign(pcptracknumber=pcptrackmap)
     if "radar3d" in feature_type:
         ds_out = ds_out.assign(dbztracknumber=dbztrackmap)
+    if feature_type == "radar_feature":
+        ds_out = ds_out.assign(dbztracknumber=dbztrackmap)
+        if file_featureclass is not None:
+            ds_out = ds_out.assign(feature_class=featureclassmap)
     # Update global attributes
     ds_out.attrs["Title"] = "Pixel-level feature tracking data"
     ds_out.attrs["Created_on"] = time.ctime(time.time())

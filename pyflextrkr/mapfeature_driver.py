@@ -79,6 +79,15 @@ def mapfeature_driver(
     stats_cloudnumber = ds["cloudnumber"].data
     stats_trackstatus = ds["track_status"].data
     trackstats_comments = ds["track_status"].comments
+
+    # Optional per-cloud feature classification (e.g. identifymcs_radar.py's
+    # feature_class: 1=MCS, 2=multi-cell, 3=isolated-cell, 4=non-convective),
+    # painted into pixel files as its own map when present.
+    mapfeature_class_varname = config.get("mapfeature_class_varname", None)
+    if mapfeature_class_varname is not None and mapfeature_class_varname in stats_varnames:
+        stats_featureclass = ds[mapfeature_class_varname].data
+    else:
+        stats_featureclass = None
     ds.close()
 
     # Put merge/split tracknumbers & cloudnumbers in a list
@@ -144,6 +153,9 @@ def mapfeature_driver(
         file_mergetracknumber = stats_mergetracknumber[itrack, itime]
         file_splittracknumber = stats_splittracknumber[itrack, itime]
 
+        # Optional per-cloud feature class for this time
+        file_featureclass = stats_featureclass[itrack, itime] if stats_featureclass is not None else None
+
         # Serial
         if run_parallel == 0:
             result = map_feature(
@@ -160,6 +172,7 @@ def mapfeature_driver(
                 config,
                 pixeltracking_outpath,
                 pixeltracking_filebase,
+                file_featureclass=file_featureclass,
             )
         # Parallel
         elif run_parallel >= 1:
@@ -177,6 +190,7 @@ def mapfeature_driver(
                 config,
                 pixeltracking_outpath,
                 pixeltracking_filebase,
+                file_featureclass=file_featureclass,
             )
             results.append(result)
         else:
