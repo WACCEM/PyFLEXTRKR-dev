@@ -819,7 +819,7 @@ def mod_steiner_classification(
     return_diag: bool, optional
         A flag to return more fields for diagnostic purpose (default False)
     convolve_method: string, optional
-        Choose which convolution method to use in Scipy: 'ndimage' (default), or 'signal'
+        Choose which convolution method to use in Scipy: 'fft' (default), 'ndimage', or 'signal'
 
     Returns:
     ===========
