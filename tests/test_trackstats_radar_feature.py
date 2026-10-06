@@ -174,7 +174,7 @@ class TestTrackstatsRadarFeature:
             "mean_x", "mean_y", "lat_weightedcentroid", "lon_weightedcentroid",
             "x_weightedcentroid", "y_weightedcentroid", "max_dbz",
             "majoraxis", "minoraxis", "aspectratio", "orientation", "eccentricity",
-            "conv_area", "strat_area", "ncells",
+            "conv_majoraxis", "conv_area", "strat_area", "ncells",
             "maxETH_10dbz", "maxETH_20dbz", "maxETH_30dbz", "maxETH_40dbz", "maxETH_50dbz",
             "area_45dbz", "area_50dbz", "conv_area_45dbz", "conv_area_50dbz",
             "area", "meanlat", "meanlon",
@@ -200,6 +200,25 @@ class TestTrackstatsRadarFeature:
         # Long axis is horizontal (along columns) -> orientation near +/-90 deg
         # (skimage orientation is angle between row-axis and major axis)
         assert abs(abs(orientation) - 90) < 15
+
+    def test_feature1_conv_majoraxis(self, stats_result):
+        """
+        conv_majoraxis should reflect the longest INDIVIDUAL convective cell
+        (cell 1 or 2, each a small 3x5 block), not the combined span across
+        both cells (which are far apart, separated by stratiform pixels) -
+        this is the key property identifymcs_radar.py's lifecycle staging
+        relies on (distinguishing an organized convective LINE from two
+        separate, unconnected cells).
+        """
+        out_dict, _ = stats_result
+        majoraxis = out_dict["majoraxis"][0]
+        conv_majoraxis = out_dict["conv_majoraxis"][0]
+        print(f"Feature 1: majoraxis={majoraxis:.1f} km, conv_majoraxis={conv_majoraxis:.1f} km")
+        assert conv_majoraxis > 0
+        # conv_majoraxis (a single ~3x5 px cell, <~20km) must be much smaller
+        # than majoraxis (the whole 5x60 px feature, ~200km) - confirming the
+        # two separate cells were NOT merged into one combined bounding box.
+        assert conv_majoraxis < majoraxis / 4
 
     def test_feature1_ncells_and_areas(self, stats_result):
         out_dict, _ = stats_result

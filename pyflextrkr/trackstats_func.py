@@ -5,6 +5,7 @@ import sys
 import logging
 import warnings
 from skimage.measure import regionprops
+from skimage.measure import label as sklabel
 from pyflextrkr.ftfunctions import circular_mean
 from pyflextrkr.ft_utilities import get_pixel_area
 
@@ -201,6 +202,7 @@ def calc_stats_singlefile(
             out_aspectratio = np.full(numtracks, fillval_f, dtype=np.float32)
             out_orientation = np.full(numtracks, fillval_f, dtype=np.float32)
             out_eccentricity = np.full(numtracks, fillval_f, dtype=np.float32)
+            out_conv_majoraxis = np.full(numtracks, fillval_f, dtype=np.float32)
             out_conv_area = np.full(numtracks, fillval_f, dtype=np.float32)
             out_strat_area = np.full(numtracks, fillval_f, dtype=np.float32)
             out_ncells = np.full(numtracks, fillval, dtype=np.int32)
@@ -294,6 +296,30 @@ def calc_stats_singlefile(
                 mean_pixelength = np.sqrt(np.nanmean(pixel_area))
             else:
                 mean_pixelength = pixel_radius
+
+            # Convective-line-only major axis length (conv_majoraxis): needed
+            # downstream by identifymcs_radar.py's lifecycle staging, which is
+            # about the convective LINE organizing, not the whole feature
+            # (stratiform padding can make the whole-feature shape wider/
+            # rounder than the convective line itself).
+            # Label connected components of the convective-only mask, keeping
+            # each pixel's original feature cloudnumber as its value - skimage
+            # label() only connects neighbors with the SAME value, so (a) two
+            # features' convective pixels never merge even if adjacent, and
+            # (b) two spatially SEPARATE convective cells within one feature
+            # (e.g. two distinct storms) get distinct sub-region labels rather
+            # than being combined into one bounding box. conv_majoraxis is
+            # then the longest such sub-region's major axis within each
+            # feature (0 if the feature has no convective pixels).
+            conv_feature_vals = np.where(file_convsf == 4, file_corecold_cloudnumber, 0)
+            conv_sublabels = sklabel(conv_feature_vals, connectivity=2)
+            conv_majoraxis_by_label = {}
+            if conv_sublabels.max() > 0:
+                for sp in regionprops(conv_sublabels):
+                    parent_label = int(conv_feature_vals[sp.coords[0][0], sp.coords[0][1]])
+                    axis_len_km = sp.axis_major_length * mean_pixelength
+                    if axis_len_km > conv_majoraxis_by_label.get(parent_label, 0.0):
+                        conv_majoraxis_by_label[parent_label] = axis_len_km
 
         # Loop over unique tracknumbers
         for itrack in range(numtracks):
@@ -551,6 +577,10 @@ def calc_stats_singlefile(
                             out_maxETH40[itrack] = np.nanmax(file_echotop40[core_indices[0], core_indices[1]])
                             out_maxETH50[itrack] = np.nanmax(file_echotop50[core_indices[0], core_indices[1]])
 
+                    # Convective-line-only major axis length (0 if this
+                    # feature has no convective pixels)
+                    out_conv_majoraxis[itrack] = conv_majoraxis_by_label.get(cloudnumber_map, 0.0)
+
                     # Shape statistics and reflectivity-weighted centroid,
                     # looked up from the whole-file regionprops computed above
                     fp = props_by_label.get(cloudnumber_map, None)
@@ -665,7 +695,7 @@ def calc_stats_singlefile(
                 out_x_weightedcentroid, out_y_weightedcentroid,
                 out_max_dbz,
                 out_majoraxis, out_minoraxis, out_aspectratio,
-                out_orientation, out_eccentricity,
+                out_orientation, out_eccentricity, out_conv_majoraxis,
                 out_conv_area, out_strat_area, out_ncells,
                 out_maxETH10, out_maxETH20, out_maxETH30, out_maxETH40, out_maxETH50,
                 dbz_area_threshs, out_area_dbz, out_conv_area_dbz,
@@ -1031,7 +1061,7 @@ def define_extra_radar_feature(
         out_x_weightedcentroid, out_y_weightedcentroid,
         out_max_dbz,
         out_majoraxis, out_minoraxis, out_aspectratio,
-        out_orientation, out_eccentricity,
+        out_orientation, out_eccentricity, out_conv_majoraxis,
         out_conv_area, out_strat_area, out_ncells,
         out_maxETH10, out_maxETH20, out_maxETH30, out_maxETH40, out_maxETH50,
         dbz_area_threshs, out_area_dbz, out_conv_area_dbz,
@@ -1053,6 +1083,9 @@ def define_extra_radar_feature(
             Maximum reflectivity in a feature.
         out_majoraxis, out_minoraxis, out_aspectratio, out_orientation, out_eccentricity: np.array
             Shape statistics of a feature (regionprops).
+        out_conv_majoraxis: np.array
+            Major axis length of the longest convective-only sub-region
+            within a feature (0 if the feature has no convective pixels).
         out_conv_area, out_strat_area: np.array
             Convective / stratiform area of a feature.
         out_ncells: np.array
@@ -1083,6 +1116,7 @@ def define_extra_radar_feature(
         "aspectratio": out_aspectratio,
         "orientation": out_orientation,
         "eccentricity": out_eccentricity,
+        "conv_majoraxis": out_conv_majoraxis,
         "conv_area": out_conv_area,
         "strat_area": out_strat_area,
         "ncells": out_ncells,
@@ -1152,6 +1186,12 @@ def define_extra_radar_feature(
             "long_name": "Eccentricity of a feature",
             "units": "unitless",
             "_FillValue": fillval_f,
+        },
+        "conv_majoraxis": {
+            "long_name": "Major axis length of the longest convective-only sub-region in a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
+            "comments": "0 if the feature has no convective pixels",
         },
         "conv_area": {
             "long_name": "Convective area of a feature",
