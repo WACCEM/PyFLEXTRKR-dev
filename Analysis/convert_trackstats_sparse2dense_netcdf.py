@@ -43,6 +43,8 @@ if __name__ == '__main__':
         times_dimname,
         fillval,
         fillval_f,
+        duration_range_auto_update=config.get("duration_range_auto_update", False),
+        duration_range_round_base=config.get("duration_range_round_base", 10),
     )
     print(f"{trackstats_dense_file}")
 

@@ -648,22 +648,98 @@ def match_drift_times(
     )
 
 
+def resolve_sparse_max_trackduration(
+        times_idx,
+        max_trackduration,
+        statistics_file,
+        duration_range_auto_update=False,
+        duration_range_round_base=10,
+):
+    """
+    Check the longest track in a sparse trackstats file against max_trackduration.
+
+    Callers normally read max_trackduration from 'duration_range' in the config. The
+    file can hold longer tracks than that: trackstats_driver expands the max duration
+    only in memory (duration_range_auto_update), so a step run on its own, without
+    run_trackstats in the same run, sees the unexpanded config value. Building the
+    sparse/dense arrays from that stale value fails (index exceeds matrix dimension).
+
+    Args:
+        times_idx: np.ndarray
+            Time indices (columns) of the sparse entries in the file.
+        max_trackduration: int
+            Time dimension size requested by the caller (max of 'duration_range').
+        statistics_file: string
+            Sparse trackstats file name (for log messages).
+        duration_range_auto_update: bool
+            If True and the file holds tracks longer than max_trackduration, expand
+            max_trackduration to fit (same rule as trackstats_driver). If False,
+            log a critical message and exit.
+        duration_range_round_base: int
+            Expanded max_trackduration is rounded up to a multiple of this value,
+            so the result matches the size trackstats_driver writes.
+
+    Returns:
+        max_trackduration: int
+            Time dimension size to use; unchanged if the file fits in it.
+    """
+    logger = logging.getLogger(__name__)
+    data_max_trackduration = int(np.max(times_idx)) + 1 if np.size(times_idx) > 0 else 0
+    if data_max_trackduration <= max_trackduration:
+        return max_trackduration
+
+    if duration_range_auto_update:
+        round_base = max(int(duration_range_round_base), 1)
+        new_max = int(np.ceil(data_max_trackduration / round_base) * round_base)
+        logger.warning(
+            f"Max track duration in {statistics_file} ({data_max_trackduration}) exceeds "
+            f"'duration_range' max ({max_trackduration}). Auto-updating max_trackduration: "
+            f"{max_trackduration} -> {new_max} (rounded up to nearest {round_base})."
+        )
+        return new_max
+
+    logger.critical(f"Max track duration in {statistics_file} ({data_max_trackduration}) "
+                    f"exceeds 'duration_range' max ({max_trackduration}) in the config file!")
+    logger.critical(f"This would cause missing statistics in long-lived tracks!")
+    logger.critical(f"Increase 'duration_range' in the config file, or set "
+                    f"'duration_range_auto_update: True' to allow automatic expansion.")
+    logger.critical(f"Tracking will now exit.")
+    sys.exit()
+
+
 def load_sparse_trackstats(
         max_trackduration,
         statistics_file,
         times_idx_varname,
         tracks_dimname,
         tracks_idx_varname,
+        duration_range_auto_update=False,
+        duration_range_round_base=10,
 ):
     """
     Load sparse trackstats file and convert to sparse arrays.
 
+    The time dimension of the sparse arrays is sized from max_trackduration, which is
+    checked against the longest track in the file (see resolve_sparse_max_trackduration).
+
     Args:
-        max_trackduration:
-        statistics_file:
-        times_idx_varname:
-        tracks_dimname:
-        tracks_idx_varname:
+        max_trackduration: int
+            Time dimension size from the config (max of 'duration_range').
+        statistics_file: string
+            Sparse trackstats file name.
+        times_idx_varname: string
+            Name of the time index variable in the file.
+        tracks_dimname: string
+            Name of the tracks dimension.
+        tracks_idx_varname: string
+            Name of the track index variable in the file.
+        duration_range_auto_update: bool
+            If True and the file holds tracks longer than max_trackduration, expand
+            max_trackduration to fit (same rule as trackstats_driver). If False,
+            log a critical message and exit.
+        duration_range_round_base: int
+            Expanded max_trackduration is rounded up to a multiple of this value,
+            so the result matches the size trackstats_driver writes.
 
     Returns:
         ds_1d: Xarray Dataset
@@ -672,6 +748,9 @@ def load_sparse_trackstats(
             Dictionary containing sparse array attributes.
         sparse_dict: dictionary
             Dictionary containing sparse array variables.
+        max_trackduration: int
+            Time dimension size of the sparse arrays; callers must use this value
+            (not the one they passed in) for any arrays built from these.
     """
     # xr.set_options(keep_attrs=True)
     ds_all = xr.open_dataset(statistics_file,
@@ -684,6 +763,11 @@ def load_sparse_trackstats(
     # Sparse array indices
     tracks_idx = ds_all[tracks_idx_varname].values
     times_idx = ds_all[times_idx_varname].values
+    # Guardrail: longest track in the file vs the size requested by the caller
+    max_trackduration = resolve_sparse_max_trackduration(
+        times_idx, max_trackduration, statistics_file,
+        duration_range_auto_update, duration_range_round_base,
+    )
     row_col_ind = (tracks_idx, times_idx)
     # Sparse array shapes
     shape_2d = (ntracks, max_trackduration)
@@ -703,7 +787,7 @@ def load_sparse_trackstats(
     ds_1d = ds_all.drop_dims(sparse_dimname)
     ds_all.close()
     # Return max_trackduration as 4th value so callers always use the correct
-    # size even when the file was written with duration_range_auto_update.
+    # size even when the config's duration_range was not updated by trackstats_driver.
     return ds_1d, sparse_attrs_dict, sparse_dict, max_trackduration
 
 
@@ -717,6 +801,8 @@ def convert_trackstats_sparse2dense(
         times_dimname,
         fillval,
         fillval_f,
+        duration_range_auto_update=False,
+        duration_range_round_base=10,
 ):
     """
     Convert sparse trackstats netCDF file to dense trackstats netCDF file.
@@ -727,7 +813,8 @@ def convert_trackstats_sparse2dense(
         filename_dense: string
             Filename for dense trackstats netCDF file.
         max_trackduration: int
-            Maximum track duration.
+            Maximum track duration (max of 'duration_range'). Checked against the longest
+            track in the sparse file, see resolve_sparse_max_trackduration.
         tracks_idx_varname: string
             Tracks indices variable name.
         times_idx_varname: string
@@ -740,6 +827,10 @@ def convert_trackstats_sparse2dense(
             Missing value for int type variables.
         fillval_f: float
             Missing value for float type variables.
+        duration_range_auto_update: bool
+            Expand max_trackduration if the sparse file holds longer tracks (False: exit).
+        duration_range_round_base: int
+            Expanded max_trackduration is rounded up to a multiple of this value.
 
     Returns:
         True.
@@ -757,6 +848,11 @@ def convert_trackstats_sparse2dense(
     # Sparse array indices
     tracks_idx = ds_all[tracks_idx_varname].values
     times_idx = ds_all[times_idx_varname].values
+    # Guardrail: longest track in the file vs the size requested by the caller
+    max_trackduration = resolve_sparse_max_trackduration(
+        times_idx, max_trackduration, filename_sparse,
+        duration_range_auto_update, duration_range_round_base,
+    )
     row_col_ind = (tracks_idx, times_idx)
     # Sparse array shapes
     shape_2d = (ntracks, max_trackduration)

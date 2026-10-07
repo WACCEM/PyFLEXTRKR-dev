@@ -840,3 +840,42 @@ class TestIdentifymcsRadarEndToEnd:
         assert os.path.isfile(outfile)
         ds = xr.open_dataset(outfile, decode_times=False, mask_and_scale=False)
         assert np.all(ds["is_mcs"].values == 0)
+
+    def test_driver_alone_with_stale_duration_range_auto_update(self, tmp_path):
+        """
+        Running identifymcs_radar without run_trackstats in the same run: the config's
+        duration_range was never expanded by trackstats_driver and is shorter than the
+        longest track (70 steps) in the sparse file. With duration_range_auto_update the
+        driver must size itself from the file instead of failing in the sparse loader.
+        """
+        stats_path = _build_sparse_trackstats_file(tmp_path)
+        reference = _make_driver_config(stats_path)  # duration_range [2, 100]
+        ref_ds = xr.open_dataset(identifymcs_radar(reference), decode_times=False, mask_and_scale=False)
+
+        config = _make_driver_config(stats_path)
+        config["duration_range"] = [2, 10]
+        config["duration_range_auto_update"] = True
+        config["duration_range_round_base"] = 10
+        outfile = identifymcs_radar(config)
+
+        ds = xr.open_dataset(outfile, decode_times=False, mask_and_scale=False)
+        # 70 time steps in the file -> already a multiple of 10
+        assert ds.sizes["times"] == 70
+        assert ds.sizes["tracks"] == ref_ds.sizes["tracks"] == 2
+        mcs_track = int(np.where(ds["track_duration"].values == 70)[0][0])
+        assert ds["is_mcs"].values[mcs_track] == 1
+        assert ds["track_class"].values[mcs_track] == CLASS_MCS
+        # Same results as with a duration_range that was already large enough
+        np.testing.assert_array_equal(ds["track_duration"].values, ref_ds["track_duration"].values)
+        np.testing.assert_array_equal(ds["track_class"].values, ref_ds["track_class"].values)
+        np.testing.assert_array_equal(
+            ds["merge_cloudnumber"].values[:, 0:70, :], ref_ds["merge_cloudnumber"].values[:, 0:70, :]
+        )
+
+    def test_driver_alone_with_stale_duration_range_no_auto_update_exits(self, tmp_path):
+        stats_path = _build_sparse_trackstats_file(tmp_path)
+        config = _make_driver_config(stats_path)
+        config["duration_range"] = [2, 10]
+        config["duration_range_auto_update"] = False
+        with pytest.raises(SystemExit):
+            identifymcs_radar(config)

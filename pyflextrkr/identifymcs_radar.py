@@ -571,6 +571,8 @@ def identifymcs_radar(config):
     fillval = config["fillval"]
     fillval_f = np.nan
     max_trackduration = int(max(duration_range))
+    duration_range_auto_update = config.get("duration_range_auto_update", False)
+    duration_range_round_base = config.get("duration_range_round_base", 10)
     max_speed_ms = config.get("max_speed_for_trajectory_smoothing", 50)
     max_speed_kmh = max_speed_ms * 3.6
 
@@ -600,8 +602,13 @@ def identifymcs_radar(config):
     statistics_file = f"{stats_path}{trackstats_sparse_filebase}{startdate}_{enddate}.nc"
     logger.debug(statistics_file)
 
+    # max_trackduration is returned from the file: when this step runs without run_trackstats in the
+    # same run, the config's duration_range has not been expanded by trackstats_driver
+    # (duration_range_auto_update), so it can be smaller than the longest track in the file.
     ds_1d, sparse_attrs_dict, sparse_dict, max_trackduration = load_sparse_trackstats(
         max_trackduration, statistics_file, times_idx_varname, tracks_dimname, tracks_idx_varname,
+        duration_range_auto_update=duration_range_auto_update,
+        duration_range_round_base=duration_range_round_base,
     )
 
     ntracks_all = ds_1d.sizes[tracks_dimname]

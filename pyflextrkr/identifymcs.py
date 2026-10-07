@@ -65,7 +65,9 @@ def identifymcs_tb(config):
     sparse_dict, \
     max_trackduration = load_sparse_trackstats(max_trackduration, statistics_file,
                                                times_idx_varname, tracks_dimname,
-                                               tracks_idx_varname)
+                                               tracks_idx_varname,
+                                               duration_range_auto_update=config.get("duration_range_auto_update", False),
+                                               duration_range_round_base=config.get("duration_range_round_base", 10))
 
     # Get necessary variables
     ntracks_all = ds_1d.sizes[tracks_dimname]
