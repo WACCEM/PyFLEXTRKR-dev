@@ -20,6 +20,7 @@ from pyflextrkr.identifymcs_radar import (
     resolve_fragment_roots,
     release_noncoexisting_fragments,
     attach_fragments,
+    sum_fragment_area,
     classify_feature_class,
     classify_track_class,
     classify_lifecycle,
@@ -365,6 +366,23 @@ class TestReleaseNoncoexistingFragments:
 # ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
+
+class TestSumFragmentArea:
+
+    def test_sums_merge_and_split_and_ignores_nan(self):
+        merge = np.full((3, 4, 5), np.nan, dtype=np.float32)
+        split = np.full((3, 4, 5), np.nan, dtype=np.float32)
+        merge[0, 1, 0] = 10.0
+        merge[0, 1, 2] = 5.0
+        split[0, 1, 1] = 7.0
+        split[2, 3, 0] = 2.0
+        out = sum_fragment_area(merge, split, chunk=2)   # chunk < n_tracks: checks the chunk boundary
+        assert out.shape == (3, 4)
+        assert out.dtype == np.float64
+        assert out[0, 1] == 22.0
+        assert out[2, 3] == 2.0
+        assert out.sum() == 24.0   # 0 everywhere else, never NaN
+
 
 class TestClassification:
     def test_mcs_takes_precedence_over_multicell(self):
@@ -811,6 +829,27 @@ class TestIdentifymcsRadarEndToEnd:
         lifecycle_evaluated = ds["lifecycle_evaluated"].values[mcs_track]
         expected_evaluated = int((70 * (1.0 / 12.0)) >= 8)
         assert lifecycle_evaluated == expected_evaluated
+
+    def test_total_area_includes_folded_fragments(self, tmp_path):
+        stats_path = _build_sparse_trackstats_file(tmp_path)
+        config = _make_driver_config(stats_path)
+        ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
+        mcs = int(np.where(ds["track_duration"].values == 70)[0][0])
+        area = ds["area"].values
+        total = ds["total_area"].values
+        assert ds["total_area"].dims == ("tracks", "times")
+        # the 2-step fragment (area 50 at each step) is folded into the MCS at its first two steps
+        np.testing.assert_allclose(total[mcs, 0:2], area[mcs, 0:2] + 50.0)
+        np.testing.assert_allclose(total[mcs, 2:70], area[mcs, 2:70])
+        assert np.all(np.isnan(total[mcs, 70:]))
+        # identity for every kept track, NaN where the track has no data
+        fragments = np.nansum(ds["merge_area"].values, axis=2) + np.nansum(ds["split_area"].values, axis=2)
+        valid = ~np.isnan(area)
+        np.testing.assert_allclose(total[valid], (area + fragments)[valid], rtol=1e-6)
+        assert np.all(np.isnan(total[~valid]))
+        # a track that received no fragment keeps its own area
+        other = int(np.where(ds["track_duration"].values == 10)[0][0])
+        np.testing.assert_allclose(total[other, :10], area[other, :10])
 
     def test_driver_lifecycle_evaluated_when_long_enough(self, tmp_path):
         stats_path = _build_sparse_trackstats_file(tmp_path)

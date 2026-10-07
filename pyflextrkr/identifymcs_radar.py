@@ -375,6 +375,25 @@ def attach_fragments(
             n_unmatched, n_truncated)
 
 
+def sum_fragment_area(merge_area, split_area, chunk=2000):
+    """
+    Total area of the folded merge and split fragments of every track at every time.
+
+    Args:
+        merge_area, split_area: 3D np.array [n_tracks, n_times, nmaxmerge], from attach_fragments;
+            NaN = no fragment in that slot (counts as 0).
+        chunk: int, number of tracks summed at once (keeps the temporary arrays small).
+
+    Returns:
+        fragment_area: 2D np.array(float64) [n_tracks, n_times]; 0 where a track has no fragment.
+    """
+    out = np.zeros(merge_area.shape[:2], dtype=np.float64)
+    for i in range(0, merge_area.shape[0], chunk):
+        sl = slice(i, i + chunk)
+        out[sl] = np.nansum(merge_area[sl], axis=2) + np.nansum(split_area[sl], axis=2)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Feature classification (MCS / multi-cell / isolated-cell / non-convective)
 # ---------------------------------------------------------------------------
@@ -556,7 +575,9 @@ def identifymcs_radar(config):
             statistics of the Tb+PF pipelines
             (f"{stats_path}{mcsrobust_filebase}{startdate}_{enddate}.nc").
             It is the input of mapfeature_driver and movement_speed (which
-            writes the mcsfinal_filebase file).
+            writes the mcsfinal_filebase file). Besides the own-feature statistics it holds
+            the folded merge/split fragments (merge_*/split_* variables) and total_area,
+            the track's area including those fragments.
     """
     logger = logging.getLogger(__name__)
     logger.info("Identifying MCS from radar-based track statistics")
@@ -820,6 +841,11 @@ def identifymcs_radar(config):
                "_FillValue": fillval_f},
     )
 
+    # Total area of each track including the merge/split fragments folded into it
+    # (fragments are folded into any non-fragment track, MCS or not); NaN where the track has no data
+    total_area = (dsout["area"].values.astype(np.float64) + sum_fragment_area(merge_area, split_area)).astype(np.float32)
+    total_area[mask] = fillval_f
+
     # Merge/split cloudnumber variables
     mergers_dimname = "mergers"
     var_dict = {
@@ -839,6 +865,7 @@ def identifymcs_radar(config):
         "split_cloudnumber": split_cloudnumber,
         "split_status": split_status,
         "split_area": split_area,
+        "total_area": total_area,
     }
     var_attrs = {
         "is_mcs": {"long_name": "Flag indicating if this track meets the radar MCS criteria at any time",
@@ -871,6 +898,9 @@ def identifymcs_radar(config):
                                "units": "unitless", "_FillValue": fillval},
         "split_status": {"long_name": "Track status of the splitting cloud", "units": "unitless", "_FillValue": fillval},
         "split_area": {"long_name": "Area of the splitting cloud", "units": "km^2", "_FillValue": fillval_f},
+        "total_area": {"long_name": "Total area of the track including the merge/split fragments folded into it",
+                       "units": "km^2", "_FillValue": fillval_f,
+                       "comments": "area + sum(merge_area over mergers) + sum(split_area over mergers)"},
     }
     varlist2 = {}
     for key, value in var_dict.items():
