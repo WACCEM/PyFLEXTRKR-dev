@@ -552,13 +552,16 @@ def identifymcs_radar(config):
 
     Returns:
         statistics_outfile: string
-            Final track statistics file name
-            (f"{stats_path}{finalstats_filebase}{startdate}_{enddate}.nc").
+            Track statistics file name, same role and naming as the robust MCS
+            statistics of the Tb+PF pipelines
+            (f"{stats_path}{mcsrobust_filebase}{startdate}_{enddate}.nc").
+            It is the input of mapfeature_driver and movement_speed (which
+            writes the mcsfinal_filebase file).
     """
     logger = logging.getLogger(__name__)
     logger.info("Identifying MCS from radar-based track statistics")
 
-    finalstats_filebase = config["finalstats_filebase"]
+    mcsrobust_filebase = config["mcsrobust_filebase"]
     trackstats_sparse_filebase = config["trackstats_sparse_filebase"]
     stats_path = config["stats_outpath"]
     startdate = config["startdate"]
@@ -597,7 +600,7 @@ def identifymcs_radar(config):
 
     tracks_idx_varname = f"{tracks_dimname}_indices"
     times_idx_varname = f"{times_dimname}_indices"
-    statistics_outfile = f"{stats_path}{finalstats_filebase}{startdate}_{enddate}.nc"
+    statistics_outfile = f"{stats_path}{mcsrobust_filebase}{startdate}_{enddate}.nc"
 
     statistics_file = f"{stats_path}{trackstats_sparse_filebase}{startdate}_{enddate}.nc"
     logger.debug(statistics_file)

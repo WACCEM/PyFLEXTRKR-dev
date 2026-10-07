@@ -746,7 +746,7 @@ def _build_sparse_trackstats_file(tmp_path):
 
 def _make_driver_config(stats_path):
     return {
-        "finalstats_filebase": "trackstats_final_",
+        "mcsrobust_filebase": "mcs_tracks_robust_",
         "trackstats_sparse_filebase": "trackstats_sparse_",
         "stats_outpath": stats_path,
         "startdate": "20250101.0000",
@@ -784,6 +784,8 @@ class TestIdentifymcsRadarEndToEnd:
 
         outfile = identifymcs_radar(config)
         assert os.path.isfile(outfile)
+        # Named like the robust MCS stats of the Tb+PF pipelines (config mcsrobust_filebase)
+        assert os.path.basename(outfile) == "mcs_tracks_robust_20250101.0000_20250101.1200.nc"
 
         ds = xr.open_dataset(outfile, decode_times=False, mask_and_scale=False)
         # Track 0 (the merge fragment) should have been dropped; 2 tracks remain.

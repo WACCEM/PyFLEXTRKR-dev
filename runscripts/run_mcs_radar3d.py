@@ -9,6 +9,7 @@ from pyflextrkr.gettracks import gettracknumbers
 from pyflextrkr.trackstats_driver import trackstats_driver
 from pyflextrkr.identifymcs_radar import identifymcs_radar
 from pyflextrkr.mapfeature_driver import mapfeature_driver
+from pyflextrkr.movement_speed import movement_speed
 
 """
 Run MCS tracking directly from 3D (or 2D) Cartesian radar reflectivity
@@ -78,8 +79,14 @@ if __name__ == '__main__':
         mcsstats_filename = identifymcs_radar(config)
 
     # Step 6 - Map tracking to pixel files
+    # (same file naming as the Tb+PF pipelines: identifymcs_radar writes mcsrobust_filebase)
     if config.get('run_mapfeature', False):
-        mapfeature_driver(config, trackstats_filebase=config['finalstats_filebase'])
+        mapfeature_driver(config, trackstats_filebase=config['mcsrobust_filebase'])
+
+    # Step 7 - Movement speed calculation
+    # (reads mcsrobust_filebase, writes mcsfinal_filebase)
+    if config.get('run_speed', False):
+        movement_speed(config)
 
     # Clean up resources
     if run_parallel >= 1:
