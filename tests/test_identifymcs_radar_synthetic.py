@@ -18,6 +18,7 @@ from pyflextrkr.identifymcs_radar import (
     identify_mcs_periods,
     find_mergesplit_parents,
     resolve_fragment_roots,
+    release_noncoexisting_fragments,
     attach_fragments,
     classify_feature_class,
     classify_track_class,
@@ -264,6 +265,101 @@ class TestFragmentFolding:
         )
         n_unmatched, n_truncated = result[6], result[7]
         assert n_truncated == n_frag - 2  # only 2 of 4 fit
+
+
+class TestReleaseNoncoexistingFragments:
+    """A fragment is folded into its root only if every time point exists on the root."""
+
+    @staticmethod
+    def _run(parent_idx, basetime_full):
+        parent_idx = np.array(parent_idx)
+        is_fragment = parent_idx >= 0
+        link_type = np.where(is_fragment, 'merge', '').astype('<U6')
+        return release_noncoexisting_fragments(
+            parent_idx, link_type, is_fragment, np.array(basetime_full, dtype=float),
+        )
+
+    def test_fully_coexisting_fragment_stays_attached(self):
+        bt = [[100, 200, 0], [100, 200, 300]]
+        parent, link, root, resolved, n_rel = self._run([1, -1], bt)
+        assert n_rel == 0
+        assert resolved[0] and not resolved[1]
+        assert root[0] == 1
+        assert link[0] == 'merge'
+
+    def test_fragment_before_root_start_is_released(self):
+        # Root only starts at 300, the fragment lived at 100-200 (pre-merger history)
+        bt = [[100, 200], [300, 400]]
+        parent, link, root, resolved, n_rel = self._run([1, -1], bt)
+        assert n_rel == 1
+        assert not resolved[0]
+        assert root[0] == 0                 # its own anchor
+        assert parent[0] == -1 and link[0] == ''
+
+    def test_partial_overlap_is_released_not_split(self):
+        # Overlaps the root at only one of its three times -> whole fragment stays standalone
+        bt = [[100, 200, 300], [300, 400, 0]]
+        parent, link, root, resolved, n_rel = self._run([1, -1], bt)
+        assert n_rel == 1
+        assert not resolved[0]
+
+    def test_chain_releases_only_the_member_that_does_not_coexist(self):
+        # A (0) -> B (1) -> R (2); R starts late. A lived before R, B is inside R's lifetime.
+        bt = [[100, 200, 0], [300, 350, 0], [300, 350, 400]]
+        parent, link, root, resolved, n_rel = self._run([1, 2, -1], bt)
+        assert n_rel == 1
+        assert not resolved[0] and resolved[1] and not resolved[2]
+        assert root[1] == 2
+
+    def test_release_reroots_downstream_fragment_until_fixed_point(self):
+        # A (0) -> B (1) -> R (2). B does not coexist with R, so it is released; A then
+        # resolves to B (not R) and does not coexist with B either -> released in 2nd pass.
+        bt = [[600, 700, 0], [100, 200, 600], [600, 700, 0]]
+        parent, link, root, resolved, n_rel = self._run([1, 2, -1], bt)
+        assert n_rel == 2
+        assert not resolved.any()
+        assert np.all(parent == -1) and np.all(link == '')
+
+    def test_result_is_idempotent(self):
+        bt = [[100, 200, 0], [100, 200, 300], [500, 600, 0]]
+        parent, link, root, resolved, n_rel = self._run([1, -1, 1], bt)
+        assert n_rel == 1                   # track 2 never overlaps root 1
+        parent2, link2, root2, resolved2, n_rel2 = release_noncoexisting_fragments(
+            parent, link, resolved, np.array(bt, dtype=float),
+        )
+        assert n_rel2 == 0
+        assert np.array_equal(resolved, resolved2) and np.array_equal(root, root2)
+
+    def test_no_unmatched_time_points_after_release(self):
+        # track 0 coexists with root 2, track 1 does not: after release attach_fragments loses nothing
+        bt = np.array([[100, 200, 0], [10, 20, 30], [100, 200, 300]], dtype=float)
+        cloudnumber = np.array([[5, 6, 0], [1, 2, 3], [10, 11, 12]], dtype=np.int32)
+        status = np.ones((3, 3), dtype=np.int32)
+        area = np.full((3, 3), 10.0)
+        parent, link, root, resolved, n_rel = self._run([2, 2, -1], bt)
+        assert n_rel == 1
+        keep = np.where(~resolved)[0]
+        assert list(keep) == [1, 2]
+        result = attach_fragments(
+            root, link, bt, cloudnumber, status, area, keep,
+            nmaxmerge=3, fillval=-9999, fillval_f=np.nan,
+        )
+        merge_cn, n_unmatched = result[0], result[6]
+        assert n_unmatched == 0
+        assert merge_cn[1, 0, 0] == 5 and merge_cn[1, 1, 0] == 6   # track 0 painted into kept track 2
+
+    def test_cycle_anchor_keeps_no_link(self):
+        # A <-> B with identical times: one becomes the anchor and must not keep a link to itself
+        bt = [[100, 200], [100, 200]]
+        parent, link, root, resolved, n_rel = self._run([1, 0], bt)
+        assert n_rel == 0
+        assert resolved.sum() == 1
+        anchor = int(np.where(~resolved)[0][0])
+        assert parent[anchor] == -1 and link[anchor] == ''
+
+    def test_empty_input(self):
+        parent, link, root, resolved, n_rel = self._run(np.array([], dtype=int), np.zeros((0, 4)))
+        assert n_rel == 0 and len(resolved) == 0
 
 
 # ---------------------------------------------------------------------------

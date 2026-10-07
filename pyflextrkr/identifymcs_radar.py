@@ -141,6 +141,10 @@ def find_mergesplit_parents(
         is_protected: 1D bool np.array, tracks that are never fragments
             regardless of duration/merge/split (e.g. is_mcs tracks).
         merge_duration_thresh, split_duration_thresh: float [hour]
+            A track is a candidate fragment only if its whole lifetime is
+            strictly less than the threshold (a longer track is never
+            partially attached). Whether a candidate is finally folded into its
+            root is decided by release_noncoexisting_fragments().
 
     Returns:
         parent_idx: 1D np.array(int), -1 if not a fragment, else the 0-based
@@ -216,6 +220,71 @@ def resolve_fragment_roots(parent_idx, is_fragment):
         root_idx[i] = cur
 
     return root_idx, is_fragment_resolved
+
+
+def release_noncoexisting_fragments(
+        parent_idx, link_type, is_fragment, basetime_full,
+):
+    """
+    Keep a candidate fragment only if all of its time points can be painted
+    into its resolved root track; otherwise release it so it stays a normal
+    (standalone) track.
+
+    attach_fragments() paints a fragment's pixels into its root only at times
+    where the root has the same basetime. A fragment whose chain resolves to a
+    root that does not yet exist (or no longer exists) at some of the fragment's
+    times would lose those time points - and, because the fragment track itself
+    is dropped from the output, those pixels would end up in no track at all.
+    Releasing such a fragment keeps every feature in some track.
+
+    Releasing a track changes the root of any chain that passed through it, so
+    the check is repeated until no more fragments are released. Each pass can
+    only shrink the fragment set, so the loop terminates.
+
+    Args:
+        parent_idx, link_type, is_fragment: 1D arrays, from
+            find_mergesplit_parents.
+        basetime_full: 2D np.array [n_tracks, max_trackduration]; 0 or NaN =
+            no data (same convention as attach_fragments).
+
+    Returns:
+        parent_idx: 1D np.array(int), -1 for every track that is not a fragment.
+        link_type: 1D np.array(str), '' for every track that is not a fragment.
+        root_idx: 1D np.array(int), from resolve_fragment_roots (final).
+        is_fragment_resolved: 1D bool np.array, final fragment flags.
+        n_released: int, number of candidate fragments kept as standalone tracks.
+    """
+    parent_idx = parent_idx.copy()
+    link_type = link_type.copy()
+    is_fragment = is_fragment.copy()
+
+    valid_cache = {}
+
+    def _valid_times(i):
+        if i not in valid_cache:
+            row = basetime_full[i, :]
+            valid_cache[i] = row[(row != 0) & (~np.isnan(row))]
+        return valid_cache[i]
+
+    n_released = 0
+    while True:
+        root_idx, is_fragment_resolved = resolve_fragment_roots(parent_idx, is_fragment)
+        released = [
+            i for i in np.where(is_fragment_resolved)[0]
+            if not np.all(np.isin(_valid_times(i), _valid_times(int(root_idx[i]))))
+        ]
+        if len(released) == 0:
+            break
+        is_fragment[released] = False
+        parent_idx[released] = -1
+        link_type[released] = ''
+        n_released += len(released)
+
+    # Only resolved fragments keep a link (also covers a cycle-breaking anchor,
+    # which resolve_fragment_roots forces to be a kept track)
+    parent_idx[~is_fragment_resolved] = -1
+    link_type[~is_fragment_resolved] = ''
+    return parent_idx, link_type, root_idx, is_fragment_resolved, n_released
 
 
 def attach_fragments(
@@ -630,7 +699,13 @@ def identifymcs_radar(config):
         merge_duration_thresh=mcs_merge_duration,
         split_duration_thresh=mcs_split_duration,
     )
-    root_idx, is_fragment_resolved = resolve_fragment_roots(parent_idx, is_fragment)
+    # Fragments that do not fully coexist with their root stay as standalone tracks
+    parent_idx, link_type, root_idx, is_fragment_resolved, n_released = release_noncoexisting_fragments(
+        parent_idx, link_type, is_fragment, basetime_2d,
+    )
+    if n_released > 0:
+        logger.info(f"{n_released} merge/split candidate(s) kept as standalone tracks: "
+                    f"their time points do not all coexist with their resolved root track.")
 
     keep_mask = ~is_fragment_resolved
     keep_track_indices = np.where(keep_mask)[0]
@@ -645,6 +720,7 @@ def identifymcs_radar(config):
         keep_track_indices, nmaxmerge, fillval, fillval_f,
     )
     if n_unmatched > 0:
+        # Not expected: release_noncoexisting_fragments() only keeps fragments whose time points all match
         logger.warning(f"{n_unmatched} fragment time point(s) could not be matched to their "
                         f"resolved root track's basetime (dropped, not fatal).")
     if n_truncated > 0:
