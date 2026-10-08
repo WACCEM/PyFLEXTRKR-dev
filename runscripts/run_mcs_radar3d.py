@@ -1,3 +1,4 @@
+import os
 import sys
 import logging
 import dask
@@ -8,6 +9,7 @@ from pyflextrkr.tracksingle_driver import tracksingle_driver
 from pyflextrkr.gettracks import gettracknumbers
 from pyflextrkr.trackstats_driver import trackstats_driver
 from pyflextrkr.identifymcs_radar import identifymcs_radar
+from pyflextrkr.regionprops_driver import compute_regionprops
 from pyflextrkr.mapfeature_driver import mapfeature_driver
 from pyflextrkr.movement_speed import movement_speed
 
@@ -74,16 +76,27 @@ if __name__ == '__main__':
     if config.get('run_trackstats', False):
         trackstats_filename = trackstats_driver(config)
 
-    # Step 5 - Identify MCS from radar statistics (lifecycle, merge/split folding)
+    # Step 5 - Identify MCS from radar statistics (MCS criteria, feature classes, merge/split folding)
+    # (writes mcsradarstats_filebase, like the Tb pipelines' mcstbstats_filebase)
     if config.get('run_identifymcs', False):
         mcsstats_filename = identifymcs_radar(config)
 
-    # Step 6 - Map tracking to pixel files
-    # (same file naming as the Tb+PF pipelines: identifymcs_radar writes mcsrobust_filebase)
+    # Step 6 - Recompute shape and extremes on the merged mask (own feature + folded merge/split fragments),
+    # then stage the lifecycle (reads mcsradarstats_filebase, writes mcsrobust_filebase)
+    if config.get('run_regionprops', False):
+        robuststats_filename = compute_regionprops(config)
+
+    # Step 7 - Map tracking to pixel files
+    # (same file naming as the Tb+PF pipelines: reads mcsrobust_filebase)
     if config.get('run_mapfeature', False):
+        robust_file = f"{config['stats_outpath']}{config['mcsrobust_filebase']}{config['startdate']}_{config['enddate']}.nc"
+        if not os.path.isfile(robust_file):
+            logger.critical(f"{robust_file} not found: run_regionprops writes it from the run_identifymcs output. "
+                            f"Tracking will now exit.")
+            sys.exit()
         mapfeature_driver(config, trackstats_filebase=config['mcsrobust_filebase'])
 
-    # Step 7 - Movement speed calculation
+    # Step 8 - Movement speed calculation
     # (reads mcsrobust_filebase, writes mcsfinal_filebase)
     if config.get('run_speed', False):
         movement_speed(config)

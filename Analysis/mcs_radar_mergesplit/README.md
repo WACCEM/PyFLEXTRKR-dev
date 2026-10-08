@@ -64,3 +64,10 @@ which the previous code attached the most fragment area that the current code do
   `--old-rev` to use another revision.
 * The two roots together need roughly the size of the pixel files of two runs (about 13 GB each for the 2-day
   MRMS case); the tracking files are hard-linked and cost nothing.
+* `--new-rev` defaults to `HEAD`. Since `run_mcs_radar3d.py` got the second-pass step `run_regionprops` (it reads the
+  `identifymcs_radar` file `mcs_tracks_`, writes the `mcsrobust_filebase` file that mapfeature reads, and needs
+  `conv_feature_number` in the cloudid files), a run of `HEAD` on cloudid files made before that step cannot go through
+  mapfeature. To reproduce this comparison on such a tracking, pass `--new-rev` the revision of the merge/split change
+  itself (the commit titled *"identifymcs_radar: keep merge/split fragments that do not coexist with their root"*);
+  `setup_comparison.py` writes both `finalstats_filebase` and `mcsrobust_filebase`, so that revision runs with the same
+  config.
