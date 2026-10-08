@@ -1,8 +1,7 @@
 """
 Synthetic tests for pyflextrkr/identifymcs_radar.py's pure-function core:
-MCS criteria testing, merge/split fragment folding, feature classification,
-and - the specific focus the task asked to harden - multi-cycle-aware
-lifecycle staging.
+MCS criteria testing, merge/split fragment folding and feature classification
+(the lifecycle staging is tested in test_mcs_lifecycle_synthetic.py).
 
 No dask import anywhere in identifymcs_radar.py, so all of this runs on CI.
 """
@@ -20,23 +19,12 @@ from pyflextrkr.identifymcs_radar import (
     resolve_fragment_roots,
     release_noncoexisting_fragments,
     attach_fragments,
-    sum_fragment_area,
     classify_feature_class,
     classify_track_class,
-    classify_lifecycle,
-    STAGE_CLOUD_ONLY, STAGE_UNORGANIZED, STAGE_GENESIS, STAGE_MATURE, STAGE_DECAY,
     CLASS_MCS, CLASS_MULTICELL, CLASS_ISOLATED_CELL, CLASS_NON_CONVECTIVE,
 )
 
 DT = 1.0 / 12.0  # 5-minute time resolution [hour]
-
-LIFECYCLE_PARAMS = {
-    'mcs_lifecycle_line_thresh': 100.0,  # km
-    'mcs_lifecycle_gap_hour': 1.0,
-    'mcs_lifecycle_genesis_lag_hour': 1.0,
-    'mcs_lifecycle_mature_lag_hour': 2.0,
-    'mcs_lifecycle_sf_area_min': 0,
-}
 
 MCS_PARAMS = {
     'mcs_majoraxis_thresh': 100.0,
@@ -234,13 +222,14 @@ class TestFragmentFolding:
 
         (merge_cn, merge_stat, merge_ar,
          split_cn, split_stat, split_ar,
-         n_unmatched, n_truncated) = attach_fragments(
+         n_unmatched, n_truncated, fragment_sums) = attach_fragments(
             root_idx, link_type, basetime_full, cloudnumber_full,
             track_status_full, area_full, keep_track_indices,
             nmaxmerge=3, fillval=-9999, fillval_f=np.nan,
         )
         assert n_unmatched == 0
         assert n_truncated == 0
+        assert fragment_sums == {}   # no sum_vars requested
         # new_idx=0 (track 1 is the only kept track); matched at times 0 and 1
         assert merge_cn[0, 0, 0] == 5
         assert merge_cn[0, 1, 0] == 6
@@ -367,21 +356,85 @@ class TestReleaseNoncoexistingFragments:
 # Classification
 # ---------------------------------------------------------------------------
 
-class TestSumFragmentArea:
+class TestFragmentSums:
+    """attach_fragments(sum_vars=...) adds up the fragments that are stored in the merge/split slots."""
 
-    def test_sums_merge_and_split_and_ignores_nan(self):
-        merge = np.full((3, 4, 5), np.nan, dtype=np.float32)
-        split = np.full((3, 4, 5), np.nan, dtype=np.float32)
-        merge[0, 1, 0] = 10.0
-        merge[0, 1, 2] = 5.0
-        split[0, 1, 1] = 7.0
-        split[2, 3, 0] = 2.0
-        out = sum_fragment_area(merge, split, chunk=2)   # chunk < n_tracks: checks the chunk boundary
-        assert out.shape == (3, 4)
-        assert out.dtype == np.float64
-        assert out[0, 1] == 22.0
-        assert out[2, 3] == 2.0
-        assert out.sum() == 24.0   # 0 everywhere else, never NaN
+    @staticmethod
+    def _inputs():
+        # tracks 0 (merge fragment) and 1 (split fragment) are folded into root track 2;
+        # track 3 is a kept track without fragments
+        basetime = np.array([[100.0, 200.0, 0.0],
+                             [200.0, 300.0, 0.0],
+                             [100.0, 200.0, 300.0],
+                             [100.0, 200.0, 300.0]])
+        cloudnumber = np.array([[5, 6, 0], [7, 8, 0], [10, 11, 12], [20, 21, 22]], dtype=np.int32)
+        status = np.ones((4, 3), dtype=np.int32)
+        area = np.array([[50.0, 60.0, 0.0], [70.0, 80.0, 0.0],
+                         [500.0, 600.0, 700.0], [900.0, 900.0, 900.0]])
+        conv = np.array([[5.0, 6.0, 0.0], [7.0, 8.0, 0.0],
+                         [50.0, 60.0, 70.0], [90.0, 90.0, 90.0]])
+        root_idx = np.array([2, 2, 2, 3])
+        link_type = np.array(['merge', 'split', '', ''])
+        return basetime, cloudnumber, status, area, conv, root_idx, link_type
+
+    def test_sums_merge_and_split_fragments_at_their_times(self):
+        basetime, cloudnumber, status, area, conv, root_idx, link_type = self._inputs()
+        result = attach_fragments(
+            root_idx, link_type, basetime, cloudnumber, status, area, np.array([2, 3]),
+            nmaxmerge=3, fillval=-9999, fillval_f=np.nan,
+            sum_vars={"area": area, "conv_area": conv},
+        )
+        assert result[7] == 0                       # nothing truncated
+        sums = result[8]
+        assert set(sums) == {"area", "conv_area"}
+        assert sums["area"].shape == (2, 3) and sums["area"].dtype == np.float64
+        # root 2 (new index 0): the merge fragment sits at its times 0, 1; the split fragment at 1, 2
+        np.testing.assert_allclose(sums["area"][0], [50.0, 60.0 + 70.0, 80.0])
+        np.testing.assert_allclose(sums["conv_area"][0], [5.0, 6.0 + 7.0, 8.0])
+        # track 3 (new index 1) has no fragment: 0, never NaN
+        np.testing.assert_array_equal(sums["area"][1], 0.0)
+
+    def test_sums_equal_the_merge_and_split_area_arrays(self):
+        basetime, cloudnumber, status, area, conv, root_idx, link_type = self._inputs()
+        result = attach_fragments(
+            root_idx, link_type, basetime, cloudnumber, status, area, np.array([2, 3]),
+            nmaxmerge=3, fillval=-9999, fillval_f=np.nan, sum_vars={"area": area},
+        )
+        merge_ar, split_ar, sums = result[2], result[5], result[8]
+        stored = np.nansum(merge_ar, axis=2) + np.nansum(split_ar, axis=2)
+        np.testing.assert_allclose(sums["area"], stored)
+
+    def test_nan_values_are_skipped(self):
+        basetime, cloudnumber, status, area, conv, root_idx, link_type = self._inputs()
+        conv = conv.copy()
+        conv[0, 0] = np.nan                         # the merge fragment has no value at its first time
+        result = attach_fragments(
+            root_idx, link_type, basetime, cloudnumber, status, area, np.array([2, 3]),
+            nmaxmerge=3, fillval=-9999, fillval_f=np.nan, sum_vars={"conv_area": conv},
+        )
+        sums = result[8]["conv_area"]
+        assert not np.isnan(sums).any()
+        np.testing.assert_allclose(sums[0], [0.0, 6.0 + 7.0, 8.0])
+
+    def test_fragments_dropped_by_the_slot_limit_are_not_counted(self):
+        basetime, cloudnumber, status, area, conv, root_idx, link_type = self._inputs()
+        link_type = np.array(['merge', 'merge', '', ''])    # two merge fragments, only one slot
+        result = attach_fragments(
+            root_idx, link_type, basetime, cloudnumber, status, area, np.array([2, 3]),
+            nmaxmerge=1, fillval=-9999, fillval_f=np.nan, sum_vars={"area": area},
+        )
+        merge_ar, n_truncated, sums = result[2], result[7], result[8]
+        assert n_truncated == 1                              # both fragments sit at root time 1
+        np.testing.assert_allclose(sums["area"][0], [50.0, 60.0, 80.0])   # the second fragment's 70 at time 1 is dropped
+        np.testing.assert_allclose(sums["area"], np.nansum(merge_ar, axis=2))
+
+    def test_without_sum_vars_the_dict_is_empty(self):
+        basetime, cloudnumber, status, area, conv, root_idx, link_type = self._inputs()
+        result = attach_fragments(
+            root_idx, link_type, basetime, cloudnumber, status, area, np.array([2, 3]),
+            nmaxmerge=3, fillval=-9999, fillval_f=np.nan,
+        )
+        assert result[8] == {}
 
 
 class TestClassification:
@@ -407,236 +460,6 @@ class TestClassification:
     def test_track_class_all_fill_returns_fill(self):
         fc = np.array([-9999, -9999])
         assert classify_track_class(fc, fillval=-9999) == -9999
-
-
-# ---------------------------------------------------------------------------
-# Lifecycle staging - the scenarios the task explicitly asked to harden
-# ---------------------------------------------------------------------------
-
-def _hours_to_steps(hours):
-    return int(round(hours / DT))
-
-
-class TestLifecycleStaging:
-
-    def test_s1_full_monotonic_cycle(self):
-        """
-        Full textbook lifecycle: cloud-only -> unorganized convection ->
-        genesis (line organizes) -> mature (stratiform develops) -> decay.
-        """
-        n = _hours_to_steps(12)
-        conv_area = np.zeros(n)
-        conv_majoraxis = np.zeros(n)
-        strat_area = np.zeros(n)
-
-        # Unorganized convection starts at hour 1
-        t_conv_start = _hours_to_steps(1)
-        conv_area[t_conv_start:] = 50.0
-        conv_majoraxis[t_conv_start:] = 20.0  # not yet organized (<100km)
-
-        # Line organizes (>=100km) at hour 3, for the rest of the track
-        t_line_start = _hours_to_steps(3)
-        conv_majoraxis[t_line_start:] = 150.0
-
-        # Stratiform develops starting hour 6 (2h after line = mature_lag), ends hour 9
-        t_sf_start = _hours_to_steps(6)
-        t_sf_end = _hours_to_steps(9)
-        strat_area[t_sf_start:t_sf_end] = 500.0
-
-        stage, cycle, lc_idx, ncyc, complete = classify_lifecycle(
-            conv_area, conv_majoraxis, strat_area, DT, LIFECYCLE_PARAMS,
-        )
-        assert ncyc == 1
-        assert lc_idx[0] == 0  # stage 1 (cloud only) starts at t=0
-        assert lc_idx[1] == t_conv_start  # stage 2 starts when convection appears
-        # Genesis starts at line_start + genesis_lag (1h)
-        expected_genesis_start = t_line_start + _hours_to_steps(1)
-        assert lc_idx[2] == expected_genesis_start
-        assert lc_idx[3] == t_sf_start  # mature starts when stratiform appears (after the lag search window)
-        assert lc_idx[4] == t_sf_end  # decay starts right after stratiform disappears
-        assert complete
-
-    def test_s2_no_mature_stage(self):
-        """Convective line organizes but stratiform never develops -> no mature stage."""
-        n = _hours_to_steps(10)
-        conv_area = np.full(n, 50.0)
-        conv_majoraxis = np.zeros(n)
-        conv_majoraxis[_hours_to_steps(1):] = 150.0
-        strat_area = np.zeros(n)  # never any stratiform
-
-        stage, cycle, lc_idx, ncyc, complete = classify_lifecycle(
-            conv_area, conv_majoraxis, strat_area, DT, LIFECYCLE_PARAMS,
-        )
-        assert lc_idx[3] == -1  # mature never observed
-        # Genesis extends all the way to the track's end (the organized line
-        # never stops within the track), so there is no time left for decay
-        # to be observed either - correctly distinct from "mature lasting to
-        # the end" (test_mature_lasting_to_track_end_no_decay_observed).
-        assert lc_idx[4] == -1
-        assert not complete
-
-    def test_s3_two_separate_convective_episodes(self):
-        """
-        The key multi-cycle robustness case: two separate organized-line
-        episodes (e.g. re-intensification after a lull), separated by a gap
-        longer than mcs_lifecycle_gap_hour. Both episodes must be staged
-        (genesis/decay at minimum for each), not just the larger one.
-        """
-        n = _hours_to_steps(20)
-        conv_area = np.full(n, 50.0)
-        conv_majoraxis = np.zeros(n)
-        strat_area = np.zeros(n)
-
-        # Episode 1: hours 1-4 (organized line)
-        e1_start, e1_end = _hours_to_steps(1), _hours_to_steps(4)
-        conv_majoraxis[e1_start:e1_end] = 150.0
-
-        # Gap: hours 4-9 (5 hours, > mcs_lifecycle_gap_hour=1h) - line disorganizes
-        # Episode 2: hours 9-14
-        e2_start, e2_end = _hours_to_steps(9), _hours_to_steps(14)
-        conv_majoraxis[e2_start:e2_end] = 150.0
-
-        stage, cycle, lc_idx, ncyc, complete = classify_lifecycle(
-            conv_area, conv_majoraxis, strat_area, DT, LIFECYCLE_PARAMS,
-        )
-        assert ncyc == 2, f"Expected 2 separate episodes, got {ncyc}"
-        # Both episodes should have contributed a genesis stage (3) at some point
-        assert np.any(stage[e1_start:e1_end] == STAGE_GENESIS)
-        assert np.any(stage[e2_start:e2_end] == STAGE_GENESIS)
-        # cycle should distinguish episode 1 (cycle==1) from episode 2 (cycle==2)
-        assert np.any(cycle == 1)
-        assert np.any(cycle == 2)
-        # Between the two episodes, the track should show decay (5) from episode 1
-        # Also confirm this DIFFERS from the "largest-group-only" behavior: the
-        # first episode must leave a trace (not be silently overwritten/ignored).
-        assert lc_idx[2] != -1  # genesis was observed (from episode 1, the first)
-
-    def test_s4_convection_never_organizes_into_line(self):
-        """Convection present throughout, but majoraxis never reaches the line threshold."""
-        n = _hours_to_steps(10)
-        conv_area = np.full(n, 50.0)
-        conv_majoraxis = np.full(n, 20.0)  # always well below 100km threshold
-        strat_area = np.zeros(n)
-
-        stage, cycle, lc_idx, ncyc, complete = classify_lifecycle(
-            conv_area, conv_majoraxis, strat_area, DT, LIFECYCLE_PARAMS,
-        )
-        assert ncyc == 0
-        assert np.all(stage == STAGE_UNORGANIZED)
-        assert lc_idx[2] == -1 and lc_idx[3] == -1 and lc_idx[4] == -1
-        assert not complete
-
-    def test_s5_episode_too_short_for_genesis(self):
-        """A brief line-organization blip shorter than genesis_lag_hour never reaches genesis."""
-        n = _hours_to_steps(5)
-        conv_area = np.full(n, 50.0)
-        conv_majoraxis = np.zeros(n)
-        # Line organized for only 2 time steps (10 min, << genesis_lag_hour=1h)
-        conv_majoraxis[2:4] = 150.0
-        strat_area = np.zeros(n)
-
-        stage, cycle, lc_idx, ncyc, complete = classify_lifecycle(
-            conv_area, conv_majoraxis, strat_area, DT, LIFECYCLE_PARAMS,
-        )
-        assert ncyc == 1  # episode detected...
-        assert lc_idx[2] == -1  # ...but too short to reach genesis
-        assert np.all(stage == STAGE_UNORGANIZED)  # stays at baseline throughout
-
-    def test_s6_no_track_meets_lifecycle_thresh_no_crash(self):
-        """
-        The identifymcs_radar() driver only calls classify_lifecycle for
-        tracks at/above mcs_lifecycle_thresh - but classify_lifecycle itself
-        must never crash regardless of input, including an all-zero/short
-        track (this is the scenario that caused a NameError in
-        robustmcs_radar.py when NO track met the threshold at all).
-        """
-        for n in [0, 1, 3]:
-            conv_area = np.zeros(n)
-            conv_majoraxis = np.zeros(n)
-            strat_area = np.zeros(n)
-            stage, cycle, lc_idx, ncyc, complete = classify_lifecycle(
-                conv_area, conv_majoraxis, strat_area, DT, LIFECYCLE_PARAMS,
-            )
-            assert len(stage) == n
-            if n == 0:
-                assert list(lc_idx) == [-1, -1, -1, -1, -1]
-            else:
-                # Stage 1 (cloud only) is the R0 baseline, always observed
-                # starting at t=0 for any non-empty track with no convection;
-                # only stages 2-5 (which require actual convection/
-                # organization) stay unobserved.
-                assert lc_idx[0] == 0
-                assert list(lc_idx[1:]) == [-1, -1, -1, -1]
-            assert not complete
-
-    def test_nan_inputs_treated_as_zero_absent(self):
-        n = _hours_to_steps(5)
-        conv_area = np.full(n, np.nan)
-        conv_majoraxis = np.full(n, np.nan)
-        strat_area = np.full(n, np.nan)
-        stage, cycle, lc_idx, ncyc, complete = classify_lifecycle(
-            conv_area, conv_majoraxis, strat_area, DT, LIFECYCLE_PARAMS,
-        )
-        assert np.all(stage == STAGE_CLOUD_ONLY)
-        assert ncyc == 0
-
-    def test_line_present_from_track_start(self):
-        """Edge case: the convective line is already organized at t=0 (a=0)."""
-        n = _hours_to_steps(8)
-        conv_area = np.full(n, 50.0)
-        conv_majoraxis = np.full(n, 150.0)  # organized from t=0
-        strat_area = np.zeros(n)
-        strat_area[_hours_to_steps(3):] = 500.0
-
-        stage, cycle, lc_idx, ncyc, complete = classify_lifecycle(
-            conv_area, conv_majoraxis, strat_area, DT, LIFECYCLE_PARAMS,
-        )
-        assert ncyc == 1
-        # Genesis should start at genesis_lag_hour (1h) from track start (a=0)
-        assert lc_idx[2] == _hours_to_steps(1)
-
-    def test_mature_lasting_to_track_end_no_decay_observed(self):
-        """If the mature stage never ends within the track, decay is never observed."""
-        n = _hours_to_steps(10)
-        conv_area = np.full(n, 50.0)
-        conv_majoraxis = np.full(n, 150.0)
-        strat_area = np.full(n, 500.0)  # stratiform present (and sustained) throughout
-
-        stage, cycle, lc_idx, ncyc, complete = classify_lifecycle(
-            conv_area, conv_majoraxis, strat_area, DT, LIFECYCLE_PARAMS,
-        )
-        assert lc_idx[3] != -1  # mature observed
-        assert lc_idx[4] == -1  # decay never observed (track ends while still mature)
-        assert not complete  # "complete" requires decay too
-
-    def test_gap_within_tolerance_keeps_one_episode(self):
-        """A short dropout within mcs_lifecycle_gap_hour stays one episode, not two."""
-        n = _hours_to_steps(10)
-        conv_area = np.full(n, 50.0)
-        conv_majoraxis = np.full(n, 150.0)
-        gap_steps = _hours_to_steps(LIFECYCLE_PARAMS['mcs_lifecycle_gap_hour'])
-        dropout_start = _hours_to_steps(4)
-        conv_majoraxis[dropout_start:dropout_start + gap_steps] = 0.0  # dropout <= gap tolerance
-        strat_area = np.zeros(n)
-
-        stage, cycle, lc_idx, ncyc, complete = classify_lifecycle(
-            conv_area, conv_majoraxis, strat_area, DT, LIFECYCLE_PARAMS,
-        )
-        assert ncyc == 1
-
-    def test_gap_beyond_tolerance_splits_into_two_episodes(self):
-        n = _hours_to_steps(15)
-        conv_area = np.full(n, 50.0)
-        conv_majoraxis = np.full(n, 150.0)
-        gap_steps = _hours_to_steps(LIFECYCLE_PARAMS['mcs_lifecycle_gap_hour'])
-        dropout_start = _hours_to_steps(4)
-        conv_majoraxis[dropout_start:dropout_start + gap_steps + 2] = 0.0  # dropout > gap tolerance
-        strat_area = np.zeros(n)
-
-        stage, cycle, lc_idx, ncyc, complete = classify_lifecycle(
-            conv_area, conv_majoraxis, strat_area, DT, LIFECYCLE_PARAMS,
-        )
-        assert ncyc == 2
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +508,8 @@ def _build_sparse_trackstats_file(tmp_path):
     cloudnumber[0, 0:d0] = [101, 102]
     track_status[0, 0:d0] = 32
     area[0, 0:d0] = 50.0
+    conv_area[0, 0:d0] = 20.0
+    strat_area[0, 0:d0] = 30.0
     meanlat[0, 0:d0] = 35.0
     meanlon[0, 0:d0] = -100.0
 
@@ -802,8 +627,11 @@ class TestIdentifymcsRadarEndToEnd:
 
         outfile = identifymcs_radar(config)
         assert os.path.isfile(outfile)
-        # Named like the robust MCS stats of the Tb+PF pipelines (config mcsrobust_filebase)
-        assert os.path.basename(outfile) == "mcs_tracks_robust_20250101.0000_20250101.1200.nc"
+        # Named like the MCS Tb stats of the Tb+PF pipelines (config mcsradarstats_filebase, default mcs_tracks_);
+        # regionprops_driver writes the mcsrobust_filebase file from it
+        assert os.path.basename(outfile) == "mcs_tracks_20250101.0000_20250101.1200.nc"
+        config["mcsradarstats_filebase"] = "radar_stats_"
+        assert os.path.basename(identifymcs_radar(config)) == "radar_stats_20250101.0000_20250101.1200.nc"
 
         ds = xr.open_dataset(outfile, decode_times=False, mask_and_scale=False)
         # Track 0 (the merge fragment) should have been dropped; 2 tracks remain.
@@ -824,11 +652,8 @@ class TestIdentifymcsRadarEndToEnd:
         assert 101 in merge_cn
         assert 102 in merge_cn
 
-        # 70 steps * 5 min = 5.83h, below the default mcs_lifecycle_thresh of
-        # 8h, so lifecycle staging should NOT have been evaluated here.
-        lifecycle_evaluated = ds["lifecycle_evaluated"].values[mcs_track]
-        expected_evaluated = int((70 * (1.0 / 12.0)) >= 8)
-        assert lifecycle_evaluated == expected_evaluated
+        # the lifecycle is staged by the second pass (regionprops_driver), not here
+        assert not any(v.startswith("lifecycle_") for v in ds.data_vars)
 
     def test_total_area_includes_folded_fragments(self, tmp_path):
         stats_path = _build_sparse_trackstats_file(tmp_path)
@@ -851,21 +676,39 @@ class TestIdentifymcsRadarEndToEnd:
         other = int(np.where(ds["track_duration"].values == 10)[0][0])
         np.testing.assert_allclose(total[other, :10], area[other, :10])
 
-    def test_driver_lifecycle_evaluated_when_long_enough(self, tmp_path):
+    def test_total_conv_and_strat_area_include_folded_fragments(self, tmp_path):
         stats_path = _build_sparse_trackstats_file(tmp_path)
         config = _make_driver_config(stats_path)
-        config["mcs_lifecycle_thresh"] = 4  # lower threshold so the 5.83h track qualifies
+        ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
+        mcs = int(np.where(ds["track_duration"].values == 70)[0][0])
+        other = int(np.where(ds["track_duration"].values == 10)[0][0])
+        for name, frag in (("conv_area", 20.0), ("strat_area", 30.0)):
+            own = ds[name].values
+            total = ds[f"total_{name}"].values
+            assert ds[f"total_{name}"].dims == ("tracks", "times")
+            assert ds[f"total_{name}"].attrs["units"] == "km^2"
+            # the fragment (conv 20, strat 30 at each of its 2 steps) is added to the MCS at its first two steps
+            np.testing.assert_allclose(total[mcs, 0:2], own[mcs, 0:2] + frag)
+            np.testing.assert_allclose(total[mcs, 2:70], own[mcs, 2:70])
+            assert np.all(np.isnan(total[mcs, 70:]))
+            # a track without fragments keeps its own value, and the NaN pattern is that of the data
+            np.testing.assert_allclose(total[other, :10], own[other, :10])
+            assert np.all(np.isnan(total[other, 10:]))
+        # the stratiform episode of the MCS (500 km2 from step 40 to 54) is untouched by the fragment
+        np.testing.assert_allclose(ds["total_strat_area"].values[mcs, 40:55], 500.0)
 
-        outfile = identifymcs_radar(config)
-        ds = xr.open_dataset(outfile, decode_times=False, mask_and_scale=False)
-        track_duration = ds["track_duration"].values
-        mcs_track = int(np.where(track_duration == 70)[0][0])
-
-        assert ds["lifecycle_evaluated"].values[mcs_track] == 1
-        lc_idx = ds["lifecycle_index"].values[mcs_track, :]
-        assert lc_idx[2] != -9999  # genesis observed
-        assert lc_idx[3] != -9999  # mature observed
-        assert lc_idx[4] != -9999  # decay observed
+    def test_totals_stay_aligned_when_tracks_are_filtered(self, tmp_path):
+        # finalstats_min_area drops the 80 km2 isolated track after the fragments were attached:
+        # the per-track sums must be filtered the same way as the merge/split arrays
+        stats_path = _build_sparse_trackstats_file(tmp_path)
+        config = _make_driver_config(stats_path)
+        config["finalstats_min_area"] = 1000
+        ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
+        assert ds.sizes["tracks"] == 1
+        assert ds["track_duration"].values[0] == 70
+        np.testing.assert_allclose(ds["total_conv_area"].values[0, 0:2], 50.0 + 20.0)
+        np.testing.assert_allclose(ds["total_strat_area"].values[0, 0:2], 0.0 + 30.0)
+        np.testing.assert_allclose(ds["total_area"].values[0, 0:2], 40000.0 + 50.0)
 
     def test_driver_no_mcs_does_not_crash(self, tmp_path):
         """

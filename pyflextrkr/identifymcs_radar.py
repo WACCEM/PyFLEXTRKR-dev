@@ -5,11 +5,11 @@ Unlike identifymcs.py (Tb-based: keeps ONLY MCS-qualifying tracks, discards
 everything else) this module follows link_mergesplit_tracks.py's philosophy:
 keep EVERY tracked feature except short merge/split fragments, and attach a
 4-way classification (MCS / multi-cell / isolated-cell / non-convective) to
-every surviving track. The MCS definition itself (major axis + 45-dBZ area +
-duration) and the lifecycle-stage logic are a hardened port of
-robustmcs_radar.py's Coniglio-et-al.-(2010)-based approach, generalized to
-irregular (non-hourly) time spacing and multi-cycle (re-intensification)
-tracks - see classify_lifecycle's docstring for the specific hardening.
+every surviving track. The MCS definition itself is major axis + 45-dBZ area +
+duration. This is the first pass: the shape and extreme statistics are those of
+each track's own feature. regionprops_driver.py is the second pass that
+recomputes them on the merged mask (own feature + folded merge/split fragments)
+and stages the lifecycle (mcs_lifecycle.py).
 
 This module has no dask import and no I/O side effects in its helper
 functions, so the core logic is directly unit-testable with synthetic data
@@ -24,13 +24,7 @@ import xarray as xr
 
 from pyflextrkr.ft_utilities import load_sparse_trackstats
 from pyflextrkr.smooth_trajectory import smooth_trajectory
-
-# Stage codes
-STAGE_CLOUD_ONLY = 1
-STAGE_UNORGANIZED = 2
-STAGE_GENESIS = 3
-STAGE_MATURE = 4
-STAGE_DECAY = 5
+from pyflextrkr.mcs_lifecycle import _steps_from_hours
 
 # Feature class codes
 CLASS_MCS = 1
@@ -42,11 +36,6 @@ CLASS_NON_CONVECTIVE = 4
 # ---------------------------------------------------------------------------
 # Small pure helpers
 # ---------------------------------------------------------------------------
-
-def _steps_from_hours(hours, time_resolution):
-    """Convert an hour duration to a (minimum 1) number of time steps."""
-    return max(1, int(round(hours / time_resolution)))
-
 
 def group_contiguous_indices(idx, max_gap_steps):
     """
@@ -290,7 +279,7 @@ def release_noncoexisting_fragments(
 def attach_fragments(
         root_idx, link_type, basetime_full, cloudnumber_full,
         track_status_full, area_full, keep_track_indices,
-        nmaxmerge, fillval, fillval_f,
+        nmaxmerge, fillval, fillval_f, sum_vars=None,
 ):
     """
     Build merge_cloudnumber/split_cloudnumber (+status/area) dense arrays
@@ -306,6 +295,9 @@ def attach_fragments(
             full track-index space) of tracks to keep, in their new order.
         nmaxmerge: int, maximum number of fragments per track per time.
         fillval, fillval_f: fill values.
+        sum_vars: dict {name: 2D np.array [n_tracks_full, max_trackduration]}, optional.
+            Variables to add up over the fragments attached to each kept track
+            (e.g. area, conv_area, strat_area).
 
     Returns:
         merge_cloudnumber, merge_status, merge_area,
@@ -318,9 +310,17 @@ def attach_fragments(
         n_truncated: int
             Count of fragment attachments dropped because more than
             nmaxmerge fragments attached to one track at one time.
+        fragment_sums: dict {name: 2D np.array(float64) [n_kept, max_trackduration]}
+            For every sum_vars entry, the sum over the merge and split fragments attached to
+            the track at that time (0 where none; NaN values are skipped). Only fragments that
+            were stored in a merge/split slot count, so these sums stay consistent with
+            merge_area/split_area and with the pixels mapfeature paints for the track.
+            Empty if sum_vars is None.
     """
     n_kept = len(keep_track_indices)
     max_trackduration = basetime_full.shape[1]
+    sum_vars = {} if sum_vars is None else sum_vars
+    fragment_sums = {name: np.zeros((n_kept, max_trackduration), dtype=np.float64) for name in sum_vars}
     merge_cloudnumber = np.full((n_kept, max_trackduration, nmaxmerge), fillval, dtype=np.int32)
     merge_status = np.full((n_kept, max_trackduration, nmaxmerge), fillval, dtype=np.int32)
     merge_area = np.full((n_kept, max_trackduration, nmaxmerge), fillval_f, dtype=np.float32)
@@ -369,29 +369,14 @@ def attach_fragments(
             dest[new_idx, tt, slot] = frag_cn[t]
             dstat[new_idx, tt, slot] = frag_status[t]
             darea[new_idx, tt, slot] = frag_area[t]
+            for name, src in sum_vars.items():
+                value = src[orig_idx, t]
+                if np.isfinite(value):
+                    fragment_sums[name][new_idx, tt] += value
 
     return (merge_cloudnumber, merge_status, merge_area,
             split_cloudnumber, split_status, split_area,
-            n_unmatched, n_truncated)
-
-
-def sum_fragment_area(merge_area, split_area, chunk=2000):
-    """
-    Total area of the folded merge and split fragments of every track at every time.
-
-    Args:
-        merge_area, split_area: 3D np.array [n_tracks, n_times, nmaxmerge], from attach_fragments;
-            NaN = no fragment in that slot (counts as 0).
-        chunk: int, number of tracks summed at once (keeps the temporary arrays small).
-
-    Returns:
-        fragment_area: 2D np.array(float64) [n_tracks, n_times]; 0 where a track has no fragment.
-    """
-    out = np.zeros(merge_area.shape[:2], dtype=np.float64)
-    for i in range(0, merge_area.shape[0], chunk):
-        sl = slice(i, i + chunk)
-        out[sl] = np.nansum(merge_area[sl], axis=2) + np.nansum(split_area[sl], axis=2)
-    return out
+            n_unmatched, n_truncated, fragment_sums)
 
 
 # ---------------------------------------------------------------------------
@@ -438,121 +423,26 @@ def classify_track_class(feature_class, fillval=-9999):
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle staging (hardened port of robustmcs_radar.py)
+# Parameters
 # ---------------------------------------------------------------------------
 
-def classify_lifecycle(conv_area, conv_majoraxis, strat_area, time_resolution, params):
+def mcs_params_from_config(config):
     """
-    Hardened, multi-cycle-aware port of robustmcs_radar.py's Coniglio-et-al.
-    -2010 lifecycle staging, for ONE track's own time series (already
-    trimmed to its own track_duration).
-
-    Stages: 1=cloud only, 2=unorganized convection, 3=genesis (line
-    organizing, not yet mature), 4=mature (organized line + developed
-    stratiform area), 5=decay.
-
-    Hardening vs. robustmcs_radar.py:
-    - Every contiguous "organized convective line" episode
-      (conv_majoraxis >= mcs_lifecycle_line_thresh, gaps up to
-      mcs_lifecycle_gap_hour bridged) is staged independently, in time
-      order, without overwriting earlier stage assignments - this replaces
-      robustmcs_radar.py's approach of keeping only the single largest
-      contiguous group, which silently drops re-intensification episodes
-      (the "odd multi-cycle tracks" the lifecycle logic needed to be made
-      robust against).
-    - All constants are expressed in hours and converted to time steps via
-      time_resolution, instead of robustmcs_radar.py's hard-coded hourly-
-      step constants (e.g. "+2"), which would silently misbehave at
-      5-minute (or any non-hourly) time resolution.
-    - "Stage not observed" is -1 in lifecycle_index, distinct from a track
-      not being evaluated at all (handled by the caller).
-    - This function is always called and always returns a result (never
-      raises/exits for a short or poorly-organized track) - the caller
-      decides whether a track is long enough to bother evaluating.
-
-    Args:
-        conv_area, conv_majoraxis, strat_area: 1D np.array, this track's own
-            time series (length = track_duration). NaN treated as 0/absent.
-        time_resolution: float [hour]
-        params: dict with mcs_lifecycle_line_thresh, mcs_lifecycle_gap_hour,
-            mcs_lifecycle_genesis_lag_hour, mcs_lifecycle_mature_lag_hour,
-            mcs_lifecycle_sf_area_min.
-
-    Returns:
-        stage: 1D np.array(int16), length = track_duration.
-        cycle: 1D np.array(int16), which organized-line episode (1-based) a
-            time belongs to; 0 for cloud-only/unorganized-baseline times not
-            part of any episode's genesis-through-decay span.
-        lifecycle_index: 1D np.array(int64), length 5, the first time INDEX
-            of stages 1..5 within this track's own trimmed array; -1 if that
-            stage was never observed.
-        ncycles: int, number of organized-line episodes found.
-        complete: bool, True if stages 3, 4 and 5 are all observed.
+    MCS criteria and lifecycle staging parameters from the config, with their defaults (shared by
+    identifymcs_radar and regionprops_driver).
     """
-    n = len(conv_area)
-    conv_area = np.nan_to_num(np.asarray(conv_area, dtype=float), nan=0.0)
-    conv_majoraxis = np.nan_to_num(np.asarray(conv_majoraxis, dtype=float), nan=0.0)
-    strat_area = np.nan_to_num(np.asarray(strat_area, dtype=float), nan=0.0)
-
-    stage = np.full(n, STAGE_CLOUD_ONLY, dtype=np.int16)
-    cycle = np.zeros(n, dtype=np.int16)
-    if n == 0:
-        return stage, cycle, np.full(5, -1, dtype=np.int64), 0, False
-
-    C = conv_area > 0
-    stage[C] = STAGE_UNORGANIZED
-
-    Lf = conv_majoraxis >= params['mcs_lifecycle_line_thresh']
-    sf_present = strat_area[strat_area > 0]
-    sf_floor = max(
-        float(np.mean(sf_present)) if sf_present.size > 0 else 0.0,
-        params.get('mcs_lifecycle_sf_area_min', 0),
-    )
-    S = Lf & (strat_area > 0) & (strat_area >= sf_floor)
-
-    gap_steps = _steps_from_hours(params['mcs_lifecycle_gap_hour'], time_resolution)
-    genesis_lag_steps = _steps_from_hours(params['mcs_lifecycle_genesis_lag_hour'], time_resolution)
-    mature_lag_steps = _steps_from_hours(params['mcs_lifecycle_mature_lag_hour'], time_resolution)
-
-    line_idx = np.where(Lf)[0]
-    episodes = group_contiguous_indices(line_idx, gap_steps)
-    ncycles = len(episodes)
-
-    for ic, episode in enumerate(episodes, start=1):
-        a, b = int(episode[0]), int(episode[-1])
-        g = a + genesis_lag_steps
-        if g > b:
-            # Episode too short for even genesis to complete (less than
-            # mcs_lifecycle_genesis_lag_hour of organized line) - leave the
-            # R0 baseline (cloud-only/unorganized) stage for this episode.
-            continue
-
-        mature_search_start = g + mature_lag_steps
-        mature_candidates = np.where(S[mature_search_start:b + 1])[0]
-        if mature_candidates.size > 0:
-            s0 = mature_search_start + int(mature_candidates[0])
-            s1 = g + int(np.where(S[g:b + 1])[0][-1])
-            stage[g:s0] = STAGE_GENESIS
-            stage[s0:s1 + 1] = STAGE_MATURE
-            decay_start = s1 + 1
-        else:
-            stage[g:b + 1] = STAGE_GENESIS
-            decay_start = b + 1
-
-        decay_end = int(episodes[ic][0]) if ic < len(episodes) else n
-        if decay_start < decay_end:
-            stage[decay_start:decay_end] = STAGE_DECAY
-        cycle[g:max(decay_end, g + 1)] = ic
-
-    lifecycle_index = np.full(5, -1, dtype=np.int64)
-    for s in range(1, 6):
-        where_s = np.where(stage == s)[0]
-        if where_s.size > 0:
-            lifecycle_index[s - 1] = where_s[0]
-    complete = bool(
-        (lifecycle_index[2] != -1) and (lifecycle_index[3] != -1) and (lifecycle_index[4] != -1)
-    )
-    return stage, cycle, lifecycle_index, ncycles, complete
+    return {
+        'mcs_majoraxis_thresh': config.get("mcs_majoraxis_thresh", 100),
+        'mcs_dbz45_area_thresh': config.get("mcs_dbz45_area_thresh", 0),
+        'mcs_duration_thresh': config.get("mcs_duration_thresh", 4),
+        'mcs_gap_hour': config.get("mcs_gap_hour", 0.25),
+        'mcs_lifecycle_line_thresh': config.get("mcs_lifecycle_line_thresh", 100),
+        'mcs_lifecycle_gap_hour': config.get("mcs_lifecycle_gap_hour", 1.0),
+        'mcs_lifecycle_genesis_lag_hour': config.get("mcs_lifecycle_genesis_lag_hour", 1.0),
+        'mcs_lifecycle_mature_lag_hour': config.get("mcs_lifecycle_mature_lag_hour", 2.0),
+        'mcs_lifecycle_sf_area_min': config.get("mcs_lifecycle_sf_area_min", 0),
+        'mcs_lifecycle_smooth_hour': config.get("mcs_lifecycle_smooth_hour", 0.5),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -563,7 +453,8 @@ def identifymcs_radar(config):
     """
     Identify MCS from radar-based track statistics and classify every
     surviving (non-fragment) track as MCS / multi-cell / isolated-cell /
-    non-convective, with hardened lifecycle staging for MCS tracks.
+    non-convective, and fold the merge/split fragments into the track they belong to.
+    First pass of the radar_feature MCS statistics; regionprops_driver.py is the second pass.
 
     Args:
         config: dictionary
@@ -571,18 +462,19 @@ def identifymcs_radar(config):
 
     Returns:
         statistics_outfile: string
-            Track statistics file name, same role and naming as the robust MCS
-            statistics of the Tb+PF pipelines
-            (f"{stats_path}{mcsrobust_filebase}{startdate}_{enddate}.nc").
-            It is the input of mapfeature_driver and movement_speed (which
-            writes the mcsfinal_filebase file). Besides the own-feature statistics it holds
+            Track statistics file name, same role and naming as the MCS Tb statistics of the
+            Tb+PF pipelines (f"{stats_path}{mcsradarstats_filebase}{startdate}_{enddate}.nc",
+            default mcsradarstats_filebase "mcs_tracks_"). It is the input of regionprops_driver,
+            which writes the mcsrobust_filebase file used by mapfeature_driver and
+            movement_speed. Besides the own-feature statistics it holds
             the folded merge/split fragments (merge_*/split_* variables) and total_area,
-            the track's area including those fragments.
+            total_conv_area, total_strat_area: the track's area, convective area and
+            stratiform area including those fragments.
     """
     logger = logging.getLogger(__name__)
     logger.info("Identifying MCS from radar-based track statistics")
 
-    mcsrobust_filebase = config["mcsrobust_filebase"]
+    mcsradarstats_filebase = config.get("mcsradarstats_filebase", "mcs_tracks_")
     trackstats_sparse_filebase = config["trackstats_sparse_filebase"]
     stats_path = config["stats_outpath"]
     startdate = config["startdate"]
@@ -604,24 +496,13 @@ def identifymcs_radar(config):
     finalstats_min_area = config.get("finalstats_min_area", 0)
     finalstats_min_duration = config.get("finalstats_min_duration", None)
 
-    params = {
-        'mcs_majoraxis_thresh': config.get("mcs_majoraxis_thresh", 100),
-        'mcs_dbz45_area_thresh': config.get("mcs_dbz45_area_thresh", 0),
-        'mcs_duration_thresh': config.get("mcs_duration_thresh", 4),
-        'mcs_gap_hour': config.get("mcs_gap_hour", 0.25),
-        'mcs_lifecycle_line_thresh': config.get("mcs_lifecycle_line_thresh", 100),
-        'mcs_lifecycle_gap_hour': config.get("mcs_lifecycle_gap_hour", 1.0),
-        'mcs_lifecycle_genesis_lag_hour': config.get("mcs_lifecycle_genesis_lag_hour", 1.0),
-        'mcs_lifecycle_mature_lag_hour': config.get("mcs_lifecycle_mature_lag_hour", 2.0),
-        'mcs_lifecycle_sf_area_min': config.get("mcs_lifecycle_sf_area_min", 0),
-    }
-    mcs_lifecycle_thresh = config.get("mcs_lifecycle_thresh", 8)
+    params = mcs_params_from_config(config)
     mcs_merge_duration = config.get("mcs_merge_duration", 1.0)
     mcs_split_duration = config.get("mcs_split_duration", 1.0)
 
     tracks_idx_varname = f"{tracks_dimname}_indices"
     times_idx_varname = f"{times_dimname}_indices"
-    statistics_outfile = f"{stats_path}{mcsrobust_filebase}{startdate}_{enddate}.nc"
+    statistics_outfile = f"{stats_path}{mcsradarstats_filebase}{startdate}_{enddate}.nc"
 
     statistics_file = f"{stats_path}{trackstats_sparse_filebase}{startdate}_{enddate}.nc"
     logger.debug(statistics_file)
@@ -658,25 +539,18 @@ def identifymcs_radar(config):
     basetime_2d = sparse_dict["base_time"].toarray()
     ncells_2d = sparse_dict["ncells"].toarray()
     conv_area_2d = sparse_dict["conv_area"].toarray()
-    conv_majoraxis_2d = sparse_dict["conv_majoraxis"].toarray()
     strat_area_2d = sparse_dict["strat_area"].toarray()
     cloudnumber_2d = sparse_dict["cloudnumber"].toarray()
     track_status_2d = sparse_dict["track_status"].toarray()
     area_2d = sparse_dict["area"].toarray()
 
     #########################################################################
-    # MCS test and lifecycle staging, per track
+    # MCS test and feature classification, per track
     #########################################################################
     is_mcs = np.zeros(ntracks_all, dtype=bool)
     mcs_status_2d = np.zeros((ntracks_all, max_trackduration), dtype=np.int16)
     feature_class_2d = np.full((ntracks_all, max_trackduration), fillval, dtype=np.int16)
     track_class = np.full(ntracks_all, fillval, dtype=np.int16)
-    lifecycle_stage_2d = np.full((ntracks_all, max_trackduration), fillval, dtype=np.int16)
-    lifecycle_cycle_2d = np.full((ntracks_all, max_trackduration), fillval, dtype=np.int16)
-    lifecycle_index_2d = np.full((ntracks_all, 5), fillval, dtype=np.int64)
-    lifecycle_ncycles = np.full(ntracks_all, fillval, dtype=np.int32)
-    lifecycle_complete_flag = np.full(ntracks_all, fillval, dtype=np.int16)
-    lifecycle_evaluated = np.zeros(ntracks_all, dtype=np.int16)
 
     for nt in range(ntracks_all):
         ilength = int(track_duration[nt])
@@ -687,9 +561,6 @@ def identifymcs_radar(config):
         t_dbz45 = dbz45_2d[nt, 0:ilength]
         t_basetime = basetime_2d[nt, 0:ilength]
         t_ncells = ncells_2d[nt, 0:ilength]
-        t_conv_area = conv_area_2d[nt, 0:ilength]
-        t_conv_majoraxis = conv_majoraxis_2d[nt, 0:ilength]
-        t_strat_area = strat_area_2d[nt, 0:ilength]
 
         mcs_status, track_is_mcs = identify_mcs_periods(
             t_majoraxis, t_dbz45, t_basetime, time_resolution, params,
@@ -700,17 +571,6 @@ def identifymcs_radar(config):
         feature_class = classify_feature_class(mcs_status, t_ncells.astype(int), fillval)
         feature_class_2d[nt, 0:ilength] = feature_class
         track_class[nt] = classify_track_class(feature_class, fillval)
-
-        if track_lifetime_hr[nt] >= mcs_lifecycle_thresh:
-            stage, cyc, lc_idx, ncyc, complete = classify_lifecycle(
-                t_conv_area, t_conv_majoraxis, t_strat_area, time_resolution, params,
-            )
-            lifecycle_stage_2d[nt, 0:ilength] = stage
-            lifecycle_cycle_2d[nt, 0:ilength] = cyc
-            lifecycle_index_2d[nt, :] = lc_idx
-            lifecycle_ncycles[nt] = ncyc
-            lifecycle_complete_flag[nt] = int(complete)
-            lifecycle_evaluated[nt] = 1
 
     n_mcs = int(np.sum(is_mcs))
     logger.info(f"Number of radar-defined MCS: {n_mcs}")
@@ -746,9 +606,10 @@ def identifymcs_radar(config):
 
     (merge_cloudnumber, merge_status, merge_area,
      split_cloudnumber, split_status, split_area,
-     n_unmatched, n_truncated) = attach_fragments(
+     n_unmatched, n_truncated, fragment_sums) = attach_fragments(
         root_idx, link_type, basetime_2d, cloudnumber_2d, track_status_2d, area_2d,
         keep_track_indices, nmaxmerge, fillval, fillval_f,
+        sum_vars={"area": area_2d, "conv_area": conv_area_2d, "strat_area": strat_area_2d},
     )
     if n_unmatched > 0:
         # Not expected: release_noncoexisting_fragments() only keeps fragments whose time points all match
@@ -780,6 +641,7 @@ def identifymcs_radar(config):
         split_cloudnumber = split_cloudnumber[final_keep]
         split_status = split_status[final_keep]
         split_area = split_area[final_keep]
+        fragment_sums = {name: value[final_keep] for name, value in fragment_sums.items()}
         ntracks = len(keep_track_indices)
 
     #########################################################################
@@ -803,7 +665,6 @@ def identifymcs_radar(config):
     tracks_coord = np.arange(0, ntracks)
     times_coord = np.arange(0, max_trackduration)
     mergers_coord = np.arange(0, nmaxmerge)
-    lifestage_coord = np.arange(0, 5)
     coordlist = {
         tracks_dimname: ([tracks_dimname], tracks_coord),
         times_dimname: ([times_dimname], times_coord),
@@ -841,10 +702,15 @@ def identifymcs_radar(config):
                "_FillValue": fillval_f},
     )
 
-    # Total area of each track including the merge/split fragments folded into it
-    # (fragments are folded into any non-fragment track, MCS or not); NaN where the track has no data
-    total_area = (dsout["area"].values.astype(np.float64) + sum_fragment_area(merge_area, split_area)).astype(np.float32)
-    total_area[mask] = fillval_f
+    # Area, convective area and stratiform area of each track including the merge/split fragments
+    # folded into it (fragments are folded into any non-fragment track, MCS or not); NaN where the
+    # track has no data
+    totals = {}
+    for name in ("area", "conv_area", "strat_area"):
+        own = np.nan_to_num(dsout[name].values.astype(np.float64), nan=0.0)
+        total = (own + fragment_sums[name]).astype(np.float32)
+        total[mask] = fillval_f
+        totals[f"total_{name}"] = total
 
     # Merge/split cloudnumber variables
     mergers_dimname = "mergers"
@@ -853,19 +719,13 @@ def identifymcs_radar(config):
         "track_class": track_class[keep_track_indices],
         "feature_class": feature_class_2d[keep_track_indices, :],
         "mcs_status": mcs_status_2d[keep_track_indices, :],
-        "lifecycle_stage": lifecycle_stage_2d[keep_track_indices, :],
-        "lifecycle_cycle": lifecycle_cycle_2d[keep_track_indices, :],
-        "lifecycle_index": lifecycle_index_2d[keep_track_indices, :],
-        "lifecycle_ncycles": lifecycle_ncycles[keep_track_indices],
-        "lifecycle_complete_flag": lifecycle_complete_flag[keep_track_indices],
-        "lifecycle_evaluated": lifecycle_evaluated[keep_track_indices],
         "merge_cloudnumber": merge_cloudnumber,
         "merge_status": merge_status,
         "merge_area": merge_area,
         "split_cloudnumber": split_cloudnumber,
         "split_status": split_status,
         "split_area": split_area,
-        "total_area": total_area,
+        **totals,
     }
     var_attrs = {
         "is_mcs": {"long_name": "Flag indicating if this track meets the radar MCS criteria at any time",
@@ -877,19 +737,6 @@ def identifymcs_radar(config):
                            "3=isolated-cell, 4=non-convective", "units": "unitless", "_FillValue": fillval},
         "mcs_status": {"long_name": "Flag indicating the status of MCS based on radar criteria. 1=Yes, 0=No",
                         "units": "unitless", "_FillValue": fillval},
-        "lifecycle_stage": {"long_name": "MCS lifecycle stage: 1=cloud only, 2=unorganized convection, "
-                             "3=genesis, 4=mature, 5=decay", "units": "unitless", "_FillValue": fillval},
-        "lifecycle_cycle": {"long_name": "Which organized-convective-line episode (1-based) a time "
-                             "belongs to; 0 = not part of any episode", "units": "unitless", "_FillValue": fillval},
-        "lifecycle_index": {"long_name": "Time index of the first occurrence of each lifecycle stage "
-                             "(1-5); -1 = that stage was not observed", "units": "unitless", "_FillValue": fillval},
-        "lifecycle_ncycles": {"long_name": "Number of organized-convective-line episodes found",
-                               "units": "unitless", "_FillValue": fillval},
-        "lifecycle_complete_flag": {"long_name": "Flag indicating genesis, mature, and decay stages "
-                                     "were all observed", "units": "unitless", "_FillValue": fillval},
-        "lifecycle_evaluated": {"long_name": "Flag indicating lifecycle staging was evaluated for this "
-                                 "track (track lifetime >= mcs_lifecycle_thresh)",
-                                 "units": "unitless", "_FillValue": fillval},
         "merge_cloudnumber": {"long_name": "Cloud numbers that merge into this track",
                                "units": "unitless", "_FillValue": fillval},
         "merge_status": {"long_name": "Track status of the merging cloud", "units": "unitless", "_FillValue": fillval},
@@ -901,13 +748,21 @@ def identifymcs_radar(config):
         "total_area": {"long_name": "Total area of the track including the merge/split fragments folded into it",
                        "units": "km^2", "_FillValue": fillval_f,
                        "comments": "area + sum(merge_area over mergers) + sum(split_area over mergers)"},
+        "total_conv_area": {"long_name": "Total convective area of the track including the merge/split fragments "
+                                         "folded into it",
+                            "units": "km^2", "_FillValue": fillval_f,
+                            "comments": "conv_area of the track + conv_area of the fragments stored in the "
+                                        "merge_*/split_* slots"},
+        "total_strat_area": {"long_name": "Total stratiform area of the track including the merge/split fragments "
+                                          "folded into it",
+                             "units": "km^2", "_FillValue": fillval_f,
+                             "comments": "strat_area of the track + strat_area of the fragments stored in the "
+                                         "merge_*/split_* slots"},
     }
     varlist2 = {}
     for key, value in var_dict.items():
         if value.ndim == 1:
             varlist2[key] = ([tracks_dimname], value, var_attrs[key])
-        elif value.ndim == 2 and key == "lifecycle_index":
-            varlist2[key] = ([tracks_dimname, "lifestages"], value, var_attrs[key])
         elif value.ndim == 2:
             varlist2[key] = ([tracks_dimname, times_dimname], value, var_attrs[key])
         elif value.ndim == 3:
@@ -916,7 +771,6 @@ def identifymcs_radar(config):
         tracks_dimname: ([tracks_dimname], tracks_coord),
         times_dimname: ([times_dimname], times_coord),
         mergers_dimname: ([mergers_dimname], mergers_coord),
-        "lifestages": (["lifestages"], lifestage_coord),
     }
     ds_vars = xr.Dataset(varlist2, coords=coordlist2)
     dsout = xr.merge([dsout, ds_vars], compat="override", combine_attrs="no_conflicts")
@@ -925,7 +779,6 @@ def identifymcs_radar(config):
     dsout.attrs["mcs_majoraxis_thresh_km"] = params['mcs_majoraxis_thresh']
     dsout.attrs["mcs_dbz45_area_thresh_km2"] = params['mcs_dbz45_area_thresh']
     dsout.attrs["mcs_duration_thresh_hour"] = params['mcs_duration_thresh']
-    dsout.attrs["mcs_lifecycle_thresh_hour"] = mcs_lifecycle_thresh
     dsout.attrs["Created_on"] = time.ctime(time.time())
 
     #########################################################################
