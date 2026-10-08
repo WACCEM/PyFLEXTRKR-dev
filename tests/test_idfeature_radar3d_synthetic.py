@@ -26,6 +26,7 @@ import os
 import numpy as np
 import pytest
 import xarray as xr
+from scipy import ndimage
 
 from pyflextrkr.idfeature_radar3d import idfeature_radar3d
 
@@ -365,3 +366,44 @@ class TestIdfeatureRadar3dMissThresh:
 
         outfile = idfeature_radar3d(fpath, config)
         assert outfile is None
+
+
+class TestIdfeatureRadar3dConvFeatureNumber:
+    """conv_feature_number: the Steiner convective pixels dilated by conv_dilate_radius_km, then labeled."""
+
+    @staticmethod
+    def _run(tmp_path, radius_km=None):
+        tracking_outpath = str(tmp_path) + "/"
+        fpath = os.path.join(tracking_outpath, 'input.nc')
+        _make_synthetic_dataset(is_3d=True).to_netcdf(fpath)
+        config = _minimal_config(tracking_outpath)
+        if radius_km is not None:
+            config['conv_dilate_radius_km'] = radius_km
+        outfile = idfeature_radar3d(fpath, config)
+        return xr.open_dataset(outfile, decode_times=False, mask_and_scale=False)
+
+    def test_default_labels_the_8_connected_convective_regions(self, tmp_path):
+        ds = self._run(tmp_path)
+        cfn = ds['conv_feature_number'].values.squeeze()
+        conv = ds['convsf'].values.squeeze() == 4
+        assert ds['conv_feature_number'].dims == ('time', 'lat', 'lon')
+        assert conv.any()
+        expected, n = ndimage.label(conv, structure=np.ones((3, 3)))
+        assert np.array_equal(cfn > 0, conv)          # no radius: nothing is added
+        assert cfn.max() == n
+        # the same partition as the plain 8-connected labeling (only the numbers differ)
+        assert len(set(zip(cfn[conv].tolist(), expected[conv].tolist()))) == n
+        assert ds['conv_feature_number'].attrs['dilation_radius_km'] == 0.0
+        assert ds.attrs['conv_dilate_radius_km'] == 0
+
+    def test_radius_extends_the_features_by_a_disc_around_the_convective_pixels(self, tmp_path):
+        ds = self._run(tmp_path, radius_km=12.0)
+        cfn = ds['conv_feature_number'].values.squeeze()
+        conv = ds['convsf'].values.squeeze() == 4
+        assert np.all(cfn[conv] > 0)                  # every convective pixel is in a feature
+        assert (cfn > 0).sum() > conv.sum()           # and the features extend beyond them
+        dist = ndimage.distance_transform_edt(~conv, sampling=(DX, DX))
+        assert dist[cfn > 0].max() <= 12e3 + 1e-6     # nothing farther than the radius
+        assert np.all(cfn[dist <= 12e3] > 0)          # and everything within the radius is in
+        assert ds['conv_feature_number'].attrs['dilation_radius_km'] == 12.0
+        assert ds.attrs['conv_dilate_radius_km'] == 12.0

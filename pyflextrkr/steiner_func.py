@@ -495,6 +495,50 @@ def label_cells_fast(convmask, min_cellpix):
     return sortedlabelcell_number2d, sortedcell_npix
 
 
+def dilate_label_conv_mask(conv_mask, radius_m, dx, dy, good=None):
+    """
+    Group nearby convective pixels into labeled convective features: dilate the convective mask by a
+    circular disc and label the 8-connected regions of the result, sorted by size.
+
+    Convective cells that do not touch but are less than 2 x radius_m apart end up in the same
+    feature, so a line of separate convective cells becomes one feature. Used to tell an organized
+    convective line from isolated multi-cell convection in the MCS lifecycle staging.
+
+    Args:
+        conv_mask: 2D bool or int np.array, non-zero = convective pixel (e.g. convsf == CONVECTIVE).
+        radius_m: float, radius of the dilation disc [m]. <= 0: no dilation, the 8-connected regions
+            of conv_mask itself are labeled.
+        dx, dy: float, grid spacing in x and y [m].
+        good: 2D np.array, optional, valid-data mask (1 = valid, as mask_goodvalues). The dilation
+            only extends over valid pixels; convective pixels always keep their label.
+
+    Returns:
+        labels: 2D np.array(int32), region number at every pixel of the dilated mask, sorted by size
+            (largest = 1); 0 = not part of any region.
+    """
+    conv_mask = np.asarray(conv_mask) > 0
+    labels = np.zeros(conv_mask.shape, dtype=np.int32)
+    if not conv_mask.any():
+        return labels
+
+    region = conv_mask
+    if radius_m > 0:
+        # Exact distance (in meters) from every pixel to the nearest convective pixel
+        dist = ndimage.distance_transform_edt(~conv_mask, sampling=(dy, dx))
+        near = dist <= radius_m
+        if good is not None:
+            near &= (np.asarray(good) == 1)
+        region = conv_mask | near
+
+    raw, nregions = ndimage.label(region, structure=np.ones((3, 3), dtype=int))
+    counts = np.bincount(raw.ravel(), minlength=nregions + 1)
+    # Original label numbers from the largest to the smallest region (stable: ties keep scan order)
+    by_size = np.argsort(-counts[1:], kind="stable") + 1
+    lookup = np.zeros(nregions + 1, dtype=np.int32)
+    lookup[by_size] = np.arange(1, nregions + 1, dtype=np.int32)
+    return lookup[raw]
+
+
 def expand_conv_core_fast(score, radii_expand, dx, dy, min_corenpix=1):
     """
     Vectorized version of expand_conv_core.  Produces bit-identical output.

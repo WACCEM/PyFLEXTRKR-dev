@@ -11,6 +11,7 @@ peakedness                  – convective peakedness threshold
 make_dilation_step_func     – step-function builder
 mod_steiner_classification  – full Steiner classification pipeline
 expand_conv_core            – outward expansion of convective masks
+dilate_label_conv_mask      – dilation + labeling of the convective mask into convective features
 """
 
 import numpy as np
@@ -21,6 +22,7 @@ from pyflextrkr.steiner_func import (
     make_dilation_step_func,
     mod_steiner_classification,
     expand_conv_core,
+    dilate_label_conv_mask,
 )
 
 
@@ -219,3 +221,95 @@ class TestExpandConvCore:
         )
         assert np.sum(core_expand > 0) >= np.sum(core > 0), \
             "Expansion with zero radius should not shrink the core"
+
+
+# ---------------------------------------------------------------------------
+# dilate_label_conv_mask
+# ---------------------------------------------------------------------------
+
+class TestDilateLabelConvMask:
+    """Convective pixels closer than 2 x radius are grouped into one feature by a circular dilation."""
+
+    @staticmethod
+    def _grid(ny=40, nx=60):
+        return np.zeros((ny, nx), dtype=bool)
+
+    def test_two_pixels_30km_apart_separate_at_10km_joined_at_20km(self):
+        mask = self._grid()
+        mask[20, 10] = True
+        mask[20, 20] = True          # 10 pixels = 30 km apart (dx = 3 km)
+        sep = dilate_label_conv_mask(mask, 10e3, 3000.0, 3000.0)
+        joined = dilate_label_conv_mask(mask, 20e3, 3000.0, 3000.0)
+        assert sep.max() == 2
+        assert sep[20, 10] != sep[20, 20]
+        assert joined.max() == 1
+        assert joined[20, 10] == joined[20, 20] == 1
+
+    def test_dilation_is_a_disc_not_a_square(self):
+        mask = self._grid()
+        mask[20, 30] = True
+        lab = dilate_label_conv_mask(mask, 10e3, 3000.0, 3000.0)    # radius 3.33 pixels
+        assert lab[20, 33] == 1              # 3 pixels away along an axis: inside
+        assert lab[22, 32] == 1              # 2.83 pixels on the diagonal: inside
+        assert lab[23, 33] == 0              # 4.24 pixels on the diagonal: outside (a square would include it)
+        assert lab[20, 34] == 0              # 4 pixels away along an axis: outside
+
+    def test_anisotropic_grid_uses_dy_for_rows_and_dx_for_columns(self):
+        mask = self._grid()
+        mask[20, 30] = True
+        lab = dilate_label_conv_mask(mask, 3000.0, 1000.0, 3000.0)    # dx = 1 km, dy = 3 km, radius 3 km
+        assert lab[20, 33] == 1 and lab[20, 27] == 1     # 3 columns = 3 km
+        assert lab[21, 30] == 1 and lab[19, 30] == 1     # 1 row = 3 km
+        assert lab[22, 30] == 0                           # 2 rows = 6 km
+        assert lab[20, 34] == 0                           # 4 columns = 4 km
+
+    def test_zero_radius_labels_the_8_connected_regions(self):
+        mask = self._grid()
+        mask[5, 5] = mask[6, 6] = mask[7, 7] = True      # diagonal chain: one 8-connected region
+        mask[20, 20] = True
+        lab = dilate_label_conv_mask(mask, 0.0, 3000.0, 3000.0)
+        assert lab.max() == 2
+        assert lab[5, 5] == lab[6, 6] == lab[7, 7] == 1   # larger region first
+        assert lab[20, 20] == 2
+        assert np.array_equal(lab > 0, mask)              # nothing is added without a radius
+
+    def test_negative_radius_is_treated_as_no_dilation(self):
+        mask = self._grid()
+        mask[10, 10] = True
+        assert np.array_equal(dilate_label_conv_mask(mask, -5e3, 3000.0, 3000.0) > 0, mask)
+
+    def test_labels_are_sorted_by_size_of_the_dilated_region(self):
+        mask = self._grid(60, 80)
+        mask[10, 10] = True                     # 1 pixel
+        mask[30:33, 30:33] = True               # 9 pixels
+        mask[50, 50:52] = True                  # 2 pixels
+        lab = dilate_label_conv_mask(mask, 0.0, 3000.0, 3000.0)
+        assert lab[31, 31] == 1 and lab[50, 50] == 2 and lab[10, 10] == 3
+        # with dilation the sizes are those of the dilated regions
+        lab = dilate_label_conv_mask(mask, 6e3, 3000.0, 3000.0)
+        sizes = np.bincount(lab.ravel())[1:]
+        assert np.all(sizes[:-1] >= sizes[1:])
+        assert lab[31, 31] == 1
+
+    def test_valid_data_mask_stops_the_dilation_but_not_the_convective_pixels(self):
+        mask = self._grid()
+        mask[20, 30] = True
+        mask[20, 31] = True
+        good = np.ones(mask.shape, dtype=int)
+        good[:, 32:] = 0                         # no valid data from column 32 on
+        good[20, 31] = 0                         # a convective pixel outside the valid area keeps its label
+        lab = dilate_label_conv_mask(mask, 9e3, 3000.0, 3000.0, good=good)
+        assert lab[20, 30] == lab[20, 31] == 1
+        assert np.all(lab[:, 32:] == 0)
+        assert lab[20, 28] == 1                  # still dilated over valid pixels
+
+    def test_empty_mask_gives_zeros(self):
+        lab = dilate_label_conv_mask(self._grid(), 10e3, 3000.0, 3000.0)
+        assert lab.shape == (40, 60) and lab.dtype == np.int32 and not lab.any()
+
+    def test_integer_mask_and_dtype(self):
+        mask = np.zeros((20, 20), dtype=np.int64)
+        mask[10, 10] = 4                         # any non-zero value is convective
+        lab = dilate_label_conv_mask(mask, 3e3, 3000.0, 3000.0)
+        assert lab.dtype == np.int32
+        assert lab[10, 10] == 1 and lab[10, 11] == 1

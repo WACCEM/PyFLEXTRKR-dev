@@ -4,7 +4,9 @@ import xarray as xr
 from pyflextrkr import netcdf_io as net
 from pyflextrkr.idcells_reflectivity import get_composite_reflectivity_generic, subset_domain
 from pyflextrkr.label_and_grow_features import label_and_grow_features
-from pyflextrkr.steiner_func import make_dilation_step_func, mod_steiner_classification, label_cells_fast
+from pyflextrkr.steiner_func import (
+    make_dilation_step_func, mod_steiner_classification, label_cells_fast, dilate_label_conv_mask,
+)
 from pyflextrkr.echotop_func import echotop_height, echotop_height_fast
 from pyflextrkr.ft_utilities import get_pixel_area
 
@@ -101,6 +103,9 @@ def idfeature_radar3d(
     # filter + convective-radius dilation).
     cell_number_source = config.get("cell_number_source", "score_orig")
     cell_min_npix = config.get("cell_min_npix", 0)
+    # conv_feature_number groups the Steiner convective pixels that are closer than 2 x this radius [km]
+    # into one feature (0 = only pixels that touch, 8-connected)
+    conv_dilate_radius_km = config.get("conv_dilate_radius_km", 0)
 
     # Echo-top height parameters
     echotop_gap = config["echotop_gap"]
@@ -252,6 +257,13 @@ def idfeature_radar3d(
         cell_source_array = score_orig if cell_number_source == 'score_orig' else score_dilate
         cell_number, _ = label_cells_fast(cell_source_array, cell_min_npix)
 
+        # Convective features: the Steiner convective pixels (the mask conv_area is counted on)
+        # dilated by a disc and labeled, so nearby convective cells that do not touch form one feature
+        conv_feature_number = dilate_label_conv_mask(
+            convsf == types_steiner['CONVECTIVE'], conv_dilate_radius_km * 1000.0, dx, dy,
+            good=mask_goodvalues,
+        )
+
         diag_kwargs = {}
         if return_diag:
             diag_kwargs['refl_bkg'] = steiner_result['refl_bkg']
@@ -290,6 +302,7 @@ def idfeature_radar3d(
             'area_thresh': area_thresh,
             'growth_method': growth_method,
             'cell_number_source': cell_number_source,
+            'conv_dilate_radius_km': conv_dilate_radius_km,
         }
         steiner_params = {
             'dx': dx,
@@ -374,6 +387,7 @@ def idfeature_radar3d(
             feature_params=feature_params,
             steiner_params=steiner_params,
             ds_pass=ds_pass,
+            conv_feature_number=conv_feature_number,
             **diag_kwargs,
         )
         logger.info(f"{cloudid_outfile}")

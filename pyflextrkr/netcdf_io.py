@@ -567,6 +567,10 @@ def write_radar_featureid(
                 Steiner background reflectivity 2D array.
             peakedness: np.ndarray(float)
                 Steiner peakedness 2D array.
+            conv_feature_number: np.ndarray(int)
+                Labeled convective feature number 2D array: the Steiner convective pixels dilated
+                by config['conv_dilate_radius_km'] and grouped into 8-connected regions, sorted by
+                size (largest = 1; 0 = not part of any region).
             ds_pass: xarray.Dataset
                 Additional dataset to pass through to output.
 
@@ -604,6 +608,9 @@ def write_radar_featureid(
         nfeature_varname: (["time"], np.atleast_1d(nfeatures)),
         featuresize_varname: (["features"], npix_feature),
     }
+    # Optional convective feature labels (dilated convective mask)
+    if kwargs.get('conv_feature_number') is not None:
+        var_dict['conv_feature_number'] = (dim3d, np.expand_dims(kwargs['conv_feature_number'], axis=0))
 
     # Output coordinates
     coord_dict = {
@@ -695,6 +702,13 @@ def write_radar_featureid(
         'Labeled convective cell number, sorted by size (largest=1; derived from Steiner score)'
     ds_out['cell_number'].attrs['units'] = 'unitless'
     ds_out['cell_number'].attrs['_FillValue'] = 0
+    if 'conv_feature_number' in ds_out:
+        ds_out['conv_feature_number'].attrs['long_name'] = \
+            'Labeled convective feature number: Steiner convective pixels dilated by a disc and grouped ' + \
+            'into 8-connected regions, sorted by size (largest=1)'
+        ds_out['conv_feature_number'].attrs['units'] = 'unitless'
+        ds_out['conv_feature_number'].attrs['_FillValue'] = 0
+        ds_out['conv_feature_number'].attrs['dilation_radius_km'] = float(config.get("conv_dilate_radius_km", 0))
     ds_out['feature_pixel_type'].attrs['long_name'] = \
         'Per-pixel feature classification: 1=core, 2=secondary, 3=tertiary, 4=other, 5=clear'
     ds_out['feature_pixel_type'].attrs['units'] = 'unitless'
