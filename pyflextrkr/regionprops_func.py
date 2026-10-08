@@ -48,6 +48,29 @@ def conv_dilate_overwrite_km(config):
     return float(radius)
 
 
+def track_classes_from_config(config):
+    """
+    The regionprops_track_classes option: the track_class values whose tracks are measured on the merged mask.
+
+    Args:
+        config: dictionary
+            Dictionary containing config parameters.
+
+    Returns:
+        classes: list of int, or None if the key is missing or null (measure all tracks).
+
+    Raises:
+        ValueError: the value is not a non-empty list of integers.
+    """
+    classes = config.get("regionprops_track_classes", None)
+    if classes is None:
+        return None
+    if isinstance(classes, (list, tuple)) and len(classes) > 0 and all(
+            isinstance(c, (int, np.integer)) and not isinstance(c, bool) for c in classes):
+        return sorted(int(c) for c in classes)
+    raise ValueError(f"regionprops_track_classes must be a non-empty list of track_class values or null, got {classes!r}.")
+
+
 def redilate_conv_feature_number(convsf, radius_km, config):
     """
     conv_feature_number at another dilation radius: the Steiner convective pixels dilated by a disc of radius_km and
@@ -84,6 +107,7 @@ def regionprops_singlefile(
         file_mergecloudnumber,
         file_splitcloudnumber,
         config,
+        compute_track=None,
 ):
     """
     Statistics of the merged mask of every track that has a feature in one cloudid file.
@@ -98,6 +122,10 @@ def regionprops_singlefile(
             (<= 0 = no fragment in that slot), as in mapfeature_driver.
         config: dictionary
             Dictionary containing config parameters.
+        compute_track: np.array(bool), shape [n], optional
+            Tracks to measure (default: all). The merged masks are still built from the claims of all n tracks,
+            so a feature claimed by two tracks goes to the same track as in mapfeature; the other tracks are
+            not measured and keep NaN in the output (including merged_area).
 
     Returns:
         None if the file cannot be read (the caller counts the tracks as not computed), else a tuple
@@ -170,6 +198,12 @@ def regionprops_singlefile(
     lut = np.zeros(lut_size, dtype=np.int32)
     lut[features] = claim_labels[::-1][last]
     merged_label = lut[feature_number]
+    if compute_track is not None:
+        # measure only the selected tracks: the others' masks are removed from the label image (their features were
+        # resolved above, so the selected masks are the same as with all tracks)
+        label_selected = np.zeros(n + 1, dtype=bool)
+        label_selected[1:] = np.asarray(compute_track, dtype=bool)
+        merged_label = np.where(label_selected[merged_label], merged_label, np.int32(0))
 
     #########################################################################
     # Convective length: the pixels of the merged mask that belong to one convective feature

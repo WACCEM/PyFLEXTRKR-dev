@@ -7,11 +7,13 @@ import xarray as xr
 import dask
 from dask.distributed import wait
 
-from pyflextrkr.ft_utilities import subset_files_timerange
+from pyflextrkr.ft_utilities import subset_files_timerange, match_pairs_to_files
 from pyflextrkr.smooth_trajectory import smooth_trajectory
 from pyflextrkr.mcs_lifecycle import classify_lifecycle
 from pyflextrkr.identifymcs_radar import identify_mcs_periods, mcs_params_from_config
-from pyflextrkr.regionprops_func import regionprops_singlefile, recomputed_variable_names, conv_dilate_overwrite_km
+from pyflextrkr.regionprops_func import (
+    regionprops_singlefile, recomputed_variable_names, conv_dilate_overwrite_km, track_classes_from_config,
+)
 
 # Variables that a cloudid file must contain for this step (conv_feature_number only if it is not recomputed, see
 # conv_dilate_overwrite_radius_km)
@@ -42,6 +44,14 @@ def compute_regionprops(config):
     conv_dilate_radius_km at idfeature time). If conv_dilate_overwrite_radius_km is set, they are recomputed here from
     the Steiner convective pixels at that radius instead (the cloudid files are not modified), so the radius can be
     changed without re-running idfeature: the tracks do not depend on it, only conv_majoraxis and the lifecycle do.
+
+    With regionprops_track_classes (a list of track_class values, e.g. [1, 2] for MCS and multi-cell tracks; default
+    null = all tracks) only those tracks are measured, staged and smoothed; the other tracks keep the first-pass
+    values (which describe their own feature, not the merged mask), get no lifecycle staging, and are not
+    included in the guardrails. The merged masks of the measured tracks are the same as with all tracks.
+
+    The first-pass file is dense (tracks x times x mergers: 180 GB uncompressed for a month), so it is opened
+    lazily: only the variables used here are read, the others are streamed into the output file.
 
     The tracks and their order are those of the first pass (pixel tracknumber = index + 1 stays valid), and which
     tracks are MCS (is_mcs, track_class, feature_class, mcs_status) stays as decided by identifymcs_radar; this step
@@ -79,6 +89,7 @@ def compute_regionprops(config):
     params = mcs_params_from_config(config)
     try:
         overwrite_km = conv_dilate_overwrite_km(config)
+        track_classes = track_classes_from_config(config)
     except ValueError as err:
         logger.critical(f"{err} Tracking will now exit.")
         sys.exit()
@@ -88,8 +99,11 @@ def compute_regionprops(config):
 
     #########################################################################
     # First-pass statistics
-    with xr.open_dataset(firstpass_file, mask_and_scale=False, decode_times=False) as dsfile:
-        ds = dsfile.load()
+    if firstpass_file == statistics_outfile:
+        logger.critical(f"mcsradarstats_filebase and mcsrobust_filebase give the same file ({firstpass_file}); the first-pass "
+                        f"file is read while the output is written, so they must differ. Tracking will now exit.")
+        sys.exit()
+    ds = xr.open_dataset(firstpass_file, mask_and_scale=False, decode_times=False)    # lazy: closed after the output is written
     ntracks = ds.sizes[tracks_dimname]
     ntimes = ds.sizes[times_dimname]
     basetime = ds["base_time"].values
@@ -98,9 +112,21 @@ def compute_regionprops(config):
     split_cloudnumber = ds["split_cloudnumber"].values
     total_area = ds["total_area"].values
     track_duration = ds["track_duration"].values
-    valid_pairs = np.isfinite(basetime)
+    # tracks to measure (all, or the selected track classes)
+    if track_classes is None:
+        select_track = np.ones(ntracks, dtype=bool)
+    else:
+        if "track_class" not in ds:
+            logger.critical(f"regionprops_track_classes is set but {firstpass_file} has no track_class. Tracking will now exit.")
+            sys.exit()
+        select_track = np.isin(ds["track_class"].values, track_classes)
+    n_pairs_all = int(np.isfinite(basetime).sum())
+    # the pairs this step is responsible for (guardrails, smoothing, lifecycle)
+    valid_pairs = np.isfinite(basetime) & select_track[:, None]
     n_valid = int(valid_pairs.sum())
-    logger.info(f"First-pass file {firstpass_file}: {ntracks} tracks, {n_valid} (track, time) pairs")
+    selection_text = "" if track_classes is None else (
+        f"; regionprops_track_classes {track_classes}: {int(select_track.sum())} tracks, {n_valid} pairs measured")
+    logger.info(f"First-pass file {firstpass_file}: {ntracks} tracks, {n_pairs_all} (track, time) pairs{selection_text}")
 
     #########################################################################
     # Cloudid files, and a check of the first one for the variables this step needs
@@ -135,11 +161,11 @@ def compute_regionprops(config):
     #########################################################################
     # Statistics of the merged mask, one cloudid file at a time
     names = recomputed_variable_names(dbz_area_threshs)
-    pair_index = []
+    # (track, time) entries of each cloudid file, in one pass over the valid entries
+    pair_index = match_pairs_to_files(basetime, cloudidfiles_basetime, match_pixel_dt_thresh)
     results = []
     for ifile in range(nfiles):
-        itrack, itime = np.where(np.abs(basetime - cloudidfiles_basetime[ifile]) < match_pixel_dt_thresh)
-        pair_index.append((itrack, itime))
+        itrack, itime = pair_index[ifile]
         args = (
             cloudidfiles[ifile],
             cloudnumber[itrack, itime],
@@ -147,17 +173,22 @@ def compute_regionprops(config):
             split_cloudnumber[itrack, itime, :],
             config,
         )
+        kwargs = {} if track_classes is None else {"compute_track": select_track[itrack]}
         if run_parallel == 0:
-            results.append(regionprops_singlefile(*args))
+            results.append(regionprops_singlefile(*args, **kwargs))
         elif run_parallel >= 1:
-            results.append(dask.delayed(regionprops_singlefile)(*args))
+            results.append(dask.delayed(regionprops_singlefile)(*args, **kwargs))
         else:
             sys.exit('Valid parallelization flag not provided.')
     if run_parallel >= 1:
         results = dask.compute(*results)
         wait(results)
 
-    values = {name: np.full((ntracks, ntimes), fillval_f, dtype=np.float32) for name in names}
+    if track_classes is None:
+        values = {name: np.full((ntracks, ntimes), fillval_f, dtype=np.float32) for name in names}
+    else:
+        # tracks that are not measured keep their first-pass values
+        values = {name: ds[name].values.astype(np.float32) for name in names}
     merged_area = np.full((ntracks, ntimes), fillval_f, dtype=np.float32)
     computed = np.zeros((ntracks, ntimes), dtype=bool)
     n_conflict = n_out_of_range = 0
@@ -165,9 +196,11 @@ def compute_regionprops(config):
         if result is None:
             continue
         out, diag = result
+        sel = select_track[itrack]
+        itrack, itime = itrack[sel], itime[sel]
         for name in names:
-            values[name][itrack, itime] = out[name]
-        merged_area[itrack, itime] = out["merged_area"]
+            values[name][itrack, itime] = out[name][sel]
+        merged_area[itrack, itime] = out["merged_area"][sel]
         computed[itrack, itime] = True
         n_conflict += diag["n_conflict"]
         n_out_of_range += diag["n_out_of_range"]
@@ -204,6 +237,10 @@ def compute_regionprops(config):
     for name in names:
         attrs = dict(ds[name].attrs)
         attrs["comments"] = "Computed on the merged mask: the track's own feature plus the merge/split fragments folded into it"
+        if track_classes is not None:
+            subset_note = (f" Only for tracks with track_class in {track_classes}; the other tracks keep the first-pass value "
+                           f"(their own feature, not the merged mask).")
+            attrs["comments"] += subset_note
         if name == "conv_majoraxis":
             attrs["long_name"] = "Major axis length of the longest convective feature in the merged mask"
             attrs["comments"] = (
@@ -214,14 +251,21 @@ def compute_regionprops(config):
             if overwrite_km is not None:
                 attrs["comments"] += (" The groups were recomputed by run_regionprops (conv_dilate_overwrite_radius_km), "
                                       "not read from the cloudid files.")
+            if track_classes is not None:
+                attrs["comments"] += subset_note
         ds[name] = (dims2d, values[name], attrs)
 
     # Smoothed trajectory from the recomputed centroid
-    old_nan = int(np.isnan(ds["meanlon_smooth"].values)[valid_pairs].sum())
+    old_lon_smooth = ds["meanlon_smooth"].values
+    old_nan = int(np.isnan(old_lon_smooth)[valid_pairs].sum())
     meanlon, meanlat = values["meanlon"], values["meanlat"]
-    lon_smooth = np.full((ntracks, ntimes), fillval_f, dtype=np.float32)
-    lat_smooth = np.full((ntracks, ntimes), fillval_f, dtype=np.float32)
-    for itrack in range(ntracks):
+    if track_classes is None:
+        lon_smooth = np.full((ntracks, ntimes), fillval_f, dtype=np.float32)
+        lat_smooth = np.full((ntracks, ntimes), fillval_f, dtype=np.float32)
+    else:
+        lon_smooth = old_lon_smooth.astype(np.float32)
+        lat_smooth = ds["meanlat_smooth"].values.astype(np.float32)
+    for itrack in np.where(select_track)[0]:
         lon_s, lat_s = smooth_trajectory(
             meanlon[itrack], meanlat[itrack], max_speed_kmh=max_speed_kmh, time_step_h=time_resolution,
         )
@@ -239,7 +283,7 @@ def compute_regionprops(config):
     is_mcs = ds["is_mcs"].values.astype(bool)
     track_lifetime_hr = track_duration * time_resolution
     lost = gained = 0
-    for nt in np.where(track_lifetime_hr >= params["mcs_duration_thresh"])[0]:
+    for nt in np.where((track_lifetime_hr >= params["mcs_duration_thresh"]) & select_track)[0]:
         n = int(track_duration[nt])
         _, now_mcs = identify_mcs_periods(
             ds["majoraxis"].values[nt, :n], ds[area45_varname].values[nt, :n], basetime[nt, :n],
@@ -261,7 +305,7 @@ def compute_regionprops(config):
     total_conv_area = ds["total_conv_area"].values
     total_strat_area = ds["total_strat_area"].values
     conv_majoraxis = ds["conv_majoraxis"].values
-    for nt in np.where(track_lifetime_hr >= mcs_lifecycle_thresh)[0]:
+    for nt in np.where((track_lifetime_hr >= mcs_lifecycle_thresh) & select_track)[0]:
         n = int(track_duration[nt])
         time_hours = (basetime[nt, :n] - basetime[nt, 0]) / 3600.0
         stage, cyc, lc_idx, ncyc, complete = classify_lifecycle(
@@ -312,6 +356,8 @@ def compute_regionprops(config):
         ds.attrs["conv_dilate_radius_km"] = float(conv_dilate_radius_km)
     if overwrite_km is not None and idfeature_radius_km is not None:
         ds.attrs["conv_dilate_radius_km_idfeature"] = float(idfeature_radius_km)
+    if track_classes is not None:
+        ds.attrs["regionprops_track_classes"] = np.array(track_classes, dtype=np.int32)
     ds.attrs["n_pairs_not_computed"] = n_missing
     ds.attrs["n_pairs_area_mismatch"] = n_mismatch
     ds.attrs["Created_on"] = time.ctime(time.time())
@@ -324,5 +370,6 @@ def compute_regionprops(config):
     encoding = {var: comp for var in ds.data_vars}
     open(statistics_outfile, 'ab').close()
     ds.to_netcdf(path=statistics_outfile, mode="w", format="NETCDF4", unlimited_dims=tracks_dimname, encoding=encoding)
+    ds.close()
     logger.info(f"{statistics_outfile}")
     return statistics_outfile

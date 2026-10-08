@@ -275,6 +275,44 @@ def subset_files_timerange(
         files_timestring,
     )
 
+def match_pairs_to_files(basetime, file_basetimes, dt_thresh):
+    """
+    Assign the (track, time) entries of a track statistics array to the pixel/cloudid files they belong to.
+
+    For every file this returns what the drivers used to get with
+        np.where(np.abs(basetime - file_basetime) < dt_thresh)
+    but in one pass over the valid entries instead of one pass over the whole dense [tracks, times] array
+    per file (1.8 s per file for a month of 240,000 tracks x 550 times, 4 hours for 8,900 files).
+
+    Args:
+        basetime: np.array, shape [tracks, times]
+            Base time of each track at each time [seconds], NaN where the track has no data.
+        file_basetimes: array-like, shape [nfiles]
+            Base time of each file [seconds].
+        dt_thresh: float
+            An entry belongs to a file if |basetime - file_basetime| < dt_thresh [seconds]
+            (an entry can belong to several files if dt_thresh is larger than half the file spacing).
+
+    Returns:
+        pairs: list of nfiles tuples (itrack, itime)
+            Index arrays (int64) of the entries of each file, in the order np.where gives:
+            by track, then by time.
+    """
+    valid_track, valid_time = np.nonzero(np.isfinite(basetime))
+    pair_basetime = basetime[valid_track, valid_time]
+    order = np.argsort(pair_basetime, kind="stable")
+    sorted_basetime = pair_basetime[order]
+    file_basetimes = np.asarray(file_basetimes, dtype=float)
+    # entries with  file_basetime - dt_thresh < basetime < file_basetime + dt_thresh
+    first = np.searchsorted(sorted_basetime, file_basetimes - dt_thresh, side="right")
+    last = np.searchsorted(sorted_basetime, file_basetimes + dt_thresh, side="left")
+    pairs = []
+    for ifile in range(len(file_basetimes)):
+        # sorting the positions restores the (track, time) order of np.where
+        idx = np.sort(order[first[ifile]:max(last[ifile], first[ifile])])
+        pairs.append((valid_track[idx], valid_time[idx]))
+    return pairs
+
 def get_start_end_basetime_from_filenames(
     data_path,
     data_basename,

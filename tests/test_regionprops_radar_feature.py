@@ -118,7 +118,7 @@ def cloudid_r0(tmp_path_factory):
     return write_cloudid(str(d / "cloudid_20250502_190000.nc"), a, 0.0), a
 
 
-def run_worker(cloudid, a, tracks, config=None):
+def run_worker(cloudid, a, tracks, config=None, compute_track=None):
     """tracks: list of (own cloudnumber, [merge fragments], [split fragments])."""
     n = len(tracks)
     nmax = max([len(t[1]) for t in tracks] + [len(t[2]) for t in tracks] + [1])
@@ -128,7 +128,7 @@ def run_worker(cloudid, a, tracks, config=None):
     for i, t in enumerate(tracks):
         merge[i, :len(t[1])] = t[1]
         split[i, :len(t[2])] = t[2]
-    return regionprops_singlefile(cloudid, own, merge, split, config or worker_config())
+    return regionprops_singlefile(cloudid, own, merge, split, config or worker_config(), compute_track=compute_track)
 
 
 class TestWorkerAgainstTrackstats:
@@ -252,6 +252,42 @@ class TestWorkerMergedMask:
         out, diag = regionprops_singlefile(cloudid, np.array([], dtype=int), np.zeros((0, 1), dtype=int),
                                            np.zeros((0, 1), dtype=int), worker_config())
         assert all(len(v) == 0 for v in out.values())
+
+
+class TestComputeTrackSubset:
+    """compute_track: measure only some tracks, with the masks of the full run."""
+
+    TRACKS = [(1, [2], []), (3, [], [])]
+
+    @pytest.mark.parametrize("select", [[True, False], [False, True], [False, False], [True, True]])
+    def test_selected_tracks_equal_the_full_run_and_the_others_are_nan(self, tmp_path, select):
+        a = build_arrays(10.0)
+        cloudid = write_cloudid(str(tmp_path / "cloudid_20250502_190000.nc"), a, 10.0)
+        full, diag_full = run_worker(cloudid, a, self.TRACKS)
+        part, diag_part = run_worker(cloudid, a, self.TRACKS, compute_track=np.array(select))
+        for name in full:
+            for k, sel in enumerate(select):
+                if sel:
+                    np.testing.assert_array_equal(part[name][k], full[name][k], err_msg=name)
+                else:
+                    assert np.isnan(part[name][k]), name
+        assert diag_part == diag_full
+
+    def test_a_feature_claimed_by_two_tracks_goes_to_the_same_track_as_in_the_full_run(self, cloudid_r0):
+        cloudid, a = cloudid_r0
+        # track 0 also claims feature 3, which track 1 owns: the later track keeps it, selected or not
+        tracks = [(1, [3], []), (3, [], [])]
+        full, diag = run_worker(cloudid, a, tracks)
+        part, diag_part = run_worker(cloudid, a, tracks, compute_track=np.array([True, False]))
+        assert diag["n_conflict"] == 1 and diag_part["n_conflict"] == 1
+        assert part["merged_area"][0] == full["merged_area"][0] == pytest.approx(100 * 9.0)
+        for name in full:
+            np.testing.assert_array_equal(part[name][0], full[name][0], err_msg=name)
+
+    def test_default_measures_every_track(self, cloudid_r0):
+        cloudid, a = cloudid_r0
+        out, _ = run_worker(cloudid, a, self.TRACKS)
+        assert np.all(np.isfinite(out["merged_area"]))
 
 
 @pytest.mark.parametrize("radius_km", [0.0, 10.0, 20.0])
@@ -637,3 +673,130 @@ class TestOverwriteInTheDriver:
         with pytest.raises(SystemExit):
             compute_regionprops(config)
         assert "conv_dilate_overwrite_radius_km" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# regionprops_track_classes: measure only some track classes
+# ---------------------------------------------------------------------------
+
+class TestTrackClassesOption:
+
+    @staticmethod
+    def _prepare(tmp_path, name, classes, track_class=(1, 3), break_area_of=None):
+        (tmp_path / name).mkdir()
+        config, _ = build_run(tmp_path / name, radius_km=10.0)
+        path = config["stats_outpath"] + "mcs_tracks_20250502.1900_20250502.2000.nc"
+        ds = xr.open_dataset(path, decode_times=False, mask_and_scale=False).load()
+        ds.close()
+        if track_class is not None:
+            ds["track_class"] = (["tracks"], np.array(track_class, dtype=np.int16))
+        if break_area_of is not None:
+            ds["total_area"][break_area_of, :NSTEPS] = 1.0
+        os.remove(path)
+        ds.to_netcdf(path)
+        config["regionprops_track_classes"] = classes
+        return config
+
+    def _run(self, tmp_path, name, classes, **kwargs):
+        config = self._prepare(tmp_path, name, classes, **kwargs)
+        compute_regionprops(config)
+        first = xr.open_dataset(config["stats_outpath"] + "mcs_tracks_20250502.1900_20250502.2000.nc",
+                                decode_times=False, mask_and_scale=False)
+        return open_out(config), first
+
+    def test_helper(self):
+        from pyflextrkr.regionprops_func import track_classes_from_config
+        assert track_classes_from_config({}) is None
+        assert track_classes_from_config({"regionprops_track_classes": None}) is None
+        assert track_classes_from_config({"regionprops_track_classes": [2, 1]}) == [1, 2]
+        for bad in ([], "1", 1, [1.5], [True], ["a"]):
+            with pytest.raises(ValueError, match="regionprops_track_classes"):
+                track_classes_from_config({"regionprops_track_classes": bad})
+
+    def test_selected_track_equals_the_full_run_and_the_other_keeps_the_first_pass(self, tmp_path):
+        full, first = self._run(tmp_path, "full", None)
+        part, first_part = self._run(tmp_path, "part", [1])                   # track 0 has class 1, track 1 class 3
+        names = recomputed_variable_names(DBZ_THRESHS)
+        for name in names:
+            np.testing.assert_array_equal(part[name].values[0], full[name].values[0], err_msg=name)
+            np.testing.assert_array_equal(part[name].values[1], first_part[name].values[1], err_msg=name)
+        # track 1 really differs from its recomputed values (the hand-made first pass has 120 km everywhere)
+        assert not np.array_equal(part["majoraxis"].values[1], full["majoraxis"].values[1], equal_nan=True)
+        np.testing.assert_array_equal(part["lifecycle_evaluated"].values, [1, 0])
+        assert np.all(part["lifecycle_stage"].values[1] == -9999)
+        np.testing.assert_array_equal(part["lifecycle_stage"].values[0], full["lifecycle_stage"].values[0])
+        np.testing.assert_array_equal(part["meanlon_smooth"].values[0], full["meanlon_smooth"].values[0])
+        np.testing.assert_array_equal(part["meanlon_smooth"].values[1], first_part["meanlon_smooth"].values[1])
+        np.testing.assert_array_equal(part.attrs["regionprops_track_classes"], [1])
+        assert "regionprops_track_classes" not in full.attrs
+        assert "track_class in [1]" in part["majoraxis"].attrs["comments"]
+        assert "track_class in [1]" in part["conv_majoraxis"].attrs["comments"]
+        assert part.attrs["n_pairs_not_computed"] == 0
+
+    def test_all_classes_selected_equals_the_default(self, tmp_path):
+        full, _ = self._run(tmp_path, "full", None)
+        both, _ = self._run(tmp_path, "both", [1, 3])
+        for var in full.data_vars:
+            np.testing.assert_array_equal(both[var].values, full[var].values, err_msg=var)
+
+    def test_guardrails_only_look_at_the_selected_tracks(self, tmp_path):
+        # track 1's total_area is wrong at every time: all tracks abort (40 of 80 pairs), measuring only track 0 does not
+        config = self._prepare(tmp_path, "all", None, break_area_of=1)
+        with pytest.raises(SystemExit):
+            compute_regionprops(config)
+        part, _ = self._run(tmp_path, "part", [1], break_area_of=1)
+        assert part.attrs["n_pairs_area_mismatch"] == 0
+
+    def test_missing_track_class_exits_with_a_message(self, tmp_path, caplog):
+        config = self._prepare(tmp_path, "nocls", [1, 2], track_class=None)
+        with pytest.raises(SystemExit):
+            compute_regionprops(config)
+        assert "track_class" in caplog.text
+
+    def test_invalid_value_exits_with_a_message(self, tmp_path, caplog):
+        config = self._prepare(tmp_path, "bad", [1])
+        config["regionprops_track_classes"] = "1,2"
+        with pytest.raises(SystemExit):
+            compute_regionprops(config)
+        assert "regionprops_track_classes" in caplog.text
+
+    def test_the_two_file_bases_must_differ(self, tmp_path, caplog):
+        config = self._prepare(tmp_path, "same", None)
+        config["mcsrobust_filebase"] = "mcs_tracks_"
+        with pytest.raises(SystemExit):
+            compute_regionprops(config)
+        assert "must differ" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# mapfeature_driver on the output of the second pass (pair matching and lazy reading of the stats file)
+# ---------------------------------------------------------------------------
+
+class TestMapfeatureDriverOnTheSecondPassOutput:
+
+    def test_pixel_files_carry_the_track_numbers_of_the_merged_masks(self, tmp_path):
+        from pyflextrkr.mapfeature_driver import mapfeature_driver
+        config, a = build_run(tmp_path, radius_km=10.0)
+        compute_regionprops(config)
+        path = config["stats_outpath"] + "mcs_tracks_robust_20250502.1900_20250502.2000.nc"
+        ds = xr.open_dataset(path, decode_times=False, mask_and_scale=False).load()
+        ds.close()
+        status = np.full(ds["cloudnumber"].shape, -9999, dtype=np.int32)
+        status[:, :NSTEPS] = 1
+        ds["track_status"] = (["tracks", "times"], status, {"comments": "test status"})
+        os.remove(path)
+        ds.to_netcdf(path)
+        pixdir = str(tmp_path / "pixel") + "/"
+        config.update({'pixeltracking_outpath': pixdir, 'pixeltracking_filebase': 'mcstrack_', 'nmaxlinks': 3,
+                       'feature_type': 'radar_feature', 'dbz_thresh': 10, 'fillval': -9999})
+        mapfeature_driver(config, trackstats_filebase="mcs_tracks_robust_")
+        files = sorted(os.listdir(pixdir))
+        assert len(files) == NSTEPS
+        for name in (files[0], files[17], files[-1]):
+            with xr.open_dataset(pixdir + name, decode_times=False, mask_and_scale=False) as px:
+                ctn = px["cloudtracknumber"].values.squeeze()
+                own = px["tracknumber"].values.squeeze()
+            fn = a["feature_number"]
+            # track 1 (stats index 0) = feature 1 + folded fragment 2; track 2 = feature 3
+            assert np.all(ctn[np.isin(fn, [1, 2])] == 1) and np.all(ctn[fn == 3] == 2) and np.all(ctn[fn == 0] == 0)
+            assert np.all(own[fn == 1] == 1) and np.all(own[fn == 2] == 0) and np.all(own[fn == 3] == 2)
