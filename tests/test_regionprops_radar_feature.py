@@ -13,6 +13,7 @@ Geometry (60 x 80 grid, 3 km):
 Nearest convective pixels are 6 px (18 km) apart for C1-C2, 11 px (33 km) for C2-C3 and for A-B.
 """
 import os
+import logging
 import numpy as np
 import pytest
 import xarray as xr
@@ -21,7 +22,9 @@ from netCDF4 import stringtochar
 from pyflextrkr.netcdf_io import write_radar_featureid
 from pyflextrkr.steiner_func import dilate_label_conv_mask
 from pyflextrkr.trackstats_func import calc_stats_singlefile
-from pyflextrkr.regionprops_func import regionprops_singlefile, recomputed_variable_names
+from pyflextrkr.regionprops_func import (
+    regionprops_singlefile, recomputed_variable_names, conv_dilate_overwrite_km, redilate_conv_feature_number,
+)
 from pyflextrkr.regionprops_driver import compute_regionprops
 
 NY, NX = 60, 80
@@ -513,3 +516,124 @@ class TestDriver:
         with pytest.raises(SystemExit):
             compute_regionprops(config)
         assert "conv_feature_number" in caplog.text
+        assert "conv_dilate_overwrite_radius_km" in caplog.text            # the message names the other way out
+
+
+# ---------------------------------------------------------------------------
+# conv_dilate_overwrite_radius_km: regroup the convective pixels at another radius
+# ---------------------------------------------------------------------------
+
+OVERWRITE_TRACKS = [(1, [2], []), (3, [], [])]
+
+
+def overwrite_config(radius_km, **extra):
+    return worker_config(dx=DX, dy=DX, conv_dilate_overwrite_radius_km=radius_km, **extra)
+
+
+class TestOverwriteOption:
+    """How conv_dilate_overwrite_radius_km is read, and the groups it makes."""
+
+    def test_off_when_the_key_is_missing_or_null(self):
+        assert conv_dilate_overwrite_km({}) is None
+        assert conv_dilate_overwrite_km({"conv_dilate_overwrite_radius_km": None}) is None
+
+    def test_radius_is_a_float_and_zero_is_a_radius_not_off(self):
+        grid = {"dx": DX, "dy": DX}
+        assert conv_dilate_overwrite_km({**grid, "conv_dilate_overwrite_radius_km": 9}) == 9.0
+        assert conv_dilate_overwrite_km({**grid, "conv_dilate_overwrite_radius_km": 0}) == 0.0
+
+    @pytest.mark.parametrize("bad", [-1, "9", True, [9], float("nan"), float("inf")])
+    def test_an_invalid_radius_raises(self, bad):
+        with pytest.raises(ValueError, match="conv_dilate_overwrite_radius_km"):
+            conv_dilate_overwrite_km({"dx": DX, "dy": DX, "conv_dilate_overwrite_radius_km": bad})
+
+    def test_the_grid_spacing_is_required(self):
+        with pytest.raises(ValueError, match="dx and dy"):
+            conv_dilate_overwrite_km({"conv_dilate_overwrite_radius_km": 9})
+
+    def test_nine_km_is_three_pixels(self):
+        """C1 and C2 are 6 px (18 km) apart: their 9 km discs (3 px) just meet, a smaller radius leaves them apart."""
+        convsf = build_arrays(0.0)["convsf"]
+        grid = {"dx": DX, "dy": DX}
+        joined = redilate_conv_feature_number(convsf, 9.0, grid)
+        apart = redilate_conv_feature_number(convsf, 8.9, grid)
+        assert joined[12, 7] == joined[12, 17] > 0               # C1 and C2: one group
+        assert apart[12, 7] != apart[12, 17]
+        assert joined[12, 32] != joined[12, 17]                  # C3 is 33 km from C2: not joined
+        np.testing.assert_array_equal(joined, build_arrays(9.0)["conv_feature_number"])
+
+
+@pytest.mark.parametrize("overwrite_km", [0.0, 9.0, 10.0, 20.0])
+class TestOverwriteInTheWorker:
+    """Groups recomputed from convsf give the statistics of groups that idfeature made at that radius."""
+
+    @staticmethod
+    def _reference(tmp_path, radius_km):
+        """The worker on a cloudid file whose groups were made at radius_km."""
+        (tmp_path / "reference").mkdir()
+        a = build_arrays(radius_km)
+        cloudid = write_cloudid(str(tmp_path / "reference" / "cloudid_20250502_190000.nc"), a, radius_km)
+        return run_worker(cloudid, a, OVERWRITE_TRACKS)[0]
+
+    def test_replaces_the_groups_of_the_file_and_leaves_the_file_alone(self, tmp_path, overwrite_km):
+        a = build_arrays(5.0)                                     # the file has 5 km groups
+        cloudid = write_cloudid(str(tmp_path / "cloudid_20250502_190000.nc"), a, 5.0)
+        stat = (os.stat(cloudid).st_size, os.stat(cloudid).st_mtime_ns)
+        out, _ = run_worker(cloudid, a, OVERWRITE_TRACKS, overwrite_config(overwrite_km))
+        reference = self._reference(tmp_path, overwrite_km)
+        for name in reference:
+            np.testing.assert_array_equal(out[name], reference[name], err_msg=name)
+        own, _ = run_worker(cloudid, a, OVERWRITE_TRACKS)         # without the option: the 5 km groups
+        assert out["conv_majoraxis"][0] != own["conv_majoraxis"][0]
+        assert (os.stat(cloudid).st_size, os.stat(cloudid).st_mtime_ns) == stat
+        with xr.open_dataset(cloudid, decode_times=False, mask_and_scale=False) as ds:
+            np.testing.assert_array_equal(ds["conv_feature_number"].values.squeeze(), a["conv_feature_number"])
+
+    def test_a_cloudid_file_without_conv_feature_number_works(self, tmp_path, overwrite_km):
+        a = build_arrays(5.0)
+        cloudid = write_cloudid(str(tmp_path / "cloudid_20250502_190000.nc"), a, 5.0, with_conv_feature_number=False)
+        out, _ = run_worker(cloudid, a, OVERWRITE_TRACKS, overwrite_config(overwrite_km))
+        reference = self._reference(tmp_path, overwrite_km)
+        for name in reference:
+            np.testing.assert_array_equal(out[name], reference[name], err_msg=name)
+
+
+class TestOverwriteInTheDriver:
+
+    @staticmethod
+    def _run(tmp_path, name, file_radius_km, overwrite_km=None, with_conv_feature_number=True):
+        (tmp_path / name).mkdir()
+        config, _ = build_run(tmp_path / name, radius_km=file_radius_km, with_conv_feature_number=with_conv_feature_number)
+        config.update(dx=DX, dy=DX, conv_dilate_overwrite_radius_km=overwrite_km)
+        compute_regionprops(config)
+        return open_out(config)
+
+    def test_equals_a_run_on_files_made_at_that_radius(self, tmp_path):
+        reference = self._run(tmp_path, "reference", 9.0)
+        plain = self._run(tmp_path, "plain", 5.0)
+        assert not np.array_equal(plain["conv_majoraxis"].values, reference["conv_majoraxis"].values, equal_nan=True)
+        for name, with_groups in (("with_groups", True), ("without_groups", False)):
+            ds = self._run(tmp_path, name, 5.0, overwrite_km=9.0, with_conv_feature_number=with_groups)
+            assert set(ds.data_vars) == set(reference.data_vars)
+            for var in reference.data_vars:
+                np.testing.assert_array_equal(ds[var].values, reference[var].values, err_msg=f"{name}: {var}")
+
+    def test_attributes_and_log_record_the_radius_used(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO)
+        ds = self._run(tmp_path, "overwritten", 5.0, overwrite_km=9.0)
+        assert ds.attrs["conv_dilate_radius_km"] == 9.0
+        assert ds.attrs["conv_dilate_radius_km_idfeature"] == 5.0
+        assert "9 km" in ds["conv_majoraxis"].attrs["comments"]
+        assert "recomputed" in ds["conv_majoraxis"].attrs["comments"]
+        assert "recomputed from convsf at 9 km" in caplog.text and "cloudid files have 5 km" in caplog.text
+        plain = self._run(tmp_path, "plain", 5.0)
+        assert plain.attrs["conv_dilate_radius_km"] == 5.0
+        assert "conv_dilate_radius_km_idfeature" not in plain.attrs
+        assert "recomputed" not in plain["conv_majoraxis"].attrs["comments"]
+
+    def test_an_invalid_radius_exits_with_a_message(self, tmp_path, caplog):
+        config, _ = build_run(tmp_path)
+        config.update(dx=DX, dy=DX, conv_dilate_overwrite_radius_km=-3)
+        with pytest.raises(SystemExit):
+            compute_regionprops(config)
+        assert "conv_dilate_overwrite_radius_km" in caplog.text

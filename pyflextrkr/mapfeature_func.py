@@ -4,6 +4,8 @@ import os
 import logging
 import xarray as xr
 
+from pyflextrkr.regionprops_func import conv_dilate_overwrite_km, redilate_conv_feature_number
+
 def map_feature(
         cloudid_filename,
         filebasetime,
@@ -22,6 +24,10 @@ def map_feature(
 ):
     """
     Map track numbers to pixel level files for all feature tracking.
+
+    For feature_type radar_feature with conv_dilate_overwrite_radius_km set, the conv_feature_number pixel variable
+    is recomputed at that radius (the groups regionprops_driver used for the statistics) instead of copied from the
+    cloudid file.
 
     Args:
         cloudid_filename: string
@@ -328,6 +334,28 @@ def map_feature(
         ds_out = ds_out.assign(dbztracknumber=dbztrackmap)
         if file_featureclass is not None:
             ds_out = ds_out.assign(feature_class=featureclassmap)
+        # The statistics were computed with convective groups recomputed at another radius (regionprops_driver):
+        # give the pixel files the same groups, not the ones of the cloudid file
+        overwrite_km = conv_dilate_overwrite_km(config)
+        if overwrite_km is not None:
+            groups = redilate_conv_feature_number(ds_in["convsf"].values.squeeze(), overwrite_km, config)
+            if "conv_feature_number" in ds_in:
+                groups_attrs = dict(ds_in["conv_feature_number"].attrs)
+            else:
+                groups_attrs = {
+                    "long_name": "Labeled convective feature number: Steiner convective pixels dilated by a disc and "
+                                 "grouped into 8-connected regions, sorted by size (largest=1)",
+                    "units": "unitless",
+                    "_FillValue": 0,
+                }
+            groups_attrs["dilation_radius_km"] = overwrite_km
+            groups_attrs["comments"] = (f"Recomputed from convsf by mapfeature (conv_dilate_overwrite_radius_km = "
+                                        f"{overwrite_km:g} km), not the cloudid file's groups")
+            ds_out = ds_out.assign(conv_feature_number=xr.DataArray(
+                groups[np.newaxis], coords=coords, dims=dims_keep, attrs=groups_attrs))
+            if "conv_dilate_radius_km" in ds_in.attrs:
+                ds_out.attrs["conv_dilate_radius_km_idfeature"] = ds_in.attrs["conv_dilate_radius_km"]
+            ds_out.attrs["conv_dilate_radius_km"] = overwrite_km
     # Update global attributes
     ds_out.attrs["Title"] = "Pixel-level feature tracking data"
     ds_out.attrs["Created_on"] = time.ctime(time.time())

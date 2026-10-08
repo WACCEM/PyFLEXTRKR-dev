@@ -5,7 +5,8 @@ identifymcs_radar folds the merge/split fragments into the track they belong to,
 its own feature plus the fragment features: the "merged mask" that mapfeature paints as cloudtracknumber. The shape and
 extreme statistics of trackstats_func.py describe the track's own feature only. This worker recomputes them on the merged
 mask, with the same definitions as trackstats_func.py, plus a convective length that groups nearby convective cells
-(conv_feature_number, see idfeature_radar3d.py).
+(conv_feature_number, see idfeature_radar3d.py). The groups are those idfeature wrote, or, with
+conv_dilate_overwrite_radius_km set, groups recomputed here at another dilation radius.
 """
 import logging
 import warnings
@@ -15,8 +16,53 @@ from skimage.measure import regionprops
 
 from pyflextrkr.ftfunctions import circular_mean
 from pyflextrkr.ft_utilities import get_pixel_area
+from pyflextrkr.steiner_func import dilate_label_conv_mask
 
 ECHOTOP_THRESHS = (10, 20, 30, 40, 50)
+
+
+def conv_dilate_overwrite_km(config):
+    """
+    The conv_dilate_overwrite_radius_km option: the dilation radius [km] at which conv_feature_number is recomputed from
+    the convective pixels of the cloudid files instead of read from them.
+
+    Args:
+        config: dictionary
+            Dictionary containing config parameters.
+
+    Returns:
+        radius_km: float, or None if the key is missing or null (use the groups idfeature_radar3d wrote).
+
+    Raises:
+        ValueError: the radius is not a non-negative number, or dx/dy (grid spacing [m], the sampling of the dilation)
+            are missing from the config.
+    """
+    radius = config.get("conv_dilate_overwrite_radius_km", None)
+    if radius is None:
+        return None
+    if isinstance(radius, bool) or not isinstance(radius, (int, float, np.integer, np.floating)) \
+            or not np.isfinite(radius) or radius < 0:
+        raise ValueError(f"conv_dilate_overwrite_radius_km must be a non-negative number [km] or null, got {radius!r}.")
+    if config.get("dx") is None or config.get("dy") is None:
+        raise ValueError("conv_dilate_overwrite_radius_km needs dx and dy (grid spacing [m]) in the config.")
+    return float(radius)
+
+
+def redilate_conv_feature_number(convsf, radius_km, config):
+    """
+    conv_feature_number at another dilation radius: the Steiner convective pixels dilated by a disc of radius_km and
+    labeled, the call idfeature_radar3d makes. Its valid-data gate (mask_goodvalues, the range mask of the radar) is not
+    stored in the cloudid files and is not applied here.
+
+    Args:
+        convsf: 2D np.array, Steiner classification of the cloudid file (4 = convective).
+        radius_km: float, dilation radius [km] (0 = only pixels that touch are grouped).
+        config: dictionary with dx and dy [m].
+
+    Returns:
+        2D np.array(int32), group number at every pixel, sorted by size (largest = 1), 0 = none.
+    """
+    return dilate_label_conv_mask(convsf == 4, radius_km * 1000.0, config["dx"], config["dy"])
 
 
 def recomputed_variable_names(dbz_area_threshs):
@@ -68,6 +114,7 @@ def regionprops_singlefile(
     area_method = config.get("area_method", "fixed")
     pbc_direction = config.get("pbc_direction", "none")
     dbz_area_threshs = config.get("trackstats_dbz_area_threshs", [45, 50])
+    overwrite_km = conv_dilate_overwrite_km(config)
 
     n = len(file_cloudnumber)
     out = {name: np.full(n, np.nan, dtype=np.float32) for name in recomputed_variable_names(dbz_area_threshs)}
@@ -81,7 +128,8 @@ def regionprops_singlefile(
             feature_number = ds[feature_varname].squeeze().values.astype(np.int64)
             convsf = ds["convsf"].squeeze().values
             dbz = ds[ref_varname].squeeze().values
-            conv_feature_number = ds["conv_feature_number"].squeeze().values.astype(np.int64)
+            if overwrite_km is None:
+                conv_feature_number = ds["conv_feature_number"].squeeze().values.astype(np.int64)
             echotops = {t: ds[f"echotop{t}"].squeeze().values / 1000. for t in ECHOTOP_THRESHS}
             latitude = ds["latitude"].values
             longitude = ds["longitude"].values
@@ -90,6 +138,10 @@ def regionprops_singlefile(
     except OSError as err:
         logger.warning(f"Cannot read cloudid file {cloudidfile}: {err}")
         return None
+
+    if overwrite_km is not None:
+        # groups at the overwrite radius, from the convective pixels of this file (the cloudid file is not modified)
+        conv_feature_number = redilate_conv_feature_number(convsf, overwrite_km, config).astype(np.int64)
 
     ny, nx = feature_number.shape
     pixel_area = get_pixel_area(config)
@@ -121,7 +173,8 @@ def regionprops_singlefile(
 
     #########################################################################
     # Convective length: the pixels of the merged mask that belong to one convective feature
-    # (conv_feature_number: convective pixels dilated by a disc and labeled) form a group; the group's
+    # (conv_feature_number: convective pixels dilated by a disc and labeled; read from the file, or recomputed at
+    # conv_dilate_overwrite_radius_km) form a group; the group's
     # major axis is measured on that region inside the mask, and conv_majoraxis is the longest group of a track.
     # Groups without a convective pixel of the track do not count.
     conv_major_by_label = np.zeros(n + 1)

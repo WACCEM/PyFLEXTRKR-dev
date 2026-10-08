@@ -11,9 +11,10 @@ from pyflextrkr.ft_utilities import subset_files_timerange
 from pyflextrkr.smooth_trajectory import smooth_trajectory
 from pyflextrkr.mcs_lifecycle import classify_lifecycle
 from pyflextrkr.identifymcs_radar import identify_mcs_periods, mcs_params_from_config
-from pyflextrkr.regionprops_func import regionprops_singlefile, recomputed_variable_names
+from pyflextrkr.regionprops_func import regionprops_singlefile, recomputed_variable_names, conv_dilate_overwrite_km
 
-# Variables that a cloudid file must contain for this step
+# Variables that a cloudid file must contain for this step (conv_feature_number only if it is not recomputed, see
+# conv_dilate_overwrite_radius_km)
 REQUIRED_CLOUDID_VARS = [
     "convsf", "conv_feature_number", "latitude", "longitude", "x", "y",
     "echotop10", "echotop20", "echotop30", "echotop40", "echotop50",
@@ -36,6 +37,11 @@ def compute_regionprops(config):
     idfeature_radar3d.py), max_dbz, maxETH_*dbz and the area_*dbz / conv_area_*dbz variables. The smoothed trajectory is
     recomputed from the new centroid, and the lifecycle stages (lifecycle_* variables, see mcs_lifecycle.py) are
     classified from total_conv_area, total_strat_area and the new conv_majoraxis.
+
+    The groups of nearby convective cells are those of conv_feature_number in the cloudid files (dilation radius
+    conv_dilate_radius_km at idfeature time). If conv_dilate_overwrite_radius_km is set, they are recomputed here from
+    the Steiner convective pixels at that radius instead (the cloudid files are not modified), so the radius can be
+    changed without re-running idfeature: the tracks do not depend on it, only conv_majoraxis and the lifecycle do.
 
     The tracks and their order are those of the first pass (pixel tracknumber = index + 1 stays valid), and which
     tracks are MCS (is_mcs, track_class, feature_class, mcs_status) stays as decided by identifymcs_radar; this step
@@ -71,6 +77,11 @@ def compute_regionprops(config):
     dbz_area_threshs = config.get("trackstats_dbz_area_threshs", [45, 50])
     mcs_lifecycle_thresh = config.get("mcs_lifecycle_thresh", 8)
     params = mcs_params_from_config(config)
+    try:
+        overwrite_km = conv_dilate_overwrite_km(config)
+    except ValueError as err:
+        logger.critical(f"{err} Tracking will now exit.")
+        sys.exit()
 
     firstpass_file = f"{stats_path}{mcsradarstats_filebase}{startdate}_{enddate}.nc"
     statistics_outfile = f"{stats_path}{mcsrobust_filebase}{startdate}_{enddate}.nc"
@@ -100,17 +111,26 @@ def compute_regionprops(config):
     if nfiles == 0:
         logger.critical(f"No cloudid files found in {tracking_outpath}. Tracking will now exit.")
         sys.exit()
+    required = [v for v in REQUIRED_CLOUDID_VARS if overwrite_km is None or v != "conv_feature_number"]
     with xr.open_dataset(cloudidfiles[0], decode_times=False, mask_and_scale=False) as dsp:
-        missing = [v for v in REQUIRED_CLOUDID_VARS + [config.get("feature_varname", "feature_number")]
-                   if v not in dsp]
-        conv_dilate_radius_km = dsp.attrs.get("conv_dilate_radius_km", config.get("conv_dilate_radius_km", None))
+        missing = [v for v in required + [config.get("feature_varname", "feature_number")] if v not in dsp]
+        idfeature_radius_km = dsp.attrs.get("conv_dilate_radius_km", config.get("conv_dilate_radius_km", None))
     if missing:
-        logger.critical(
-            f"Cloudid file {cloudidfiles[0]} has no {missing}. conv_feature_number is written by the version of "
-            f"idfeature_radar3d that has the conv_dilate_radius_km option: run run_idfeature with it. "
-            f"Tracking will now exit."
-        )
+        hint = (" conv_feature_number is written by the version of idfeature_radar3d that has the conv_dilate_radius_km "
+                "option: run run_idfeature with it, or set conv_dilate_overwrite_radius_km to recompute it here."
+                if "conv_feature_number" in missing else "")
+        logger.critical(f"Cloudid file {cloudidfiles[0]} has no {missing}.{hint} Tracking will now exit.")
         sys.exit()
+    if overwrite_km is None:
+        conv_dilate_radius_km = idfeature_radius_km
+    else:
+        conv_dilate_radius_km = overwrite_km
+        idfeature_text = "no recorded radius" if idfeature_radius_km is None else f"{float(idfeature_radius_km):g} km"
+        logger.info(f"conv_feature_number recomputed from convsf at {overwrite_km:g} km (conv_dilate_overwrite_radius_km); "
+                    f"the cloudid files have {idfeature_text}")
+        if config.get("rangemask_varname", None) is not None:
+            logger.warning("rangemask_varname is set: idfeature limits the dilation to the valid-data mask, the "
+                           "recomputed conv_feature_number does not (the mask is not stored in the cloudid files).")
 
     #########################################################################
     # Statistics of the merged mask, one cloudid file at a time
@@ -191,6 +211,9 @@ def compute_regionprops(config):
                 " and labeled); the major axis of a group is measured on the region inside the merged mask. "
                 "0 if the mask has no convective pixel."
             )
+            if overwrite_km is not None:
+                attrs["comments"] += (" The groups were recomputed by run_regionprops (conv_dilate_overwrite_radius_km), "
+                                      "not read from the cloudid files.")
         ds[name] = (dims2d, values[name], attrs)
 
     # Smoothed trajectory from the recomputed centroid
@@ -287,6 +310,8 @@ def compute_regionprops(config):
     ds.attrs["mcs_lifecycle_smooth_hour"] = params["mcs_lifecycle_smooth_hour"]
     if conv_dilate_radius_km is not None:
         ds.attrs["conv_dilate_radius_km"] = float(conv_dilate_radius_km)
+    if overwrite_km is not None and idfeature_radius_km is not None:
+        ds.attrs["conv_dilate_radius_km_idfeature"] = float(idfeature_radius_km)
     ds.attrs["n_pairs_not_computed"] = n_missing
     ds.attrs["n_pairs_area_mismatch"] = n_mismatch
     ds.attrs["Created_on"] = time.ctime(time.time())
