@@ -2,6 +2,7 @@ from __future__ import division, print_function
 import sys
 import os
 import time
+import shutil
 import logging
 import numpy as np
 from netCDF4 import Dataset
@@ -99,7 +100,8 @@ def movement_speed(
     ntimes = ds_stats.sizes[times_dimname]
     tracks_coord = ds_stats.coords[tracks_dimname].data
     times_coord = ds_stats.coords[times_dimname].data
-    stats_basetime = ds_stats.variables['base_time'].values
+    # Only the first time of each track is needed (aligns the movement values to the track times)
+    stats_start_basetime = ds_stats.variables['base_time'][:, 0].values
     ds_stats.close()
 
     # Make file pairs
@@ -112,7 +114,7 @@ def movement_speed(
         for ifile in range(0, nfiles-1):
             result = movement_of_feature_fft(
                 filepairs[ifile], ntracks,
-                config,
+                config, sparse=True,
             )
             results.append(result)
         final_result = results
@@ -121,7 +123,7 @@ def movement_speed(
         for ifile in range(0, nfiles-1):
             result = dask.delayed(movement_of_feature_fft)(
                 filepairs[ifile], ntracks,
-                config,
+                config, sparse=True,
             )
             results.append(result)
         final_result = dask.compute(*results)
@@ -129,61 +131,41 @@ def movement_speed(
     else:
         sys.exit('Valid parallelization flag not provided')
 
-    move_y, move_x, time_lag, base_time, feat_pixel_length = zip(*final_result)
-    move_y = np.array(move_y)
-    move_x = np.array(move_x)
-    # Per-feature pixel length [km], shape: (nfiles-1, ntracks)
-    feat_pixel_length = np.array(feat_pixel_length)
-    base_time = np.asarray(base_time, dtype=float)
-
-    # Compute movement speed, direction
-    (r_mag, r_dir, r_speed) = offset_to_speed(move_x, move_y, time_lag)
-
-    # Use per-feature pixel length for distance/speed conversion
-    pixel_length = feat_pixel_length
-    # Movement magnitude [km]
-    movement_mag = r_mag * pixel_length / lag
-    movement_x = move_x * pixel_length / lag
-    movement_y = move_y * pixel_length / lag
-    # Movement speed [m/s]
-    movement_speed = r_speed * pixel_length * 1000.
-    # Movement direction
-    # '0 deg = North' now implemented in "offset_to_speed"
-    movement_dir = r_dir
+    # Movement of the measured tracks of every file pair -> [tracks, times] arrays aligned to the track times.
+    # (Only the few hundred tracks that are measured in a pair are kept, never an array over all pairs and tracks.)
+    tracks_movement = align_movement_to_tracks(final_result, stats_start_basetime, ntimes, lag)
 
     # Put the movement variables in an Xarray Dataset
     # consistent with track statistics
-    ds_vars = define_movement_dataset(base_time, lag, movement_dir, movement_mag, movement_speed, movement_x,
-                                      movement_y, ntimes, ntracks, stats_basetime, times_coord, times_dimname,
-                                      tracks_coord, tracks_dimname)
+    ds_vars = define_movement_dataset(tracks_movement, lag, times_coord, times_dimname, tracks_coord, tracks_dimname)
 
     # Run filter to interpolate over high movement speeds
     ds_vars_filt = filter_interp_speed(ds_vars, config)
 
-    # Merge Datasets
-    dsout = xr.merge([ds_stats, ds_vars_filt], compat="override", combine_attrs="no_conflicts")
-
-    # Update global attributes
-    dsout.attrs["Created_on"] = time.ctime(time.time())
-    dsout.attrs["max_speed_thresh"] = max_speed_thresh
-
     ###########################################################################
-    # Write statistics to netcdf file
+    # Write statistics to netcdf file: a copy of the input statistics file with the movement variables added.
+    # (Merging the movement variables with the opened input and writing the result would read every variable of the
+    # input into memory: 180 GB for a month of 240,000 tracks.)
+    if statistics_file == statistics_outfile:
+        logger.critical(f"The input and output statistics files are the same ({statistics_file}). Tracking will now exit.")
+        sys.exit()
 
     # Delete file if it already exists
     if os.path.isfile(statistics_outfile):
         os.remove(statistics_outfile)
+    shutil.copyfile(statistics_file, statistics_outfile)
 
-    # Set encoding/compression for all variables
+    # Update global attributes
+    ds_vars_filt.attrs["Created_on"] = time.ctime(time.time())
+    ds_vars_filt.attrs["max_speed_thresh"] = max_speed_thresh
+
+    # Set encoding/compression for the new variables
     comp = dict(zlib=True)
-    encoding = {var: comp for var in dsout.data_vars}
+    encoding = {var: comp for var in ds_vars_filt.data_vars}
 
-    # Write to netcdf file
-    # Touch output file so HDF5 1.14.x H5Fis_accessible() probe does not
-    # fail with ENOENT and emit spurious diagnostics to stderr
-    open(statistics_outfile, 'ab').close()
-    dsout.to_netcdf(path=statistics_outfile, mode="w",
-                    format="NETCDF4", unlimited_dims=tracks_dimname, encoding=encoding)
+    # Append to the copy (the dimensions and their coordinates are in the file already)
+    ds_vars_filt.drop_vars([tracks_dimname, times_dimname]).to_netcdf(
+        path=statistics_outfile, mode="a", format="NETCDF4", encoding=encoding)
     logger.info(f"{statistics_outfile}")
 
     return statistics_outfile
@@ -195,9 +177,13 @@ def movement_of_feature_fft(
         ntracks,
         config,
         optimize_sub_array=True,
+        sparse=False,
 ):
     """
     Calculate movement of tracked features.
+
+    Only the tracks that have at least min_size_thresh_for_speed pixels in both files are measured (a few hundred
+    of the tracks of a month); the other tracks have NaN.
 
     Args:
         filepairs: tuple
@@ -208,8 +194,12 @@ def movement_of_feature_fft(
             Dictionary containing config parameters.
         optimize_sub_array: boolean
             Flag to subset each tracked feature from the full image.
+        sparse: boolean
+            False (default): return arrays over all ntracks tracks. True: return only the measured tracks.
 
     Returns:
+        sparse=False: (y_lag, x_lag, time_lag, base_time, pixel_length_per_feature)
+        sparse=True: (track_index, y_lag, x_lag, time_lag, base_time, pixel_length) for the measured tracks
         y_lag: np.array
             Movement magnitude in y-direction.
         x_lag: np.array
@@ -218,6 +208,8 @@ def movement_of_feature_fft(
             Time difference between two pixel files.
         base_time: float
             Base time for the first pixel file.
+        pixel_length: np.array
+            Per-feature mean pixel length [km].
     """
 
     tracknumber = config["track_number_for_speed"]
@@ -242,8 +234,8 @@ def movement_of_feature_fft(
 
     dset1 = Dataset(filepairs[0], 'r')
     dset2 = Dataset(filepairs[1], 'r')
-    y_lag = np.zeros(ntracks)
-    x_lag = np.zeros(ntracks)
+    y_lag = np.full(ntracks, np.nan)
+    x_lag = np.full(ntracks, np.nan)
     # Per-feature mean pixel length [km]
     if pixel_area is not None:
         pixel_length_per_feature = np.full(ntracks, np.nan)
@@ -261,108 +253,104 @@ def movement_of_feature_fft(
     # Get dimensions of data
     ydim, xdim = np.shape(field_1)
 
-    # Loop over each track number
-    for track_number in np.arange(0, ntracks):
+    # Loop over the tracks that are big enough in both files
+    measured = np.where(min_cloud_size >= min_size_thresh)[0]
+    for track_number in measured:
         # In pixel mask files, track number need to +1
         # track indices start from 0, pixel mask track numbers start from 1
         track_number_pix = track_number + 1
-        # Check min cloud size against threshold
-        if min_cloud_size[track_number] < min_size_thresh:
-            y_lag[track_number] = np.nan
-            x_lag[track_number] = np.nan
-        else:
-            if optimize_sub_array:
-                # Subset array to only contain the current track mask area
-                # Calculate size of bounding box
-                ymin, ymax, xmin, xmax = get_bounding_box_for_fft(tracknumber_1, tracknumber_2, track_number_pix)
-                masked_field_1 = field_1[ymin:ymax, xmin:xmax].copy()
-                masked_field_2 = field_2[ymin:ymax, xmin:xmax].copy()
+        if optimize_sub_array:
+            # Subset array to only contain the current track mask area
+            # Calculate size of bounding box
+            ymin, ymax, xmin, xmax = get_bounding_box_for_fft(tracknumber_1, tracknumber_2, track_number_pix)
+            masked_field_1 = field_1[ymin:ymax, xmin:xmax].copy()
+            masked_field_2 = field_2[ymin:ymax, xmin:xmax].copy()
 
-                # Replace data outside of the current track mask area or NaN with 0
-                masked_field_1[tracknumber_1[ymin:ymax, xmin:xmax] != track_number_pix] = 0
-                masked_field_1[np.isnan(masked_field_1)] = 0
+            # Replace data outside of the current track mask area or NaN with 0
+            masked_field_1[tracknumber_1[ymin:ymax, xmin:xmax] != track_number_pix] = 0
+            masked_field_1[np.isnan(masked_field_1)] = 0
 
-                masked_field_2[tracknumber_2[ymin:ymax, xmin:xmax] != track_number_pix] = 0
-                masked_field_2[np.isnan(masked_field_2)] = 0
+            masked_field_2[tracknumber_2[ymin:ymax, xmin:xmax] != track_number_pix] = 0
+            masked_field_2[np.isnan(masked_field_2)] = 0
 
-                # Check feature boundary span
-                # If boundary span > X fraction of domain, and periodic boundary condition is set,
-                # roll the data such that the feature does not span across the domain boundary
-                if (((xmax - xmin) >= xdim * max_feature_frac_x) or \
-                    ((ymax - ymin) >= ydim * max_feature_frac_y)) and \
-                    (pbc_direction != 'none'):
-                    # Combine non-zero pixels from both time steps to detect
-                    # which boundaries the feature crosses.
-                    masked_fields = (np.abs(masked_field_1) > 0) | (np.abs(masked_field_2) > 0)
-                    # Sub-array dimensions; indices are 0-based within the sub-box.
-                    sub_ydim, sub_xdim = masked_fields.shape
-                    occ_y, occ_x = np.where(masked_fields)
-                    # Gap-based boundary detection:
-                    # The largest gap in sorted occupied indices > 50% of the
-                    # sub-array span indicates the feature wraps across that edge.
-                    # The shift amount is chosen so the right/top cluster rolls
-                    # to the left/bottom, compacting the feature away from the border.
-                    sorted_x = np.sort(np.unique(occ_x))
-                    gap_x = np.diff(sorted_x)
-                    max_gap_x_idx = np.argmax(gap_x) if len(gap_x) > 0 else 0
-                    if len(gap_x) > 0 and gap_x[max_gap_x_idx] > sub_xdim * 0.5:
-                        shift_x_right = sub_xdim - int(sorted_x[max_gap_x_idx + 1])
-                    else:
-                        shift_x_right = 0
-                    sorted_y = np.sort(np.unique(occ_y))
-                    gap_y = np.diff(sorted_y)
-                    max_gap_y_idx = np.argmax(gap_y) if len(gap_y) > 0 else 0
-                    if len(gap_y) > 0 and gap_y[max_gap_y_idx] > sub_ydim * 0.5:
-                        shift_y_top = sub_ydim - int(sorted_y[max_gap_y_idx + 1])
-                    else:
-                        shift_y_top = 0
-                    # Roll both sub-arrays by the detected shifts so the
-                    # feature is compact and does not straddle the boundary.
-                    masked_field_1 = np.roll(masked_field_1, (shift_y_top, shift_x_right), axis=(0, 1))
-                    masked_field_2 = np.roll(masked_field_2, (shift_y_top, shift_x_right), axis=(0, 1))
-            else:
-                masked_field_1 = field_1.copy()
-                masked_field_2 = field_2.copy()
-
-                # Replace data outside of the current track mask area or NaN with 0
-                masked_field_1[tracknumber_1 != track_number_pix] = 0
-                masked_field_1[np.isnan(masked_field_1)] = 0
-
-                masked_field_2[tracknumber_2 != track_number_pix] = 0
-                masked_field_2[np.isnan(masked_field_2)] = 0
-
-            # Flip the second image, do an FFT convolution
-            result = fftconvolve(masked_field_1, masked_field_2[::-1, ::-1], mode='same')
-            # Get the index with max value (highest correlation)
-            # then reshape it to 2D to get x, y index
-
-            # ALTERNATIVE No. 1
-            y_step, x_step = np.apply_along_axis(np.mean, 1,
-                np.asarray(np.where(result>np.quantile(result, .995)))).round(0).astype('int')
-
-            y_dim, x_dim = np.shape(masked_field_1)
-            # Get the relative position from the center of the image
-            # This is the movement in x, y direction
-            y_lag[track_number] = np.floor(y_dim/2) - y_step
-            x_lag[track_number] = np.floor(x_dim/2) - x_step
-
-            # Compute per-feature mean pixel length for latlon grids
-            if pixel_area is not None:
-                if optimize_sub_array:
-                    sub_pa = pixel_area[ymin:ymax, xmin:xmax]
-                    feat_mask = (
-                        (tracknumber_1[ymin:ymax, xmin:xmax] == track_number_pix) |
-                        (tracknumber_2[ymin:ymax, xmin:xmax] == track_number_pix)
-                    )
+            # Check feature boundary span
+            # If boundary span > X fraction of domain, and periodic boundary condition is set,
+            # roll the data such that the feature does not span across the domain boundary
+            if (((xmax - xmin) >= xdim * max_feature_frac_x) or \
+                ((ymax - ymin) >= ydim * max_feature_frac_y)) and \
+                (pbc_direction != 'none'):
+                # Combine non-zero pixels from both time steps to detect
+                # which boundaries the feature crosses.
+                masked_fields = (np.abs(masked_field_1) > 0) | (np.abs(masked_field_2) > 0)
+                # Sub-array dimensions; indices are 0-based within the sub-box.
+                sub_ydim, sub_xdim = masked_fields.shape
+                occ_y, occ_x = np.where(masked_fields)
+                # Gap-based boundary detection:
+                # The largest gap in sorted occupied indices > 50% of the
+                # sub-array span indicates the feature wraps across that edge.
+                # The shift amount is chosen so the right/top cluster rolls
+                # to the left/bottom, compacting the feature away from the border.
+                sorted_x = np.sort(np.unique(occ_x))
+                gap_x = np.diff(sorted_x)
+                max_gap_x_idx = np.argmax(gap_x) if len(gap_x) > 0 else 0
+                if len(gap_x) > 0 and gap_x[max_gap_x_idx] > sub_xdim * 0.5:
+                    shift_x_right = sub_xdim - int(sorted_x[max_gap_x_idx + 1])
                 else:
-                    sub_pa = pixel_area
-                    feat_mask = (
-                        (tracknumber_1 == track_number_pix) |
-                        (tracknumber_2 == track_number_pix)
-                    )
-                pixel_length_per_feature[track_number] = np.sqrt(
-                    np.nanmean(sub_pa[feat_mask])
+                    shift_x_right = 0
+                sorted_y = np.sort(np.unique(occ_y))
+                gap_y = np.diff(sorted_y)
+                max_gap_y_idx = np.argmax(gap_y) if len(gap_y) > 0 else 0
+                if len(gap_y) > 0 and gap_y[max_gap_y_idx] > sub_ydim * 0.5:
+                    shift_y_top = sub_ydim - int(sorted_y[max_gap_y_idx + 1])
+                else:
+                    shift_y_top = 0
+                # Roll both sub-arrays by the detected shifts so the
+                # feature is compact and does not straddle the boundary.
+                masked_field_1 = np.roll(masked_field_1, (shift_y_top, shift_x_right), axis=(0, 1))
+                masked_field_2 = np.roll(masked_field_2, (shift_y_top, shift_x_right), axis=(0, 1))
+        else:
+            masked_field_1 = field_1.copy()
+            masked_field_2 = field_2.copy()
+
+            # Replace data outside of the current track mask area or NaN with 0
+            masked_field_1[tracknumber_1 != track_number_pix] = 0
+            masked_field_1[np.isnan(masked_field_1)] = 0
+
+            masked_field_2[tracknumber_2 != track_number_pix] = 0
+            masked_field_2[np.isnan(masked_field_2)] = 0
+
+        # Flip the second image, do an FFT convolution
+        result = fftconvolve(masked_field_1, masked_field_2[::-1, ::-1], mode='same')
+        # Get the index with max value (highest correlation)
+        # then reshape it to 2D to get x, y index
+
+        # ALTERNATIVE No. 1
+        y_step, x_step = np.apply_along_axis(np.mean, 1,
+            np.asarray(np.where(result>np.quantile(result, .995)))).round(0).astype('int')
+
+        y_dim, x_dim = np.shape(masked_field_1)
+        # Get the relative position from the center of the image
+        # This is the movement in x, y direction
+        y_lag[track_number] = np.floor(y_dim/2) - y_step
+        x_lag[track_number] = np.floor(x_dim/2) - x_step
+
+        # Compute per-feature mean pixel length for latlon grids
+        if pixel_area is not None:
+            if optimize_sub_array:
+                sub_pa = pixel_area[ymin:ymax, xmin:xmax]
+                feat_mask = (
+                    (tracknumber_1[ymin:ymax, xmin:xmax] == track_number_pix) |
+                    (tracknumber_2[ymin:ymax, xmin:xmax] == track_number_pix)
                 )
+            else:
+                sub_pa = pixel_area
+                feat_mask = (
+                    (tracknumber_1 == track_number_pix) |
+                    (tracknumber_2 == track_number_pix)
+                )
+            pixel_length_per_feature[track_number] = np.sqrt(
+                np.nanmean(sub_pa[feat_mask])
+            )
 
     # Get time difference between the file pair
     time_lag = dset2.variables['time'][0] - dset1.variables['time'][0]
@@ -370,6 +358,9 @@ def movement_of_feature_fft(
 
     dset1.close()
     dset2.close()
+    if sparse:
+        return (measured, y_lag[measured], x_lag[measured], time_lag, base_time,
+                pixel_length_per_feature[measured])
     return y_lag, x_lag, time_lag, base_time, pixel_length_per_feature
 
 
@@ -447,7 +438,8 @@ def offset_to_speed(x, y, time_lag):
         y: np.array
             Movement in y-direction.
         time_lag: np.array
-            Time lag for each movement.
+            Time lag of each file pair: one value per row for 2-D x and y [pairs, tracks],
+            one value per element (same shape as x) for 1-D x and y.
 
     Returns:
         r_mag: np.array
@@ -463,71 +455,133 @@ def offset_to_speed(x, y, time_lag):
     # ATERNATIVE No.1 (effective but maybe.too.complex?)
     z = np.logical_and((y+x)==0, (y*x)==0)
     r_dir = -np.arctan2(y, x) *180/np.pi +90
-    r_dir[r_dir<0] = (r_dir +360)[r_dir<0]
+    negative = r_dir < 0
+    r_dir[negative] = r_dir[negative] + 360
     r_dir[z] = np.nan
     # Movement speed [n_grid / second]
-    r_speed = np.array([r_mag_i / (time_lag) for r_mag_i in r_mag.T]).T
+    time_lag = np.asarray(time_lag)
+    if r_mag.ndim == 2:
+        time_lag = time_lag.reshape(-1, 1)
+    r_speed = r_mag / time_lag
     return r_mag, r_dir, r_speed
 
+def nearest_pair_index(pair_basetime, start_basetime):
+    """
+    Index of the file pair whose base time is nearest to each start time: the first minimum of
+    np.abs(pair_basetime - start_time), i.e. np.nanargmin, for all start times at once.
+
+    Args:
+        pair_basetime: np.array, shape [npairs]
+            Base time of each file pair [seconds].
+        start_basetime: np.array, shape [ntracks]
+            Start time of each track [seconds]; NaN gives -1.
+
+    Returns:
+        index: np.array(int64), shape [ntracks]
+    """
+    pair_basetime = np.asarray(pair_basetime, dtype=float)
+    start_basetime = np.asarray(start_basetime, dtype=float)
+    npairs = len(pair_basetime)
+    index = np.full(start_basetime.shape, -1, dtype=np.int64)
+    valid = np.isfinite(start_basetime)
+    if npairs == 0 or not valid.any():
+        return index
+    order = np.argsort(pair_basetime, kind="stable")
+    sorted_time = pair_basetime[order]
+    pos = np.searchsorted(sorted_time, start_basetime[valid])
+    left = np.clip(pos - 1, 0, npairs - 1)
+    right = np.clip(pos, 0, npairs - 1)
+    pick = np.where(np.abs(sorted_time[left] - start_basetime[valid]) <= np.abs(sorted_time[right] - start_basetime[valid]),
+                    left, right)
+    index[valid] = order[pick]
+    return index
+
+
+def align_movement_to_tracks(results, stats_start_basetime, ntimes, lag):
+    """
+    Movement of the tracks, from the measurements of every file pair to arrays [tracks, times] on the time axis of the
+    track statistics (the first time of a track is the file pair nearest to its start time).
+
+    Args:
+        results: list of tuples
+            One per file pair: (track_index, y_lag, x_lag, time_lag, base_time, pixel_length) of the tracks that
+            were measured in that pair (movement_of_feature_fft with sparse=True).
+        stats_start_basetime: np.array, shape [ntracks]
+            Base time of the first time of every track.
+        ntimes: int
+            Length of the times dimension of the track statistics.
+        lag: int
+            Lag between the files of a pair (lag_for_speed).
+
+    Returns:
+        movement: dictionary of np.array(float32), shape [ntracks, ntimes], NaN where not measured:
+            movement_distance [km], movement_speed [m/s], movement_theta [degrees],
+            movement_distance_x, movement_distance_y [km]
+    """
+    ntracks = len(stats_start_basetime)
+    npairs = len(results)
+    out = {name: np.full((ntracks, ntimes), np.nan, dtype=np.float32) for name in
+           ("movement_distance", "movement_speed", "movement_theta", "movement_distance_x", "movement_distance_y")}
+    if npairs == 0:
+        return out
+    counts = np.array([len(r[0]) for r in results], dtype=np.int64)
+    if counts.sum() == 0:
+        return out
+    pair_index = np.repeat(np.arange(npairs), counts)
+    track = np.concatenate([np.asarray(r[0], dtype=np.int64) for r in results])
+    y_lag = np.concatenate([np.asarray(r[1], dtype=float) for r in results])
+    x_lag = np.concatenate([np.asarray(r[2], dtype=float) for r in results])
+    pixel_length = np.concatenate([np.asarray(r[5], dtype=float) for r in results])
+    time_lag = np.asarray([r[3] for r in results], dtype=float)[pair_index]
+    pair_basetime = np.asarray([r[4] for r in results], dtype=float)
+
+    # Movement magnitude [km], components [km], speed [m/s], direction (0 deg = North)
+    r_mag, r_dir, r_speed = offset_to_speed(x_lag, y_lag, time_lag)
+    movement_mag = r_mag * pixel_length / lag
+    movement_x = x_lag * pixel_length / lag
+    movement_y = y_lag * pixel_length / lag
+    movement_speed = r_speed * pixel_length * 1000.
+
+    # Time index of every entry in its track: pair index minus the pair index of the track start
+    start = nearest_pair_index(pair_basetime, stats_start_basetime)
+    k = pair_index - start[track]
+    # A track's movement ends at its last finite speed (later pairs are not copied)
+    finite = np.isfinite(movement_speed)
+    last = np.full(ntracks, -1, dtype=np.int64)
+    np.maximum.at(last, track[finite], pair_index[finite])
+    keep = (start[track] >= 0) & (k >= 0) & (k < ntimes) & (pair_index <= last[track])
+    t, k = track[keep], k[keep]
+    out["movement_distance"][t, k] = movement_mag[keep]
+    out["movement_speed"][t, k] = movement_speed[keep]
+    out["movement_theta"][t, k] = r_dir[keep]
+    out["movement_distance_x"][t, k] = movement_x[keep]
+    out["movement_distance_y"][t, k] = movement_y[keep]
+    return out
+
+
 def define_movement_dataset(
-        base_time,
+        movement,
         lag,
-        movement_dir,
-        movement_mag,
-        movement_speed,
-        movement_x,
-        movement_y,
-        ntimes,
-        ntracks,
-        stats_basetime,
         times_coord,
         times_dimname,
         tracks_coord,
         tracks_dimname,
 ):
-    # Create arrays to match track stats structure
+    """
+    Dataset of the movement variables ([tracks, times], same structure as the track statistics).
+
+    Args:
+        movement: dictionary
+            Arrays of align_movement_to_tracks.
+        lag: int
+            Lag between the files of a pair (lag_for_speed).
+        times_coord, tracks_coord: np.array
+            Coordinates of the times and tracks dimensions.
+        times_dimname, tracks_dimname: string
+            Dimension names.
+    """
     fillval_f = np.nan
-    tracks_movement_mag = np.full((ntracks, ntimes), fillval_f, dtype=np.float32)
-    tracks_movement_speed = np.full((ntracks, ntimes), fillval_f, dtype=np.float32)
-    tracks_movement_dir = np.full((ntracks, ntimes), fillval_f, dtype=np.float32)
-    tracks_movement_x = np.full((ntracks, ntimes), fillval_f, dtype=np.float32)
-    tracks_movement_y = np.full((ntracks, ntimes), fillval_f, dtype=np.float32)
-    # Loop over each track to align the data
-    for track_number in np.arange(0, ntracks):
-        # Find matching track start base_time
-        start_time = stats_basetime[track_number, 0]
-        # base_time_diff = np.abs(base_time - np.array(start_time))
-        base_time_diff = np.abs(base_time - start_time)
-        start_idx = np.nanargmin(base_time_diff)
-        # Find valid movement value indices
-        valid_indices = np.where(np.isfinite(movement_speed[:, track_number]))[0]
-
-        if len(valid_indices) < 1:
-            continue
-        else:
-            end_idx = valid_indices[-1]
-
-        duration = np.min([ntimes, end_idx - start_idx + 1])
-        # Put movement data to track stats array format: var[tracks, times]
-        tracks_movement_mag[track_number, 0:duration] = \
-            movement_mag[start_idx:start_idx + duration, track_number]
-        tracks_movement_speed[track_number, 0:duration] = \
-            movement_speed[start_idx:start_idx + duration, track_number]
-        tracks_movement_dir[track_number, 0:duration] = \
-            movement_dir[start_idx:start_idx + duration, track_number]
-        tracks_movement_x[track_number, 0:duration] = \
-            movement_x[start_idx:start_idx + duration, track_number]
-        tracks_movement_y[track_number, 0:duration] = \
-            movement_y[start_idx:start_idx + duration, track_number]
-
-    # Define new variables dictionary
-    var_dict = {
-        "movement_distance": tracks_movement_mag,
-        "movement_speed": tracks_movement_speed,
-        "movement_theta": tracks_movement_dir,
-        "movement_distance_x": tracks_movement_x,
-        "movement_distance_y": tracks_movement_y,
-    }
+    var_dict = movement
     var_attrs = {
         "movement_distance": {
             "long_name": "Movement distance along angle movement_theta",
@@ -576,6 +630,10 @@ def filter_interp_speed(dset, config):
     """
     Filter and interpolate high values of movement_speed.
 
+    Tracks with fewer than 3 speed values below max_speed_thresh get NaN. For the others the values above the
+    threshold are interpolated (quadratic) from the ones below it. Only the tracks that have any movement value are
+    visited (the others are NaN already and stay NaN), with numpy slices.
+
     Args:
         dset: Xarray Dataset
             Dataset containing movement variables.
@@ -593,12 +651,8 @@ def filter_interp_speed(dset, config):
 
     logger = logging.getLogger(__name__)
 
-    move_r = dset['movement_speed']
-    mask_r = move_r < max_speed_thresh
-    mask_nan = np.logical_not(np.isnan(move_r))
-    total_mask = np.logical_and(mask_r, mask_nan)
-
     fillval_f = np.nan
+    times = dset[times_dimname].values
     m_mag = dset['movement_distance'].values
     m_speed = dset['movement_speed'].values
     m_theta = dset['movement_theta'].values
@@ -610,8 +664,11 @@ def filter_interp_speed(dset, config):
     m_x_attrs = dset['movement_distance_x'].attrs
     m_y_attrs = dset['movement_distance_y'].attrs
 
-    for track in np.arange(0, len(dset[tracks_dimname])):
-        if np.count_nonzero(dset['movement_speed'][track] < max_speed_thresh) < 3:
+    for track in np.where(np.any(~np.isnan(m_speed), axis=1))[0]:
+        speed = m_speed[track]
+        mask_nan = ~np.isnan(speed)
+        total_mask = mask_nan & (speed < max_speed_thresh)
+        if np.count_nonzero(total_mask) < 3:
             logger.debug('Not enough values in Track %d' % track)
             m_mag[track] = fillval_f
             m_speed[track] = fillval_f
@@ -619,38 +676,29 @@ def filter_interp_speed(dset, config):
             m_x[track] = fillval_f
             m_y[track] = fillval_f
         else:
-            x = dset[times_dimname][total_mask[track]]
-            xm = dset[times_dimname][mask_nan[track]]
-            spd = dset['movement_speed'][track][total_mask[track]]
+            x = times[total_mask]
+            xm = times[mask_nan]
+            spd = speed[total_mask]
         # because THETA is now not being interpolated
-            theta = dset['movement_theta'][track][xm]
-            mag = dset['movement_distance'][track][total_mask[track]]
+            theta = m_theta[track][mask_nan]
+            mag = m_mag[track][total_mask]
             intp_r = interp1d(x, spd, kind='quadratic', fill_value=fillval_f, bounds_error=False)
         # the interpolation of THETA is now not necessary (np.nan also implies no movement --NOW--)
             intp_mag = interp1d(x, mag, kind='quadratic', fill_value=fillval_f, bounds_error=False)
 
-            # # Original formula from Joe
-            # # mov_x = 3.6 * intp_r(dset[times_dimname][mask_nan[track]]) * np.cos(
-            # #     np.pi / 180.0 * intp_theta(dset[times_dimname][mask_nan[track]]))
-            # # mov_y = 3.6 * intp_r(dset[times_dimname][mask_nan[track]]) * np.sin(
-            # #     np.pi / 180.0 * intp_theta(dset[times_dimname][mask_nan[track]]))
-            # # TODO: need to double check the following formula
-            # mov_x = intp_mag(xm) * np.cos(np.pi / 180.0 * intp_theta(xm))
-            # mov_y = intp_mag(xm) * np.sin(np.pi / 180.0 * intp_theta(xm))
-
             # original formula from FELIPERIOSG (already checked as we're dealing with azimuths now)
-            mov_x = intp_mag(xm) * np.sin(np.pi / 180.0 * theta.values)
-            mov_y = intp_mag(xm) * np.cos(np.pi / 180.0 * theta.values)
+            mov_x = intp_mag(xm) * np.sin(np.pi / 180.0 * theta)
+            mov_y = intp_mag(xm) * np.cos(np.pi / 180.0 * theta)
             # NP.NAN here (in XM) means no movement (check ALTERNATIVE 1 in "offset_to_speed")
             mov_x[np.isnan(mov_x)] = 0
             mov_y[np.isnan(mov_y)] = 0
 
             # Interpolate values
-            m_mag[track][mask_nan[track]] = intp_mag(xm)
-            m_speed[track][mask_nan[track]] = intp_r(xm)
-            # m_theta[track][mask_nan[track]] = intp_theta(xm)
-            m_x[track][mask_nan[track]] = mov_x
-            m_y[track][mask_nan[track]] = mov_y
+            m_mag[track][mask_nan] = intp_mag(xm)
+            m_speed[track][mask_nan] = intp_r(xm)
+            # m_theta[track][mask_nan] = intp_theta(xm)
+            m_x[track][mask_nan] = mov_x
+            m_y[track][mask_nan] = mov_y
 
     # Update variables in dataset
     dset['movement_distance'] = ((tracks_dimname, times_dimname), m_mag, m_mag_attrs)
