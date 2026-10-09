@@ -93,7 +93,7 @@ if __name__ == '__main__':
         if not os.path.isfile(robust_file):
             logger.critical(f"{robust_file} not found: run_regionprops writes it from the run_identifymcs output. "
                             f"Tracking will now exit.")
-            sys.exit()
+            sys.exit(1)
         mapfeature_driver(config, trackstats_filebase=config['mcsrobust_filebase'])
 
     # Step 8 - Movement speed calculation

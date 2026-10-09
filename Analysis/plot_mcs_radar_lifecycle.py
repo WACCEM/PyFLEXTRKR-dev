@@ -26,7 +26,7 @@ usage:
   plot_mcs_radar_lifecycle.py --config MCS_CONFIG.yml --outdir DIR --select evaluated --workers 8
 
 --tracks are track numbers of the stats file (= pixel tracknumber, index + 1). --select evaluated plots every MCS
-whose lifecycle was evaluated. Figures go to <outdir>/<group>/mcs<N>_lifecycle.png, where the group describes the
+whose lifecycle was evaluated. Figures go to <outdir>/<group>/<prefix>mcs<N>_lifecycle.png, where the group describes the
 outcome of the staging (complete_ideal, complete_multicycle, mature_no_decay [the track ends while mature],
 genesis_decay_no_mature, no_organized_line, episode_too_short_for_genesis, not_evaluated); selection_summary.csv lists
 the flags of every plotted track.
@@ -135,16 +135,16 @@ def ival(x):
 
 def load_track(ds, tn, peak_var, smooth_hour=0.5, sf_area_min=0.0):
     """Arrays of one track trimmed to its duration (NaN = missing)."""
-    k = tn - 1
-    dur = int(ds["track_duration"].values[k])
-    g = lambda v: ds[v].values[k, :dur].astype(float)
+    row = ds.isel(tracks=tn - 1)       # one row: reads only this track from the file (a month has ~200,000 tracks)
+    dur = int(row["track_duration"].values)
+    g = lambda v: row[v].values[:dur].astype(float)
     lon, lat = g("meanlon"), g("meanlat")
     if "meanlon_smooth" in ds:
         # smoothed trajectory where it exists (it has NaN steps in some tracks), else the raw centroid
         lon_s, lat_s = g("meanlon_smooth"), g("meanlat_smooth")
         ok = np.isfinite(lon_s) & np.isfinite(lat_s)
         lon, lat = np.where(ok, lon_s, lon), np.where(ok, lat_s, lat)
-    stage = np.nan_to_num(ds["lifecycle_stage"].values[k, :dur].astype(float), nan=FILL).astype(int)
+    stage = np.nan_to_num(row["lifecycle_stage"].values[:dur].astype(float), nan=FILL).astype(int)
     bt = g("base_time")
     hours = (bt - bt[0]) / 3600.0
     # areas of the whole track (with the merge/split fragments folded into it) when the stats file has them
@@ -170,10 +170,10 @@ def load_track(ds, tn, peak_var, smooth_hour=0.5, sf_area_min=0.0):
         "eth20_s": running_median(eth20, hours, smooth_hour, skipna=True),
         "eth40_s": running_median(eth40, hours, smooth_hour, skipna=True),
         "conv_major": major, "conv_major_s": major_s, "stage": stage,
-        "mcs_status": np.nan_to_num(ds["mcs_status"].values[k, :dur].astype(float), nan=0) == 1,
-        "evaluated": ival(ds["lifecycle_evaluated"].values[k]) == 1,
-        "ncycles": ival(ds["lifecycle_ncycles"].values[k]), "complete": ival(ds["lifecycle_complete_flag"].values[k]) == 1,
-        "life_index": np.nan_to_num(ds["lifecycle_index"].values[k], nan=FILL).astype(int),
+        "mcs_status": np.nan_to_num(row["mcs_status"].values[:dur].astype(float), nan=0) == 1,
+        "evaluated": ival(row["lifecycle_evaluated"].values) == 1,
+        "ncycles": ival(row["lifecycle_ncycles"].values), "complete": ival(row["lifecycle_complete_flag"].values) == 1,
+        "life_index": np.nan_to_num(row["lifecycle_index"].values, nan=FILL).astype(int),
     }
 
 
@@ -610,7 +610,7 @@ def plot_one(tn, args_dict):
     ds.close()
     group = group_of(t)
     files, epoch = pixel_file_index(args.paths["pixdir"], args.paths["pixbase"])
-    out = os.path.join(args.outdir, group, f"mcs{tn}_lifecycle.png")
+    out = os.path.join(args.outdir, group, f"{args.prefix}mcs{tn}_lifecycle.png")
     make_figure(t, group, files, epoch, args, args.paths["line_thresh"], out)
     print(f"MCS {tn}: {group} -> {out}", flush=True)
     return summary_row(t, group, args.paths["line_thresh"], out)
@@ -641,6 +641,9 @@ def main():
     ap.add_argument("--mask", choices=["track", "none"], default="track",
                     help="show reflectivity only inside the track's mask (default) or everywhere in the window")
     ap.add_argument("--workers", type=int, default=1, help="tracks plotted in parallel (use a compute node for > 1)")
+    ap.add_argument("--prefix", default="",
+                    help="put in front of the figure and summary file names, e.g. 202505_ (track numbers repeat across "
+                         "monthly stats files); default none")
     args = ap.parse_args()
     if not args.tracks and not args.select:
         ap.error("give --tracks or --select evaluated")
@@ -663,7 +666,7 @@ def main():
     else:
         rows = [plot_one(tn, args_dict) for tn in tracks]
     os.makedirs(args.outdir, exist_ok=True)
-    csv_file = os.path.join(args.outdir, "selection_summary.csv")
+    csv_file = os.path.join(args.outdir, f"{args.prefix}selection_summary.csv")
     with open(csv_file, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
         w.writeheader()
