@@ -5,7 +5,7 @@ Tests are written with [pytest](https://docs.pytest.org/) and are split into thr
 
 | Tier | Files | Runs on | Needs data? |
 |------|-------|---------|-------------|
-| Unit / synthetic | `test_steiner_func.py`, `test_echotop_func.py`, `test_vertical_coordinate.py`, `test_idcells_synthetic.py`, `test_area_method_utils.py`, `test_area_method_clouds.py`, `test_example.py` | GitHub CI + local | No |
+| Unit / synthetic | `test_steiner_func.py`, `test_echotop_func.py`, `test_vertical_coordinate.py`, `test_idcells_synthetic.py`, `test_area_method_utils.py`, `test_area_method_clouds.py`, `test_match_pairs_to_windows.py`, `test_trackpcp_synthetic.py`, `test_example.py` | GitHub CI + local | No |
 | Local integration | `test_convolve_method_demo_data.py` | Local / HPC only | Yes (demo inputs) |
 | Local regression | `test_regression_local.py` | Local / HPC only | Yes (demo outputs) |
 | End-to-end demos | `run_demo_tests.py` | Local / HPC only | Auto-downloads |

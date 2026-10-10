@@ -313,6 +313,79 @@ def match_pairs_to_files(basetime, file_basetimes, dt_thresh):
         pairs.append((valid_track[idx], valid_time[idx]))
     return pairs
 
+
+def data_time_windows(data_basetimes, mode="prior", window_sec=3600.0, tolerance_sec=None):
+    """
+    Time interval of the track times that belong to each data record.
+
+    A data record is valid at time T and represents a period of window_sec:
+        prior   : the period before T, i.e. (T - window_sec, T]     (accumulation ending at T, e.g. MRMS QPE)
+        after   : the period after T, i.e. [T, T + window_sec)       (accumulation starting at T)
+        nearest : [T - tolerance_sec, T + tolerance_sec)             (instantaneous data matched to the nearest track
+                  time; tolerance_sec defaults to window_sec / 2)
+
+    Args:
+        data_basetimes: array-like, shape [n]
+            Valid time of each data record [Epoch seconds].
+        mode: string
+            "prior", "after" or "nearest".
+        window_sec: float
+            Period represented by one data record [seconds].
+        tolerance_sec: float, optional
+            Half width of the "nearest" window [seconds].
+
+    Returns:
+        start, end: np.array, shape [n]
+            Interval bounds [Epoch seconds].
+        closed: string
+            "right" for (start, end], "left" for [start, end).
+    """
+    t = np.asarray(data_basetimes, dtype=float)
+    if mode == "prior":
+        return t - window_sec, t, "right"
+    if mode == "after":
+        return t, t + window_sec, "left"
+    if mode == "nearest":
+        tol = 0.5 * window_sec if tolerance_sec is None else float(tolerance_sec)
+        return t - tol, t + tol, "left"
+    raise ValueError(f"time_match must be 'prior', 'after' or 'nearest', not '{mode}'")
+
+
+def match_pairs_to_windows(basetime, window_start, window_end, closed="right"):
+    """
+    Assign the (track, time) entries of a track statistics array to time windows, in one pass over the valid entries
+    (the generalization of match_pairs_to_files to an interval per data record: e.g. all 5-minute track times of
+    the hour that an hourly accumulation covers).
+
+    Args:
+        basetime: np.array, shape [tracks, times]
+            Base time of each track at each time [seconds], NaN where the track has no data.
+        window_start, window_end: array-like, shape [nwindows]
+            Interval bounds [seconds].
+        closed: string
+            "right": window_start < basetime <= window_end; "left": window_start <= basetime < window_end.
+
+    Returns:
+        pairs: list of nwindows tuples (itrack, itime)
+            Index arrays (int64) of the entries of each window, by track then by time. An entry belongs to
+            more than one window only if the windows overlap.
+    """
+    valid_track, valid_time = np.nonzero(np.isfinite(basetime))
+    pair_basetime = basetime[valid_track, valid_time]
+    order = np.argsort(pair_basetime, kind="stable")
+    sorted_basetime = pair_basetime[order]
+    window_start = np.asarray(window_start, dtype=float)
+    window_end = np.asarray(window_end, dtype=float)
+    side = "right" if closed == "right" else "left"
+    first = np.searchsorted(sorted_basetime, window_start, side=side)
+    last = np.searchsorted(sorted_basetime, window_end, side=side)
+    pairs = []
+    for iwin in range(len(window_start)):
+        idx = np.sort(order[first[iwin]:max(last[iwin], first[iwin])])
+        pairs.append((valid_track[idx], valid_time[idx]))
+    return pairs
+
+
 def get_start_end_basetime_from_filenames(
     data_path,
     data_basename,

@@ -1,0 +1,52 @@
+# Track-matched precipitation (runscripts/run_trackpcp.py): hourly MRMS QPE on the tracking grid, MRMS radar_feature tracking.
+# Used together with the tracking config: python run_trackpcp.py <tracking config> this_file [--steps 1 2 3]
+# Keys here override the tracking config.
+
+# --- the data: not part of the tracking, its own files and time axis
+trackpcp_data_path: /pscratch/sd/i/iclas2/MRMS/remap_QPE1H_hrrr/
+trackpcp_data_filebase: MRMS_QPE_01H_Pass2_00.00_
+trackpcp_data_time_format: yyyymodd-hhmmss      # time of the record from the file name (UTC); the time inside the file is not used
+trackpcp_data_varname: precip                    # mm/h, 1-h accumulation
+trackpcp_data_format: null                       # null = auto (a path ending in .zarr is a Zarr store)
+trackpcp_data_time_varname: null                 # null: from the file name (NetCDF); Zarr: time coordinate name (default time)
+trackpcp_data_scale: 1.0
+trackpcp_data_offset: 0.0
+
+# --- how data records and tracking times are matched
+trackpcp_time_match: prior                       # prior: record at T covers (T - window, T] (MRMS QPE); after: [T, T + window); nearest
+trackpcp_window_sec: 3600                        # period one record represents [s]; also the factor rain rate -> depth
+trackpcp_tolerance_sec: null                     # nearest only: half width (default window / 2)
+
+# --- the tracks
+trackpcp_stats_filebase: mcs_tracks_final_       # input: stats_outpath + base + startdate_enddate.nc
+trackpcp_out_filebase: mcs_tracks_final_qpe_     # step 1 output
+trackpcp_mask_varname: cloudtracknumber          # track-number mask in the pixel-level tracking files
+trackpcp_class_varname: track_class              # class per track (or feature_class per track and time); null = no classes
+trackpcp_classes: null                           # class VALUES to process, e.g. [1, 2]; null = all
+trackpcp_class_priority: null                    # owner priority of the classes; null = ascending value
+trackpcp_convective_varname: convsf              # pixel variable of the convective split; null = no convective / stratiform split
+trackpcp_convective_value: 4                     # Steiner CONVECTIVE
+
+# --- step 1: statistics
+trackpcp_stats: [mean, median, max, p90, p95, p99]     # count, area, mean, median, min, max, sum, std, pNN
+trackpcp_stats_prefix: qpe
+trackpcp_precip: true                            # total_rain, volumes, conv / strat, heavy rain, precipitation features
+trackpcp_rain_thresh: 2.0                        # mm/h, precipitation feature threshold
+trackpcp_heavy_thresh: 10.0                      # mm/h
+trackpcp_nmaxpf: 3
+trackpcp_pf_min_area: 0                          # km2
+
+# --- step 2: pixel accumulation and metrics
+trackpcp_box_km: [15, 45, 99]                    # box sizes of the local depth / rate metrics
+trackpcp_accum_thresholds_mm: [25, 50, 100]
+trackpcp_cluster_thresh_mm: 50
+
+# --- step 3: class maps
+trackpcp_pcp_thresh: 1.0                         # mm/h, precipitation occurrence
+trackpcp_coverage_varname: dbz_comp              # pixel variable that is missing where the tracking input has no data (precipitation there is stored in precip_uncovered); null = off
+
+# --- optional sub-period (data records whose time is in it), 'YYYYMMDD.HHMM'
+# trackpcp_start: 20250513.0000
+# trackpcp_end: 20250514.0000
+
+trackpcp_outdir: /pscratch/sd/f/feng045/mcs_radar3d_validation/trackpcp/
