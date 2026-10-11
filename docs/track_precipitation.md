@@ -85,9 +85,41 @@ Windows are tasks of a bounded Dask run (`parallel_utils.run_bounded`): at most 
 after every task (the memory glibc keeps from freed work arrays otherwise grows every task), a failed task is retried once, then counted (abort above 5 %). Results are small
 arrays per window; step 3 reduces one block of windows per worker and sums the blocks as they arrive.
 
-Measured on one Perlmutter CPU node, 64 workers, one month of 5-minute MRMS tracking (8,600-8,900 frames, 190,000-240,000 tracks) and hourly QPE (720-744 windows):
-step 1 5.2-6.8 min (about 1.5 min for the windows, the rest writing the new dense variables and the Parquet table), step 2 about 1 min (38-46 million (track, pixel) rows),
-step 3 0.8 min. Six months: 48 minutes in total.
+## Cost: run time, memory, and a continuous March-September run
+
+Measured on one Perlmutter CPU node (512 GB, 128 cores), May 2025: 239,846 tracks, 1.68 million (track, time) pairs, 744 hourly windows, 5-minute MRMS tracking and QPE,
+monitored by a psutil sampler every 5 s (`perf/monitor_run.py` of the validation directory; peak memory = largest sum of resident sets seen).
+
+| step | workers | wall (min) | CPU (core-h) | peak memory, main process (GB) | peak memory, all workers (GB) | peak node used (GB) | written (GB) |
+|---|---|---|---|---|---|---|---|
+| 1 statistics + dense variables | 64 | 7.2 | 1.01 | 14.1 | 33.4 | 72 | 1.5 |
+| 2 pixel accumulation + metrics | 64 | 1.4 | 0.69 | 7.9 | 27.6 | 69 | 0.33 (Parquet) |
+| 3 class maps | 64 | 1.2 | 0.63 | 3.5 | 38.9 | 79 | 0.01 |
+| 1 / 2 / 3 | 32 | 7.1 / 1.8 / 1.4 | 0.81 / 0.61 / 0.54 | 14.4 / 6.9 / 3.5 | 15.2 / 11.5 / 21.7 | 18 / 12 / 19 | same |
+
+All three steps take about 10 min wall and 2.3 core-hours per month with 64 workers (1.95 core-hours and 10.3 min with 32 workers: the run is not CPU-limited, 32 workers are as fast).
+The largest single worker never exceeded 0.9 GB. Step 1 reads about 170 GB of tracking pixel files and QPE (all windows, cold cache); steps 2 and 3 read the same
+files again. The node peak includes the file cache that the readers cause (the workers themselves are 15-39 GB).
+
+**What dominates**: step 1 is 1.5 min of window work and 4-5 min of writing the dense `tracks x times` variables of the statistics file (about 118 variables, one at a time, in
+the main process), step 2 and 3 are the window loops. Memory is set by the main process (dense arrays of the statistics file, merged pixel table) and by one 245 MB class-map
+accumulator per worker in step 3.
+
+**Continuous March-September (estimate)**: about 214 days, 1.4-1.5 million tracks, 5,100 windows, about 280 million (track, pixel) rows (June and July have 38-46 million each).
+Measured pieces at that size (synthetic arrays of the right shape, `perf/scale_test.py`):
+
+| part | measured at the 7-month size | note |
+|---|---|---|
+| dense `base_time` 1.45 M x 900, window selection and matching of 4.8 M pairs | 8 s, 22 GB peak | dense array 10.4 GB |
+| merge of 5,100 window blocks (280 M rows) in one go | 40 s, 33 GB peak | |
+| incremental merge every 48 results (what step 2 does), 1,500 windows | 63 s, 11 GB peak | merge time grows with the table: about 10 min for 5,100 windows |
+| Parquet write of 280 M rows | 34 s, 8 GB peak, 4.7 GB file | |
+| writing one dense variable (1.45 M x 900) | 28 s, 3.4 GB peak | x about 118 variables: up to 55 min |
+
+Estimated for one run with 64 workers: step 1 about 50-70 min (10 min windows, 30-55 min dense write), step 2 about 20 min, step 3 about 8 min, **1.5-2 h in total, peak
+about 90 GB in the main process (14 GB for May scaled with the number of tracks) and about 130 GB on the node**: it fits on one node. The part that grows faster than linearly is the
+incremental merge of step 2 (about 10 min at this size); it is not a limit. If a longer period or a larger domain is run, the options are (not implemented): skip the
+dense variables (the Parquet table has the same rows), merge in blocks of tracks.
 
 ## Checks that were made (Apr-Sep 2025, MRMS)
 
