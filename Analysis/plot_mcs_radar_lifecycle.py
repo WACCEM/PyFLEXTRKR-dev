@@ -2,7 +2,11 @@
 """
 Plot the life cycle of tracks from the radar_feature MCS tracking (regionprops output), to judge how well
 the lifecycle staging (classify_lifecycle: 1 cloud only, 2 unorganized, 3 genesis, 4 mature, 5 decay) describes
-real tracks. One 2x2 figure per track:
+real tracks. One figure per track: the maps on the left, the time-series panels of one size to their right in one
+column (b-d) or, with the rain panels (e-g), in two columns (gridspec; the map column is as wide as the swath needs,
+within limits, and the maps keep their true aspect ratio). With the track-matched precipitation (--stats-file and its
+trackpcp pixel table) there are two maps of the same size, one above the other, (a1) reflectivity and (a2) the mean
+rain rate over the lifetime; without it one map (a):
 
   (a) map: composite-reflectivity snapshots at equal time cadence over a fixed extent (the swath of the whole track
       plus a small --margin). The alpha of a snapshot is a Gaussian in time around the largest --peak-var (default
@@ -17,6 +21,18 @@ real tracks. One 2x2 figure per track:
       track; dashed horizontal line: the stratiform area a time needs for the mature stage
   (c) maximum 20 and 40 dBZ echo-top height
   (d) convective major axis and circular-equivalent diameter, with the line threshold of the staging
+  (a2) mean rain rate over the track lifetime [mm/day] = accumulated depth / lifetime in days (rate_mm_day of
+      trackpcp_pixels_<period>.parquet, found next to --stats-file or in --pcp-dir), on the extent of (a1), with the
+      track of the centroid. The color levels are fractions (0.02 ... 0.9) of the track's peak rain rate, so that the
+      peak values have the finest color steps, unless --levels gives them. Colorbars are below the maps for wide
+      swaths and to the right of them for tall ones (height / width > 1); the upper map has no longitude labels.
+  (e) rain area of the swath: pcp_conv_area (red), pcp_strat_area (green) [10^3 km^2]
+  (f) 99th percentile of the hourly rain rate in the convective (qpe_conv_p99, red) and stratiform (qpe_strat_p99,
+      green) part of the swath [mm/h]
+  (g) hourly rain volume of the swath: total_rainvolume (black), conv_rainvolume (red), strat_rainvolume (green)
+      [10^6 m^3 per hour]
+  (e)-(g) are made when the stats file has the variables (the track-matched QPE of run_trackpcp.py, pass that file with
+  --stats-file); the records are hourly, drawn as markers joined by straight lines
   In (b)-(d) the thick solid lines are the running median (the series the staging thresholds, window from the stats
   file), the thin dashed lines of the same color the raw values. The series panels are shaded by lifecycle stage
   (stage names written in each panel), with a strip for the times the MCS criteria are met.
@@ -24,6 +40,8 @@ real tracks. One 2x2 figure per track:
 usage:
   plot_mcs_radar_lifecycle.py --config MCS_CONFIG.yml --outdir DIR --tracks 4525 12202
   plot_mcs_radar_lifecycle.py --config MCS_CONFIG.yml --outdir DIR --select evaluated --workers 8
+  plot_mcs_radar_lifecycle.py --config MCS_CONFIG.yml --outdir DIR --tracks 47497 \\
+      --stats-file .../trackpcp/mcs_tracks_final_qpe_20250601.0000_20250701.0000.nc        (adds the rain map and panels e-g)
 
 --tracks are track numbers of the stats file (= pixel tracknumber, index + 1). --select evaluated plots every MCS
 whose lifecycle was evaluated. Figures go to <outdir>/<group>/<prefix>mcs<N>_lifecycle.png, where the group describes the
@@ -72,7 +90,21 @@ DBZ_NORM = BoundaryNorm(DBZ_LEVELS, ncolors=DBZ_CMAP.N, clip=True)
 # tick and axis labels, panel titles and legends are 2x the former point sizes. The annotations inside the plots
 # (snapshot times, stage names, line-threshold text) and all line widths and marker sizes grow with the canvas only.
 FIG_SCALE = 1.5
-FIG_SIZE = (15.5 * FIG_SCALE, 11.2 * FIG_SCALE)
+FIG_SIZE = (15.5 * FIG_SCALE, 11.2 * FIG_SCALE)    # the former 2x2 canvas (the font and line scaling above refer to it)
+# Gridspec layout [inches]: the time-series panels have one size (series_w x the height that 3 rows give); the map column is as
+# wide as the swath's aspect ratio needs, between map_w_range x series_w (the extent is widened to fill what remains)
+LAYOUT = dict(height=18.0, left=1.3, right=0.9, top=1.9, bottom=2.4, gap_map=1.7, gap_cols=2.3, hspace=1.15,
+              series_w=8.0, map_w_range=(0.9, 1.4), cb_pad=0.85, cb_h=0.40, cb_below=1.0,
+              # two stacked maps (rain map present): width limits x series_w, gap between the maps (the lower map's title),
+              # pad below the upper map's colorbar (no longitude labels there), vertical colorbar: gap, width, room for labels
+              map_w_range2=(0.5, 1.4), map_gap=0.55, cb_pad_top=0.15, cb_below_top=0.95, cbv_pad=0.30, cbv_w=0.40, cbv_room=1.6)
+CBAR_VERTICAL_ABOVE = 1.0     # swath height / width above this: colorbars to the right of the maps, else below them
+RAIN_VARS = {"e": ("pcp_conv_area", "pcp_strat_area"), "f": ("qpe_conv_p99", "qpe_strat_p99"),
+             "g": ("total_rainvolume", "conv_rainvolume", "strat_rainvolume")}
+# Rain-rate color levels of the rain map: fractions of the track's peak (finest steps at the high end); same function as in
+# conus_tracking/src/trackpcp_tracks/plots.py
+RAIN_FRACTIONS = (0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+RAIN_LEVELS_FIXED = [1, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 500]     # mm/day, when there is no peak to scale to
 DPI = 100
 FS = dict(tick=20, label=20, title=23, legend=17, figlegend=19, figlegend_title=18, cbar=18, suptitle=24, grid=18)
 FS_ANNOT = dict(snapshot=8.5 * FIG_SCALE, stage=7.5 * FIG_SCALE, thresh=8.5 * FIG_SCALE)
@@ -96,6 +128,7 @@ def paths_from_config(config_file):
         "smooth_hour": float(cfg.get("mcs_lifecycle_smooth_hour", 0.5)),
         "sf_area_min": float(cfg.get("mcs_lifecycle_sf_area_min", 0.0)),
         "pixel_km": float(cfg.get("pixel_radius", 3.0)),
+        "dates": dates,
     }
 
 
@@ -157,6 +190,10 @@ def load_track(ds, tn, peak_var, smooth_hour=0.5, sf_area_min=0.0):
     params = {"mcs_lifecycle_smooth_hour": smooth_hour, "mcs_lifecycle_sf_area_min": sf_area_min}
     conv_s, major_s, strat_s = smooth_inputs(conv, major, strat, hours, params)
     eth20, eth40 = g("maxETH_20dbz"), g("maxETH_40dbz")
+    # track-matched QPE (run_trackpcp.py): hourly records, NaN at the other steps; plotted at the valid time of the record
+    precip = {v: g(v) for grp in RAIN_VARS.values() for v in grp if v in ds}
+    pcp_t = g("pcp_time") if "pcp_time" in ds else bt
+    pcp_hours = np.where(np.isfinite(pcp_t), (pcp_t - bt[0]) / 3600.0, hours)
     return {
         "tn": tn, "dur": dur, "bt": bt, "hours": hours, "totals": totals,
         "dt_h": float(ds.attrs.get("time_resolution_hour", 1.0 / 12.0)),
@@ -167,6 +204,7 @@ def load_track(ds, tn, peak_var, smooth_hour=0.5, sf_area_min=0.0):
         "peak": peak, "peak_smooth": running_median(np.nan_to_num(peak, nan=0.0), hours, smooth_hour),
         "smooth_hour": smooth_hour, "radius_km": ds.attrs.get("conv_dilate_radius_km", None),
         "eth20": eth20, "eth40": eth40,
+        "precip": precip, "pcp_hours": pcp_hours,
         "eth20_s": running_median(eth20, hours, smooth_hour, skipna=True),
         "eth40_s": running_median(eth40, hours, smooth_hour, skipna=True),
         "conv_major": major, "conv_major_s": major_s, "stage": stage,
@@ -318,9 +356,73 @@ def label_snapshots(ax, t, idx, fontsize=FS_ANNOT["snapshot"]):
                     arrowprops=dict(arrowstyle="-", lw=0.6 * FIG_SCALE, color="0.25", shrinkA=0, shrinkB=3) if r > 0.1 else None)
 
 
-def draw_map(ax, t, files, epoch, args, panel_aspect):
+def auto_rain_levels(rate):
+    """
+    Rain-rate color levels [mm/day] that emphasize the peak: the track's peak rain rate x RAIN_FRACTIONS rounded to 2
+    significant digits (steps of 10 % of the peak at the high end; the peak pixel is always in the top color).
+    """
+    r = np.asarray(rate, dtype=float)
+    r = r[np.isfinite(r)]
+    peak = float(r.max()) if r.size else 0.0
+    if not peak > 0:
+        return list(RAIN_LEVELS_FIXED)
+    levels = sorted(set(float(f"{peak * f:.2g}") for f in RAIN_FRACTIONS))
+    return levels if len(levels) >= 3 else list(RAIN_LEVELS_FIXED)
+
+
+def rain_cmap_norm(levels):
+    try:
+        import colormaps as cmaps
+        base = cmaps.WhBlGrYeRe
+    except ImportError:
+        base = plt.get_cmap("YlGnBu")
+    cmap = base.resampled(len(levels) + 1)
+    return cmap, BoundaryNorm(levels, ncolors=cmap.N, extend="both")
+
+
+def load_rain_map(pcp_dir, dates, tn, shape):
+    """
+    Mean rain rate over the lifetime of one track on the pixel-file grid: (dict, "") or (None, reason). The pixel table of
+    run_trackpcp.py (trackpcp_pixels_<dates>.parquet) has pix_index (flattened grid index), accum_mm and rate_mm_day.
+    """
+    f = os.path.join(pcp_dir, f"trackpcp_pixels_{dates}.parquet")
+    if not os.path.isfile(f):
+        return None, f"{f} not found"
+    import pyarrow.parquet as pq
+    tab = pq.read_table(f, filters=[("track_number", "==", int(tn))], columns=["pix_index", "accum_mm", "rate_mm_day"]).to_pandas()
+    if len(tab) == 0:
+        return None, "the track has no pixels in the pixel table"
+    rate = np.full(shape[0] * shape[1], np.nan, dtype=np.float32)
+    rate[tab["pix_index"].values.astype(np.int64)] = tab["rate_mm_day"].values
+    return {"rate": rate.reshape(shape), "rate_max": float(tab["rate_mm_day"].max()),
+            "accum_max": float(tab["accum_mm"].max())}, ""
+
+
+def map_decor(ax, lon_labels=True, n_lon=5):
+    """State lines and gridlines with tick labels (no longitude labels when lon_labels is False; about n_lon of them)."""
+    states = cfeature.NaturalEarthFeature("cultural", "admin_1_states_provinces_lakes", "50m")
+    ax.add_feature(states, edgecolor="gray", facecolor="none", linewidth=0.5 * FIG_SCALE, zorder=1)
+    gl = ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=True, linewidth=0.3 * FIG_SCALE, linestyle="--", color="gray")
+    gl.top_labels = False
+    gl.right_labels = False
+    gl.bottom_labels = lon_labels
+    gl.xlabel_style = {"size": FS["grid"]}
+    gl.ylabel_style = {"size": FS["grid"]}
+    gl.xlocator = mticker.MaxNLocator(n_lon)
+    gl.ylocator = mticker.MaxNLocator(5)
+
+
+def swath_aspect(box, margin):
+    """Height / width of the swath box plus margin in km (the longitude extent is scaled with cos(latitude))."""
+    lat_c = 0.5 * (box[2] + box[3])
+    half_h = 0.5 * (box[3] - box[2]) + margin
+    half_w = 0.5 * (box[1] - box[0]) + margin
+    return half_h / (half_w * np.cos(np.deg2rad(lat_c)))
+
+
+def draw_map(ax, t, files, epoch, args, panel_aspect, swath=None, lon_labels=True, n_lon=5):
     nframes, amin, amax, margin = args.nframes, args.alpha_min, args.alpha_max, args.margin
-    box, step_files, lon, lat = track_swath(t, files, epoch)
+    box, step_files, lon, lat = swath if swath is not None else track_swath(t, files, epoch)
     lat_c, lon_c = 0.5 * (box[2] + box[3]), 0.5 * (box[0] + box[1])
     half_h = 0.5 * (box[3] - box[2]) + margin
     half_w = 0.5 * (box[1] - box[0]) + margin
@@ -380,15 +482,7 @@ def draw_map(ax, t, files, epoch, args, panel_aspect):
     elif fill_diff and max(fill_diff) > 0.01 * max(float(np.nanmax(t["conv_major"])), 1.0):
         print(f"MCS {t['tn']}: WARNING longest group differs from the stored conv_majoraxis by up to "
               f"{max(fill_diff):.1f} km", flush=True)
-    states = cfeature.NaturalEarthFeature("cultural", "admin_1_states_provinces_lakes", "50m")
-    ax.add_feature(states, edgecolor="gray", facecolor="none", linewidth=0.5 * FIG_SCALE, zorder=1)
-    gl = ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=True, linewidth=0.3 * FIG_SCALE, linestyle="--", color="gray")
-    gl.top_labels = False
-    gl.right_labels = False
-    gl.xlabel_style = {"size": FS["grid"]}
-    gl.ylabel_style = {"size": FS["grid"]}
-    gl.xlocator = mticker.MaxNLocator(5)
-    gl.ylocator = mticker.MaxNLocator(5)
+    map_decor(ax, lon_labels, n_lon)
 
     for j, i in enumerate(idx):
         sc = STAGE_DOT.get(int(t["stage"][i]), "#9e9e9e") if t["evaluated"] else "#9e9e9e"
@@ -399,7 +493,34 @@ def draw_map(ax, t, files, epoch, args, panel_aspect):
                 arrowprops=dict(arrowstyle="-|>", color="k", lw=2.6 * FIG_SCALE, shrinkA=0, shrinkB=0,
                                 mutation_scale=22 * FIG_SCALE))
     ax.scatter([t["lon"][0]], [t["lat"][0]], s=70 * FIG_SCALE ** 2, c="k", zorder=22, transform=ccrs.PlateCarree())
-    return cf, idx, peak_hour, sigma_hours
+    return cf, idx, peak_hour, sigma_hours, ext, sl, lon, lat
+
+
+def note_corner(rate):
+    """Corner of the rain map ((x, y), va, ha in axes fractions) where a text box covers the fewest rain pixels."""
+    ny, nx = rate.shape
+    h, w = max(1, int(0.25 * ny)), max(1, int(0.5 * nx))
+    valid = np.isfinite(rate)
+    # the row index grows northward: the last rows are the top of the map
+    counts = {("top", "left"): valid[ny - h:, :w].sum(), ("top", "right"): valid[ny - h:, nx - w:].sum(),
+              ("bottom", "left"): valid[:h, :w].sum(), ("bottom", "right"): valid[:h, nx - w:].sum()}
+    best = min(counts, key=counts.get)                       # a tie goes to the first: top left
+    (ypos, va) = (0.98, "top") if best[0] == "top" else (0.02, "bottom")
+    (xpos, ha) = (0.02, "left") if best[1] == "left" else (0.98, "right")
+    return (xpos, ypos), va, ha
+
+
+def draw_rain_map(ax, t, rmap, levels, ext, sl, lon, lat, lon_labels=True, n_lon=5):
+    """Mean rain rate [mm/day] over the lifetime on the extent of the snapshot map, with the path of the centroid."""
+    ax.set_extent(ext, crs=ccrs.PlateCarree())
+    ax.set_aspect("auto")
+    cmap, norm = rain_cmap_norm(levels)
+    pm = ax.pcolormesh(lon[sl], lat[sl], np.ma.masked_invalid(rmap["rate"][sl]), cmap=cmap, norm=norm,
+                       transform=ccrs.PlateCarree(), zorder=2, shading="auto")
+    map_decor(ax, lon_labels, n_lon)
+    ax.plot(t["lon"], t["lat"], color="k", lw=1.2 * FIG_SCALE, transform=ccrs.PlateCarree(), zorder=5)
+    ax.scatter([t["lon"][0]], [t["lat"][0]], s=40 * FIG_SCALE ** 2, c="k", zorder=6, transform=ccrs.PlateCarree())
+    return pm
 
 
 ###############################################################################
@@ -445,7 +566,8 @@ def mcs_strip(ax, t):
             i += 1
 
 
-def style_series(ax, t, title, ylabel, ylim_top, peak_hour, legend_handles=None, label_y=0.07, legend_loc=("upper right", None)):
+def style_series(ax, t, title, ylabel, ylim_top, peak_hour, legend_handles=None, label_y=0.07, legend_loc=("upper right", None),
+                 legend=True):
     shade_stages(ax, t, label=True, label_y=label_y)
     mcs_strip(ax, t)
     ax.axvline(peak_hour, color="k", ls="--", lw=1.0 * FIG_SCALE, zorder=1)
@@ -455,8 +577,11 @@ def style_series(ax, t, title, ylabel, ylim_top, peak_hour, legend_handles=None,
     ax.set_title(title, loc="left", fontsize=FS["title"])
     ax.set_ylabel(ylabel, fontsize=FS["label"])
     ax.tick_params(labelsize=FS["tick"])
+    ax.tick_params(axis="x", pad=9)          # keeps the first x tick label off the "0" of the y axis
     ax.grid(alpha=0.35, ls="--")
     loc, anchor = legend_loc
+    if not legend:
+        return
     if legend_handles is None:
         ax.legend(loc=loc, bbox_to_anchor=anchor, fontsize=FS["legend"], framealpha=0.9)
     else:
@@ -499,25 +624,136 @@ def plot_pair(ax, hours, raw, smoothed, color, label):
     return ln
 
 
+RAIN_STYLE = {
+    "total_rainvolume": ("k", "Total"), "conv_rainvolume": ("red", "Conv"), "strat_rainvolume": ("green", "Strat"),
+    "qpe_conv_p99": ("red", "Conv"), "qpe_strat_p99": ("green", "Strat"),
+    "pcp_conv_area": ("red", "Conv"), "pcp_strat_area": ("green", "Strat"),
+}
+RAIN_PANEL = {      # title, y label, factor applied to the stored values
+    "e": ("Rain area of the swath", "Rain area (x10$^3$ km$^2$)", 1e-3),
+    "f": ("99th percentile hourly rain rate", "Rain rate p99 (mm h$^{-1}$)", 1.0),
+    "g": ("Hourly rain volume of the swath", "Rain volume (10$^6$ m$^3$ h$^{-1}$)", 1.0),
+}
+
+
+def draw_rain_panel(ax, t, kind, names, letter, peak_hour):
+    """Hourly records of the track-matched QPE: markers joined by straight lines through the valid records."""
+    h = t["pcp_hours"]
+    title, ylabel, factor = RAIN_PANEL[kind]
+    series = []
+    for v in names:
+        y = t["precip"][v] * factor
+        ok = np.isfinite(y) & np.isfinite(h)
+        color, label = RAIN_STYLE[v]
+        if ok.any():
+            ax.plot(h[ok], y[ok], "o-", color=color, ms=MS, lw=LW, label=label, zorder=4)
+        series.append(np.where(ok, y, np.nan))
+    top = max((float(np.nanmax(y)) for y in series if np.isfinite(y).any()), default=0.0)
+    ylim = 1.08 * top if top > 0 else 1.0
+    if top <= 0:
+        ax.text(0.5, 0.5, "no QPE record", transform=ax.transAxes, ha="center", va="center", fontsize=FS["label"], color="0.4",
+                zorder=6)
+    loc = legend_corner(ax, t["hours"], [y / ylim for y in series], [RAIN_STYLE[v][1] for v in names]) if top > 0 \
+        else ("upper right", None)
+    style_series(ax, t, f"({letter}) {title}", ylabel, ylim, peak_hour, legend_loc=loc, legend=top > 0)
+
+
+def rain_panels(t):
+    """The rain panels that this track's stats have variables for: [('e', variables), ('f', ...), ('g', ...)]."""
+    out = []
+    for kind, names in RAIN_VARS.items():
+        have = [v for v in names if v in t["precip"]]
+        if have:
+            out.append((kind, have))
+    return out
+
+
 def make_figure(t, group, files, epoch, args, line_thresh, outfile):
-    fig = plt.figure(figsize=FIG_SIZE, dpi=DPI, facecolor="w")
-    gs = fig.add_gridspec(2, 2, width_ratios=[1.3, 1.0], wspace=0.17, hspace=0.32, left=0.05, right=0.945, top=0.865,
-                          bottom=0.15)
-    ax_map = fig.add_subplot(gs[0, 0], projection=ccrs.PlateCarree())
-    ax_a = fig.add_subplot(gs[0, 1])
-    ax_e = fig.add_subplot(gs[1, 0])
-    ax_s = fig.add_subplot(gs[1, 1])
-    # the colorbar first (opaque colors: the snapshots have different alpha), so that the map panel has its final
-    # size when the extent is chosen
-    sm = plt.cm.ScalarMappable(norm=DBZ_NORM, cmap=DBZ_CMAP)
-    cb = fig.colorbar(sm, ax=ax_map, orientation="horizontal", fraction=0.05, pad=0.12, extend="max")
+    L = LAYOUT
+    rain = rain_panels(t)
+    # the swath first: the width of the map column follows its aspect ratio
+    swath = track_swath(t, files, epoch)
+    # mean rain rate over the lifetime (second map): needs the pixel table of run_trackpcp.py
+    rmap = None
+    pcp_dir = getattr(args, "pcp_dir", None)
+    if pcp_dir:
+        rmap, why = load_rain_map(pcp_dir, args.paths["dates"], t["tn"], swath[2].shape)
+        if rmap is None:
+            print(f"MCS {t['tn']}: no rain map ({why}), one map only", flush=True)
+    two = rmap is not None
+    aspect = swath_aspect(swath[0], args.margin)
+    vertical = two and aspect > CBAR_VERTICAL_ABOVE     # tall swath: colorbars to the right of the maps
+    height = L["height"]
+    plot_h = height - L["top"] - L["bottom"]
+    sw = L["series_w"]
+    if not two:
+        map_h = plot_h - (L["cb_pad"] + L["cb_h"] + L["cb_below"])
+        wr = L["map_w_range"]
+    elif vertical:
+        map_h = (plot_h - L["map_gap"] - L["cb_pad"]) / 2.0        # the pad below holds the longitude labels of the lower map
+        wr = L["map_w_range2"]
+    else:
+        fixed = (L["cb_pad_top"] + L["cb_h"] + L["cb_below_top"]) + L["map_gap"] + (L["cb_pad"] + L["cb_h"] + L["cb_below"])
+        map_h = (plot_h - fixed) / 2.0
+        wr = L["map_w_range2"]
+    map_w = float(np.clip(map_h / aspect, wr[0] * sw, wr[1] * sw))
+    col0_w = map_w + (L["cbv_pad"] + L["cbv_w"] + L["cbv_room"] if vertical else 0.0)
+    n_lon = int(np.clip(map_w // 1.1, 3, 5))          # longitude labels (about 0.85 in each): fewer on a narrow map
+    widths = [col0_w, L["gap_map"], sw] + ([L["gap_cols"], sw] if rain else [])
+    width = L["left"] + sum(widths) + L["right"]
+    fig = plt.figure(figsize=(width, height), dpi=DPI, facecolor="w")
+    panel_h = (plot_h - 2 * L["hspace"]) / 3.0
+    gs = fig.add_gridspec(3, len(widths), width_ratios=widths, wspace=0.0, hspace=L["hspace"] / panel_h,
+                          left=L["left"] / width, right=1 - L["right"] / width, top=1 - L["top"] / height,
+                          bottom=L["bottom"] / height)
+    # column 0: the maps; the colorbars have rows / columns of their own (they take nothing from the map axes)
+    pc = ccrs.PlateCarree()
+    ax_rmap = cax_r = None
+    if not two:
+        gm = gs[:, 0].subgridspec(4, 1, height_ratios=[map_h, L["cb_pad"], L["cb_h"], L["cb_below"]], hspace=0.0)
+        ax_map, cax = fig.add_subplot(gm[0], projection=pc), fig.add_subplot(gm[2])
+    elif vertical:
+        gm = gs[:, 0].subgridspec(4, 4, height_ratios=[map_h, L["map_gap"], map_h, L["cb_pad"]],
+                                  width_ratios=[map_w, L["cbv_pad"], L["cbv_w"], L["cbv_room"]], hspace=0.0, wspace=0.0)
+        ax_map, cax = fig.add_subplot(gm[0, 0], projection=pc), fig.add_subplot(gm[0, 2])
+        ax_rmap, cax_r = fig.add_subplot(gm[2, 0], projection=pc), fig.add_subplot(gm[2, 2])
+    else:
+        gm = gs[:, 0].subgridspec(9, 1, height_ratios=[map_h, L["cb_pad_top"], L["cb_h"], L["cb_below_top"], L["map_gap"],
+                                                        map_h, L["cb_pad"], L["cb_h"], L["cb_below"]], hspace=0.0)
+        ax_map, cax = fig.add_subplot(gm[0], projection=pc), fig.add_subplot(gm[2])
+        ax_rmap, cax_r = fig.add_subplot(gm[5], projection=pc), fig.add_subplot(gm[7])
+    # column 2: (b) (c) (d); column 4 (with rain variables): (e) (f) (g); every panel of the same size
+    ax_a = fig.add_subplot(gs[0, 2])
+    ax_e = fig.add_subplot(gs[1, 2])
+    ax_s = fig.add_subplot(gs[2, 2])
+    ax_rain = [fig.add_subplot(gs[i, 4]) for i in range(len(rain))]
+    orient = "vertical" if vertical else "horizontal"
+    sm = plt.cm.ScalarMappable(norm=DBZ_NORM, cmap=DBZ_CMAP)      # opaque colors: the snapshots have different alpha
+    cb = fig.colorbar(sm, cax=cax, orientation=orient, extend="max")
     cb.set_label("Composite reflectivity (dBZ)", fontsize=FS["label"])
     cb.ax.tick_params(labelsize=FS["tick"])
     bb = ax_map.get_window_extent()
-    cf, idx, peak_hour, sigma_hours = draw_map(ax_map, t, files, epoch, args, panel_aspect=bb.width / bb.height)
-    ax_map.set_title(f"(a) Composite reflectivity, {len(idx)} snapshots", loc="left", fontsize=FS["title"])
+    cf, idx, peak_hour, sigma_hours, ext, sl, glon, glat = draw_map(ax_map, t, files, epoch, args, panel_aspect=bb.width / bb.height,
+                                                                    swath=swath, lon_labels=not two, n_lon=n_lon)
+    ax_map.set_title("(a1) Reflectivity" if two else f"(a) Composite reflectivity, {len(idx)} snapshots", loc="left",
+                     fontsize=FS["title"])
     label_snapshots(ax_map, t, idx)
-
+    if two:
+        levels = list(args.levels) if getattr(args, "levels", None) else auto_rain_levels(rmap["rate"])
+        pm = draw_rain_map(ax_rmap, t, rmap, levels, ext, sl, glon, glat, lon_labels=True, n_lon=n_lon)
+        ax_rmap.set_title("(a2) Mean rain rate", loc="left", fontsize=FS["title"])
+        days = rmap["accum_max"] / rmap["rate_max"] if rmap["rate_max"] > 0 else float("nan")
+        (nx_, ny_), nva, nha = note_corner(rmap["rate"][sl])
+        ax_rmap.text(nx_, ny_, f"over the lifetime\nmax {rmap['rate_max']:.0f} mm/day\n{rmap['accum_max']:.0f} mm in {24 * days:.1f} h",
+                     transform=ax_rmap.transAxes, va=nva, ha=nha, fontsize=FS_ANNOT["snapshot"] * 1.5, zorder=30,
+                     bbox=dict(facecolor="white", edgecolor="none", alpha=0.8, pad=1.5))
+        cbr = fig.colorbar(pm, cax=cax_r, orientation=orient, extend="both")
+        ticks = levels[::2] + ([levels[-1]] if (len(levels) - 1) % 2 else [])
+        cbr.set_ticks(ticks)
+        cbr.ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
+        cbr.ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
+        cbr.set_label("Rain rate (mm/day)", fontsize=FS["label"])
+        cbr.ax.tick_params(labelsize=FS["tick"])
     h = t["hours"]
     # (b) stratiform area (left axis) and convective area (right axis); thick = running median, thin dashed = raw
     strat, strat_s = t["strat_area"] / 1e3, t["strat_area_s"] / 1e3
@@ -551,7 +787,6 @@ def make_figure(t, group, files, epoch, args, line_thresh, outfile):
     style_series(ax_e, t, "(c) Convective echo-top height", "ETH (km)", ylim_eth, peak_hour,
                  legend_loc=legend_corner(ax_e, h, [t["eth20"] / ylim_eth, t["eth40"] / ylim_eth, t["eth20_s"] / ylim_eth,
                                                     t["eth40_s"] / ylim_eth], ["Max 20 dBZ", "Max 40 dBZ"]))
-    ax_e.set_xlabel("Hours since detection", fontsize=FS["label"])
     # (d) convective length
     diam = 2.0 * np.sqrt(np.clip(t["conv_area"], 0, None) / np.pi)
     diam_s = 2.0 * np.sqrt(np.clip(t["conv_area_s"], 0, None) / np.pi)
@@ -571,6 +806,12 @@ def make_figure(t, group, files, epoch, args, line_thresh, outfile):
                  legend_loc=legend_corner(ax_s, h, [t["conv_major"] / ylim_len, t["conv_major_s"] / ylim_len, diam / ylim_len],
                                           ["Conv major axis", "Conv equivalent diameter"]))
     ax_s.set_xlabel("Hours since detection", fontsize=FS["label"])
+    # (e) (f): hourly rain records of the swath (the lettering follows the panels that exist)
+    letters = iter("efg")
+    for ax_r, (kind, names) in zip(ax_rain, rain):
+        draw_rain_panel(ax_r, t, kind, names, next(letters), peak_hour)
+    if ax_rain:
+        ax_rain[-1].set_xlabel("Hours since detection", fontsize=FS["label"])
 
     if t["evaluated"]:
         life = (f"lifecycle: {t['ncycles']} line episode(s), {'complete' if t['complete'] else 'incomplete'}  |  "
@@ -620,6 +861,14 @@ def main():
     ap = argparse.ArgumentParser(description="Life cycle figure (map snapshots + stage-shaded series) for MCS tracks")
     ap.add_argument("--config", required=True, help="MCS tracking yaml (radar_feature)")
     ap.add_argument("--outdir", required=True)
+    ap.add_argument("--stats-file", default=None,
+                    help="stats file to use instead of the mcsrobust_filebase file of the config, e.g. the final stats with the "
+                         "track-matched QPE (trackpcp/mcs_tracks_final_qpe_<period>.nc), which adds the rain panels (e)-(g) and the rain map")
+    ap.add_argument("--pcp-dir", default=None,
+                    help="folder of trackpcp_pixels_<period>.parquet (run_trackpcp.py), for the rain map; default: the folder "
+                         "of --stats-file. Without the table there is one map only")
+    ap.add_argument("--levels", type=float, nargs="+", default=None,
+                    help="rain-rate color levels of the rain map [mm/day]; default: fractions of the track's peak rain rate")
     ap.add_argument("--tracks", type=int, nargs="+", help="track numbers (stats index + 1)")
     ap.add_argument("--select", choices=["evaluated"], help="plot every MCS whose lifecycle was evaluated")
     ap.add_argument("--nframes", type=int, default=8, help="number of reflectivity snapshots (default 8)")
@@ -648,6 +897,12 @@ def main():
     if not args.tracks and not args.select:
         ap.error("give --tracks or --select evaluated")
     args.paths = paths_from_config(args.config)
+    if args.stats_file:
+        if not os.path.isfile(args.stats_file):
+            ap.error(f"--stats-file not found: {args.stats_file}")
+        args.paths["stats"] = args.stats_file
+        if args.pcp_dir is None:
+            args.pcp_dir = os.path.dirname(os.path.abspath(args.stats_file))
 
     ds = xr.open_dataset(args.paths["stats"], mask_and_scale=True, decode_times=False)
     tracks = list(args.tracks or [])
