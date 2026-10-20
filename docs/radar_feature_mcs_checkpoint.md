@@ -95,16 +95,21 @@ Found on the May 2025 month (8,872 files, 239,963 tracks). Each change has a tes
   `pyflextrkr.mcs_lifecycle`, which stays here.
 - Not run: the radar workflow on another dataset than MRMS; `tests/run_demo_tests.py --all` on the branch.
 
-## 5. Before the public pull request: what the public CI would say
+## 5. What the public CI said about this branch (found and fixed on 2026-10-20)
 
 The public CI (`.github/workflows/test.yml`) runs `pytest tests/` after `pip install -r requirements-ci.txt` and `pip install -e .`. A venv built from the same two requirements files (Python 3.12, cartopy 0.26, matplotlib 3.11)
-ran the tests of this branch on 2026-10-20: 549 passed, 94 skipped, 2 collection errors and 6 failures, all from two packages that the CI environment does not install:
+ran the tests of this branch: 549 passed, 94 skipped, 2 collection errors and 6 failures, all from two packages that the CI environment does not install (a third module with the same import, `mapfeature_driver.py`, showed up once the
+collection errors were gone). Both are fixed:
 
-- **`distributed`**: `regionprops_driver.py` and `movement_speed.py` (so also `tests/test_movement_speed.py` through `tests/movement_speed_reference.py`, and `tests/test_regionprops_radar_feature.py`) import `dask.distributed` at the top
-  of the module; `dask` alone is installed in the CI, so the two test modules cannot be imported and the whole run stops at collection. The visualization runner had the same defect and now imports `dask.distributed` only for the parallel mode
-  (`pyflextrkr/visualization/runner.py`, `tests/test_viz_imports.py`); the same change, or `distributed` in `requirements.txt` and `requirements-ci.txt`, is needed here.
-- **`pyarrow`**: the 6 failures of `tests/test_trackpcp_synthetic.py` are "pyarrow is required for parquet support" (the Parquet tables of `trackpcp`); `pyarrow` is in neither requirements file. Add it to both, or skip these tests without it
-  (`pytest.importorskip`).
+- **`distributed`**: `regionprops_driver.py`, `mapfeature_driver.py` and `movement_speed.py` (and the frozen copy `tests/movement_speed_reference.py`) imported `dask.distributed` at the top of the module. `dask` alone is installed in the CI, so
+  `tests/test_movement_speed.py` and `tests/test_regionprops_radar_feature.py` could not be collected, which stops the whole run. `wait` is now imported in the parallel branch, where it is used (as in
+  `pyflextrkr/visualization/runner.py`); `tests/test_imports_without_distributed.py` imports the modules of this workflow with `distributed` blocked. Eight other drivers (`idfeature_driver.py`, `trackstats_driver.py`, ...) still import it at
+  the top; no CI test imports them (`test_idfeature_driver_batching.py` has its own `importorskip`).
+- **`pyarrow`**: the 6 failures of `tests/test_trackpcp_synthetic.py` were "pyarrow is required for parquet support" (the Parquet tables of `trackpcp`). `pyarrow` is now in `requirements.txt` and `environment.yml`; the conda-forge
+  recipe needs it too when this work reaches the public repository.
 
-The CI of the visualization pull request also found two problems that are specific to its environment and are worth checking here: text files that are read without `encoding='utf-8'` (the default on Windows is cp1252), and tests that
-assume the order or the separator of paths. The full suite passes in the development environment (697 tests).
+With both, the same venv (with `pyarrow` installed from `requirements.txt`, as the CI does) gives 644 passed, 94 skipped, no error and no failure; the development environment gives 698 passed (`-m "not local and not demo"`). The about 90 tests of the two
+modules that the collection errors had hidden now run in the CI.
+
+Still to expect when this branch becomes a public pull request: Windows and macOS (these tests have run on Linux only). The CI of the visualization pull request found test-side problems there that are worth checking: text files read
+without `encoding='utf-8'` (the default on Windows is cp1252), expected strings with `/` where Windows has `\`, and `bash` on Windows paths.

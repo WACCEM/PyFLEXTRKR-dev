@@ -4,6 +4,7 @@ Post-processing of a finished tracking with a gridded variable that was **not** 
 the tracked features, accumulated precipitation at every pixel of every track, and monthly precipitation maps by feature class.
 Written for hourly MRMS QPE and 5-minute radar-based tracks; the data may have its own files, naming, time axis (NetCDF files or a Zarr
 store) and any time resolution, but must be on the tracking grid (checked; the step aborts otherwise).
+The Parquet tables are written and read with `pyarrow` (a requirement of the package: `requirements.txt`, `environment.yml`).
 
 | step | function | output |
 |---|---|---|

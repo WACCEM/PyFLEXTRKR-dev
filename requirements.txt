@@ -8,6 +8,7 @@ joblib
 netcdf4
 numpy
 pandas
+pyarrow
 pytz
 PyYAML
 scikit-image>=0.22

@@ -1,6 +1,7 @@
 """
 Frozen copy of pyflextrkr/movement_speed.py as of commit b06ae17 (dense [file pairs x tracks] arrays), the reference that
-tests/test_movement_speed.py compares the memory-lean version against. Do not edit.
+tests/test_movement_speed.py compares the memory-lean version against. Do not edit; the one change is the place of the import of
+`wait` (inside the parallel branch, as in movement_speed.py: the CI environment has `dask` but not `distributed`), the logic is the old one.
 """
 from __future__ import division, print_function
 import sys
@@ -13,7 +14,6 @@ import xarray as xr
 from scipy.signal import fftconvolve
 from scipy.interpolate import interp1d
 import dask
-from dask.distributed import wait
 from pyflextrkr.ft_utilities import subset_files_timerange, get_pixel_area
 
 def movement_speed(
@@ -122,6 +122,7 @@ def movement_speed(
         final_result = results
     # Parallel
     elif run_parallel >= 1:
+        from dask.distributed import wait
         for ifile in range(0, nfiles-1):
             result = dask.delayed(movement_of_feature_fft)(
                 filepairs[ifile], ntracks,

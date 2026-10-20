@@ -10,7 +10,6 @@ import xarray as xr
 from scipy.signal import fftconvolve
 from scipy.interpolate import interp1d
 import dask
-from dask.distributed import wait
 from pyflextrkr.ft_utilities import subset_files_timerange, get_pixel_area
 
 def movement_speed(
@@ -120,6 +119,7 @@ def movement_speed(
         final_result = results
     # Parallel
     elif run_parallel >= 1:
+        from dask.distributed import wait       # only the parallel mode needs the `distributed` package (the CI environment has none)
         for ifile in range(0, nfiles-1):
             result = dask.delayed(movement_of_feature_fft)(
                 filepairs[ifile], ntracks,

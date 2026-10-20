@@ -5,7 +5,6 @@ import logging
 import numpy as np
 import xarray as xr
 import dask
-from dask.distributed import wait
 
 from pyflextrkr.ft_utilities import subset_files_timerange, match_pairs_to_files
 from pyflextrkr.smooth_trajectory import smooth_trajectory
@@ -181,6 +180,7 @@ def compute_regionprops(config):
         else:
             sys.exit('Valid parallelization flag not provided.')
     if run_parallel >= 1:
+        from dask.distributed import wait       # only the parallel mode needs the `distributed` package (the CI environment has none)
         results = dask.compute(*results)
         wait(results)
 
