@@ -16,8 +16,9 @@ folder. If that folder cannot be written (the read-only outputs of someone else'
 The images and animations of the documentation (about 60 MB, the README animations alone 42 MB) are not in the repository: they are assets of the release
 [`docs-assets`](https://github.com/FlexTRKR/PyFLEXTRKR/releases/tag/docs-assets), linked as
 `https://github.com/FlexTRKR/PyFLEXTRKR/releases/download/docs-assets/<file name>`. This keeps the clone at the size of the code and the images still show on GitHub. A new or re-rendered file is added with
-`gh release upload docs-assets <file>` (the same name with `--clobber` replaces a file, and every README that links it, also the ones of old versions, then shows the new picture: use a new name for a new version of a figure
-that an old README should keep). `tests/test_docs.py` checks that the markdown files only link images of this release.
+`gh release upload docs-assets <file> --repo FlexTRKR/PyFLEXTRKR` (the same name with `--clobber` replaces a file, and every README that links it, also the ones of old versions, then shows the new picture: use a new name for a new
+version of a figure that an old README should keep). How the release works, and the steps to add, replace and remove a file: [docs_assets.md](../docs_assets.md).
+`tests/test_docs.py` checks that the markdown files only link images of this release.
 
 ## The settings
 
