@@ -4,6 +4,7 @@ import xarray as xr
 from pyflextrkr import netcdf_io as net
 from pyflextrkr.idcells_reflectivity import get_composite_reflectivity_generic, subset_domain
 from pyflextrkr.label_and_grow_features import label_and_grow_features
+from pyflextrkr.combine_features import combine_features_with_share_boundary
 from pyflextrkr.steiner_func import (
     make_dilation_step_func, mod_steiner_classification, label_cells_fast, dilate_label_conv_mask,
 )
@@ -76,6 +77,12 @@ def idfeature_radar3d(
     expand_to_tertiary = config.get("feature_expand_tertiary", 0)
     feature_field_floor = config.get("feature_field_floor", None)
     miss_thresh = config.get("miss_thresh", None)
+    # Optional: combine the features that share a large part of their boundary (the detect-and-spread step cuts a
+    # large storm with several intense cores into pieces). A threshold set to null (None) turns its test off.
+    combine_features = config.get("combine_features_share_boundary", False)
+    combine_perim_frac_thresh = config.get("combine_perim_frac_thresh", 0.2)
+    combine_equiv_frac_thresh = config.get("combine_equiv_frac_thresh", 0.3)
+    combine_equiv_shape = config.get("combine_equiv_shape", "ellipse")
 
     # Steiner convective/stratiform classification parameters (follow the
     # cell-tracking identification config parameters)
@@ -205,6 +212,19 @@ def idfeature_radar3d(
         feature_number = featuredata["final_Feature_Number"]
         feature_pixel_type = featuredata["final_Feature_Type"]
         nfeatures = int(featuredata["final_nFeature"])
+        # Optional: combine features that share a large part of their boundary. Only the numbers of the labeled
+        # pixels change (feature_pixel_type and the Steiner fields do not), the features are renumbered by size.
+        if combine_features and nfeatures > 1:
+            feature_number, nfeatures, combine_info = combine_features_with_share_boundary(
+                feature_number,
+                perim_frac_thresh=combine_perim_frac_thresh,
+                equiv_frac_thresh=combine_equiv_frac_thresh,
+                equiv_shape=combine_equiv_shape,
+            )
+            logger.debug(
+                f"Combined features sharing a boundary: {combine_info['nfeatures_before']} -> {nfeatures} "
+                f"in {combine_info['npasses']} passes."
+            )
         # Recompute npix_feature directly from the labeled array (bincount),
         # rather than trusting the core/secondary-flag-derived counts, since
         # pixels exactly at the secondary threshold are included by growth
@@ -304,6 +324,14 @@ def idfeature_radar3d(
             'cell_number_source': cell_number_source,
             'conv_dilate_radius_km': conv_dilate_radius_km,
         }
+        # Recorded only when the option is on (the attributes of the files without it do not change)
+        if combine_features:
+            feature_params['combine_features_share_boundary'] = 1
+            feature_params['combine_equiv_shape'] = combine_equiv_shape
+            if combine_perim_frac_thresh is not None:
+                feature_params['combine_perim_frac_thresh'] = combine_perim_frac_thresh
+            if combine_equiv_frac_thresh is not None:
+                feature_params['combine_equiv_frac_thresh'] = combine_equiv_frac_thresh
         steiner_params = {
             'dx': dx,
             'dy': dy,

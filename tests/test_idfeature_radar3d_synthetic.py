@@ -407,3 +407,57 @@ class TestIdfeatureRadar3dConvFeatureNumber:
         assert np.all(cfn[dist <= 12e3] > 0)          # and everything within the radius is in
         assert ds['conv_feature_number'].attrs['dilation_radius_km'] == 12.0
         assert ds.attrs['conv_dilate_radius_km'] == 12.0
+
+
+class TestIdfeatureRadar3dCombineFeatures:
+    """combine_features_share_boundary: two cores inside one wide shield are two features, or one when the option is on."""
+
+    @staticmethod
+    def _run(tmp_path, **options):
+        tracking_outpath = str(tmp_path) + "/"
+        os.makedirs(tracking_outpath, exist_ok=True)
+        ds = _make_synthetic_dataset(is_3d=False)
+        # Two 45 dBZ cores in one 15 dBZ shield (rows 10-29, cols 10-49): detect-and-spread cuts it in two halves of
+        # 20 x 20 pixels that share a straight cut of 20 edges (0.25 of the perimeter of a half)
+        refl = np.full((1, NY, NX), -99.0, dtype=np.float32)
+        refl[0, 10:30, 10:50] = 15.0
+        refl[0, 17:23, 14:24] = 45.0
+        refl[0, 17:23, 36:46] = 45.0
+        ds['Reflectivity'] = ds['Reflectivity'].copy(data=refl)
+        fpath = os.path.join(tracking_outpath, 'input_two_cores.nc')
+        ds.to_netcdf(fpath)
+        config = _minimal_config(tracking_outpath)
+        config.update(options)
+        outfile = idfeature_radar3d(fpath, config)
+        return xr.open_dataset(outfile, decode_times=False, mask_and_scale=False)
+
+    def test_option_off_keeps_the_two_features(self, tmp_path):
+        ds = self._run(tmp_path)
+        assert int(ds['nfeatures'].values.squeeze()) == 2
+        assert ds['npix_feature'].values.tolist() == [400, 400]
+        assert 'combine_features_share_boundary' not in ds.attrs
+
+    def test_option_on_combines_them_and_keeps_the_rest(self, tmp_path):
+        off = self._run(tmp_path / 'off')
+        on = self._run(tmp_path / 'on', combine_features_share_boundary=True)
+        assert int(on['nfeatures'].values.squeeze()) == 1
+        assert on['npix_feature'].values.tolist() == [800]
+        number_on = on['feature_number'].values.squeeze()
+        assert set(np.unique(number_on)) == {0, 1}
+        # only the numbers change: the labeled pixels, the pixel types and the Steiner fields are the same
+        assert np.array_equal(number_on > 0, off['feature_number'].values.squeeze() > 0)
+        for name in ('feature_pixel_type', 'convsf', 'cell_number', 'conv_feature_number'):
+            assert np.array_equal(on[name].values, off[name].values, equal_nan=True), name
+        # the settings are recorded in the file
+        assert on.attrs['combine_features_share_boundary'] == 1
+        assert on.attrs['combine_perim_frac_thresh'] == 0.2 and on.attrs['combine_equiv_frac_thresh'] == 0.3
+        assert on.attrs['combine_equiv_shape'] == 'ellipse'
+
+    def test_thresholds_decide_and_null_turns_a_test_off(self, tmp_path):
+        strict = self._run(tmp_path / 'strict', combine_features_share_boundary=True,
+                           combine_perim_frac_thresh=0.4, combine_equiv_frac_thresh=None)
+        assert int(strict['nfeatures'].values.squeeze()) == 2
+        assert 'combine_equiv_frac_thresh' not in strict.attrs
+        equiv_only = self._run(tmp_path / 'equiv', combine_features_share_boundary=True,
+                               combine_perim_frac_thresh=None, combine_equiv_frac_thresh=0.2)
+        assert int(equiv_only['nfeatures'].values.squeeze()) == 1
