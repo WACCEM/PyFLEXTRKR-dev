@@ -152,6 +152,9 @@ def idfeature_driver(config):
     elif input_format.lower() == "netcdf":
 
         time_format = config["time_format"]
+        # Optional sub-folders of clouddata_path: strftime pattern of the folder name, e.g. '%Y%m%d' for one
+        # folder per day (None: the files are directly in clouddata_path)
+        subdir_format = config.get("clouddata_subdir_format", None)
 
         # Identify files to process
         infiles_info = subset_files_timerange(
@@ -160,10 +163,15 @@ def idfeature_driver(config):
             start_basetime=start_basetime,
             end_basetime=end_basetime,
             time_format=time_format,
+            subdir_format=subdir_format,
         )
         # Get file list
         rawdatafiles = infiles_info[0]
         nfiles = len(rawdatafiles)
+        if nfiles == 0:
+            logger.critical("ERROR: No files found in clouddata_path within the specified time range.")
+            logger.critical("Tracking will now exit.")
+            sys.exit()
         logger.info(f"Total number of files to process: {nfiles}")
 
         # Pre-compute grid area file if area_method is 'latlon'
@@ -222,6 +230,7 @@ def _open_combined_dataset(config):
             start_basetime=start_basetime,
             end_basetime=end_basetime,
             time_format=time_format,
+            subdir_format=config.get("clouddata_subdir_format", None),
         )
         files = infiles_info[0]
         nfiles = len(files)

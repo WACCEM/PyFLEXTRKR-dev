@@ -46,6 +46,11 @@ def load_config(config_file, make_dirs=True):
     enddate = config.get("enddate", None)
     # Get start/end date from input files if not specified
     if startdate is None or enddate is None:
+        # The dates cannot be derived from the files of sub-folders (the search below reads one folder only)
+        if config.get("clouddata_subdir_format", None) is not None:
+            raise ValueError(
+                "startdate and enddate must be set in the config when clouddata_subdir_format is set."
+            )
         # Get start/end Epoch time from all input files
         start_basetime, end_basetime = get_start_end_basetime_from_filenames(
             config["clouddata_path"],
@@ -226,12 +231,64 @@ def get_basetime_from_filename(
         files_timestring,
     )
 
+def list_input_subdirs(
+    data_path,
+    subdir_format,
+    start_basetime,
+    end_basetime,
+    pad_days=1,
+):
+    """
+    List the sub-folders of an input data directory that can hold files of a time range.
+
+    Large data sets are often stored in one sub-folder per day (e.g., YYYYMMDD) to keep the number of
+    files per folder small. Only the folders of the days within the time range are looked up, instead of
+    listing every folder of the data set.
+
+    Args:
+        data_path: string
+            Input data directory name.
+        subdir_format: string
+            strftime pattern of the sub-folder name relative to data_path, with a resolution of one day
+            or coarser, e.g., "%Y%m%d" (one folder per day), "%Y/%m/%d" (nested year/month/day folders),
+            "%Y%m" (one folder per month; a folder is listed once).
+        start_basetime: int
+            Start base time (Epoch time).
+        end_basetime: int
+            End base time (Epoch time).
+        pad_days: int (optional, default=1)
+            Number of days added before the start and after the end of the time range. The padding
+            finds a file that is stored in the folder of a neighboring day, at the cost of two more
+            folder reads.
+
+    Returns:
+        folders: list
+            Existing sub-folders (full path with the trailing "/"), in time order, without duplicates.
+            A folder that does not exist (e.g., a day without data) is skipped.
+    """
+    # First and last day (UTC) to look up
+    one_day = datetime.timedelta(days=1)
+    first_day = datetime.datetime.fromtimestamp(float(start_basetime), tz=utc).date() - pad_days * one_day
+    last_day = datetime.datetime.fromtimestamp(float(end_basetime), tz=utc).date() + pad_days * one_day
+
+    # Folder name of each day; a pattern coarser than a day gives the same folder for many days
+    folders = []
+    day = first_day
+    while day <= last_day:
+        folder = os.path.join(data_path, day.strftime(subdir_format)) + "/"
+        if folder not in folders and os.path.isdir(folder):
+            folders.append(folder)
+        day += one_day
+    return folders
+
+
 def subset_files_timerange(
     data_path,
     data_basename,
     start_basetime,
     end_basetime,
     time_format="yyyymodd_hhmmss",
+    subdir_format=None,
 ):
     """
     Subset files within given start and end time.
@@ -247,6 +304,10 @@ def subset_files_timerange(
             End base time (Epoch time).
         time_format: string (optional, default="yyyymodd_hhmmss")
             Specify file time format to extract date/time.
+        subdir_format: string (optional, default=None)
+            strftime pattern of the sub-folders of data_path that hold the files, e.g., "%Y%m%d" for one
+            folder per day (see list_input_subdirs). Only the folders of the days within the time range
+            are read. None: the files are directly in data_path.
 
     Returns:
         data_filenames: list
@@ -259,11 +320,28 @@ def subset_files_timerange(
             List of file time string.
     """
     logger = logging.getLogger(__name__)
-    # Get basetime for all files
-    data_filenames, files_basetime, \
-    files_datestring, files_timestring = get_basetime_from_filename(
-        data_path, data_basename, time_format=time_format,
-    )
+    if subdir_format is None:
+        # Get basetime for all files in data_path
+        data_filenames, files_basetime, \
+        files_datestring, files_timestring = get_basetime_from_filename(
+            data_path, data_basename, time_format=time_format,
+        )
+    else:
+        # Get basetime for the files in the sub-folders of the days within the time range
+        data_filenames, files_datestring, files_timestring = [], [], []
+        files_basetime = np.array([], dtype=int)
+        for folder in list_input_subdirs(data_path, subdir_format, start_basetime, end_basetime):
+            folder_info = get_basetime_from_filename(folder, data_basename, time_format=time_format)
+            data_filenames += folder_info[0]
+            files_basetime = np.concatenate((files_basetime, folder_info[1]))
+            files_datestring += folder_info[2]
+            files_timestring += folder_info[3]
+        # Sort by time, so that the order does not depend on the order of the folders
+        order = np.argsort(files_basetime, kind="stable")
+        files_basetime = files_basetime[order]
+        data_filenames = [data_filenames[i] for i in order]
+        files_datestring = [files_datestring[i] for i in order]
+        files_timestring = [files_timestring[i] for i in order]
 
     # Find basetime within the given range
     fidx = np.where((files_basetime >= start_basetime) & (files_basetime <= end_basetime))[0]
