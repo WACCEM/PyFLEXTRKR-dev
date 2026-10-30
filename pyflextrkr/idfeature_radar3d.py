@@ -83,8 +83,9 @@ def idfeature_radar3d(
     combine_perim_frac_thresh = config.get("combine_perim_frac_thresh", 0.2)
     combine_equiv_frac_thresh = config.get("combine_equiv_frac_thresh", 0.3)
     combine_equiv_shape = config.get("combine_equiv_shape", "ellipse")
-    # "all": every flagged pair is merged; "best": a feature joins only its best flagged larger neighbor (no bridging)
-    combine_join = config.get("combine_join", "all")
+    # "best" (default): a feature joins only its best flagged larger neighbor (no bridging of two large systems through a small
+    # piece); "all": every flagged pair is merged
+    combine_join = config.get("combine_join", "best")
 
     # Steiner convective/stratiform classification parameters (follow the
     # cell-tracking identification config parameters)

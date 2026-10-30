@@ -191,7 +191,7 @@ def combine_features_with_share_boundary(
     equiv_frac_thresh=0.3,
     equiv_shape="ellipse",
     max_iterations=10,
-    join="all",
+    join="best",
 ):
     """
     Combine features that share a large part of their boundary (optional step after detect-and-spread).
@@ -203,13 +203,16 @@ def combine_features_with_share_boundary(
     one feature), see join for which of them. The test is repeated on the merged features until nothing is flagged.
     Features that only touch over a short stretch, or at a corner point, are not merged.
 
+    join="best" (default): the smaller feature of a flagged pair joins only its best flagged larger neighbor, the one
+    with the highest score = fraction / threshold (the larger of the two tests when both are on; ties: the longer shared
+    boundary, then the lower label). The other neighbor joins in a later pass only if it is flagged against the merged
+    feature, and then it is the fraction of the smaller of the two that counts, so two large systems are not tied
+    together by the perimeter of a small piece between them. A feature joins at most one larger neighbor per pass, but
+    any number of smaller features can join it.
     join="all": every flagged pair is merged, so a small piece that is flagged against two larger features joins both
-    and the two larger features become one (bridging). join="best": the smaller feature of a flagged pair joins only
-    its best flagged larger neighbor, the one with the highest score = fraction / threshold (the larger of the two
-    tests when both are on; ties: the longer shared boundary, then the lower label). The other neighbor joins in a
-    later pass only if it is flagged against the merged feature, and then it is the fraction of the smaller of the two
-    that counts, so two large systems are not tied together by the perimeter of a small piece between them. A feature
-    joins at most one larger neighbor per pass, but any number of smaller features can join it.
+    and the two larger features become one (bridging). Example: a piece B touches A (fraction 0.30) and C (0.25), A and C
+    do not touch. "all": A + B + C. "best": B joins A (0.30 > 0.25); C joins A + B only if the B-C stretch is a large
+    part of C's own perimeter (C is a fragment), not when C is a large system.
 
     The boundary and the perimeters are counted in unit pixel edges (see boundary_lengths), so the two thresholds
     are not interchangeable: the raw perimeter is larger than the equivalent one, so it needs the smaller
@@ -228,9 +231,9 @@ def combine_features_with_share_boundary(
             "ellipse" or "circle", see equivalent_perimeter.
         max_iterations: int (optional, default=10)
             Maximum number of merge passes.
-        join: string (optional, default="all")
-            Which flagged pairs are merged in a pass: "all" (every flagged pair) or "best" (one larger neighbor per smaller
-            feature, the one with the highest score). See above.
+        join: string (optional, default="best")
+            Which flagged pairs are merged in a pass: "best" (one larger neighbor per smaller feature, the one with the
+            highest score) or "all" (every flagged pair). See above.
 
     Returns:
         labels: np.ndarray, 2D, same dtype as feature_number

@@ -452,7 +452,7 @@ class TestIdfeatureRadar3dCombineFeatures:
         assert on.attrs['combine_features_share_boundary'] == 1
         assert on.attrs['combine_perim_frac_thresh'] == 0.2 and on.attrs['combine_equiv_frac_thresh'] == 0.3
         assert on.attrs['combine_equiv_shape'] == 'ellipse'
-        assert on.attrs['combine_join'] == 'all'
+        assert on.attrs['combine_join'] == 'best'
 
     def test_join_best_is_passed_on_and_recorded(self, tmp_path):
         best = self._run(tmp_path / 'best', combine_features_share_boundary=True, combine_join='best')

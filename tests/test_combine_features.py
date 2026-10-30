@@ -214,7 +214,7 @@ class TestJoinBest:
 
     def test_all_ties_two_systems_together_through_the_piece_between_them(self):
         labels = self._bridge(10)               # B-A 4/16 = 0.25, B-C 2/16 = 0.125, both above 0.1
-        out, n, info = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None)
+        out, n, info = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None, join="all")
         assert n == 1 and info["groups"] == {1: [1, 2, 3]}
 
     def test_best_joins_the_piece_to_its_best_neighbor_only(self):
@@ -255,11 +255,13 @@ class TestJoinBest:
             b = combine_features_with_share_boundary(labels, join="best", **kwargs)
             assert np.array_equal(a[0], b[0]) and a[1] == b[1]
 
-    def test_all_is_the_default(self):
+    def test_best_is_the_default(self):
         labels = self._bridge(10)
         default = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None)
-        explicit = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None, join="all")
-        assert np.array_equal(default[0], explicit[0]) and default[2]["groups"] == explicit[2]["groups"]
+        explicit = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None, join="best")
+        assert np.array_equal(default[0], explicit[0]) and default[2]["groups"] == explicit[2]["groups"] == {1: [1, 3]}
+        every = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None, join="all")
+        assert every[1] == 1 and default[1] == 2
 
     def test_unknown_join_is_an_error(self):
         with pytest.raises(ValueError, match="join"):
