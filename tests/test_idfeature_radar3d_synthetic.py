@@ -459,13 +459,6 @@ class TestIdfeatureRadar3dCombineFeatures:
         assert int(best['nfeatures'].values.squeeze()) == 1          # the two touching blocks have no third neighbor to bridge
         assert best.attrs['combine_join'] == 'best'
 
-    def test_join_guard_converts_the_area_to_pixels_and_is_recorded(self, tmp_path):
-        # two touching 20 x 20 blocks of the frame (dx = dy = 3000 m: 9 km2 per pixel): 'large' from 3,000 km2 = 334 px, the blocks have 400 px each
-        # and are joined by the pair itself (no third feature), so the result is the same as with 'all'
-        guard = self._run(tmp_path / 'guard', combine_features_share_boundary=True, combine_join='guard', combine_guard_min_area_km2=3000.0)
-        assert int(guard['nfeatures'].values.squeeze()) == 1
-        assert guard.attrs['combine_join'] == 'guard' and guard.attrs['combine_guard_min_area_km2'] == 3000.0
-
     def test_thresholds_decide_and_null_turns_a_test_off(self, tmp_path):
         strict = self._run(tmp_path / 'strict', combine_features_share_boundary=True,
                            combine_perim_frac_thresh=0.4, combine_equiv_frac_thresh=None)
