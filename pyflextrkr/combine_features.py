@@ -192,6 +192,7 @@ def combine_features_with_share_boundary(
     equiv_shape="ellipse",
     max_iterations=10,
     join="all",
+    guard_min_pixels=None,
 ):
     """
     Combine features that share a large part of their boundary (optional step after detect-and-spread).
@@ -211,6 +212,10 @@ def combine_features_with_share_boundary(
     that counts, so two large systems are not tied together by the perimeter of a small piece between them. A feature
     joins at most one larger neighbor per pass, but any number of smaller features can join it.
 
+    join="guard": as "all", except in a group of flagged pairs (a connected set of features) that contains two or more
+    features of at least guard_min_pixels pixels: there the rule of "best" applies. The fragments of one system are all
+    joined, and only a group that would tie two large systems together is limited.
+
     The boundary and the perimeters are counted in unit pixel edges (see boundary_lengths), so the two thresholds
     are not interchangeable: the raw perimeter is larger than the equivalent one, so it needs the smaller
     fraction. Only the pixels of the features are relabeled; background pixels and the set of labeled pixels do not
@@ -229,8 +234,11 @@ def combine_features_with_share_boundary(
         max_iterations: int (optional, default=10)
             Maximum number of merge passes.
         join: string (optional, default="all")
-            Which flagged pairs are merged in a pass: "all" (every flagged pair) or "best" (one larger neighbor per smaller
-            feature, the one with the highest score). See above.
+            Which flagged pairs are merged in a pass: "all" (every flagged pair), "best" (one larger neighbor per smaller
+            feature, the one with the highest score) or "guard" (all, except "best" in a group with two large features).
+            See above.
+        guard_min_pixels: int (optional, default=None)
+            join="guard": size [pixels] from which a feature counts as large (required for "guard", ignored otherwise).
 
     Returns:
         labels: np.ndarray, 2D, same dtype as feature_number
@@ -259,8 +267,10 @@ def combine_features_with_share_boundary(
             raise ValueError(f"{name} must be None or > 0, got {value}")
     if max_iterations < 1:
         raise ValueError(f"max_iterations must be >= 1, got {max_iterations}")
-    if join not in ("all", "best"):
-        raise ValueError(f"join must be 'all' or 'best', got '{join}'")
+    if join not in ("all", "best", "guard"):
+        raise ValueError(f"join must be 'all', 'best' or 'guard', got '{join}'")
+    if join == "guard" and (guard_min_pixels is None or not guard_min_pixels > 0):
+        raise ValueError(f"join='guard' needs guard_min_pixels > 0, got {guard_min_pixels}")
     if feature_number.size > 0 and feature_number.min() < 0:
         raise ValueError("feature_number must not have negative labels")
 
@@ -305,16 +315,27 @@ def combine_features_with_share_boundary(
             info["converged"] = True
             break
 
-        # The pairs that are merged: all flagged pairs, or one per smaller feature (its best flagged larger neighbor)
-        merged_pairs = pairs[flagged]
-        if join == "best":
+        # The pairs that are merged: all flagged pairs, or one per smaller feature (its best flagged larger neighbor), or the
+        # latter only in the groups of flagged pairs that contain two or more large features
+        merged = flagged.copy()
+        if join in ("best", "guard"):
+            limited = flagged.copy()
+            if join == "guard":
+                flagged_graph = sparse.coo_matrix(
+                    (np.ones(int(flagged.sum())), (pairs[flagged, 0], pairs[flagged, 1])), shape=(nlabel + 1, nlabel + 1))
+                _, group = connected_components(flagged_graph, directed=False)
+                large = area >= guard_min_pixels
+                large[0] = False
+                limited = flagged & (np.bincount(group[large], minlength=group.max() + 1)[group[pairs[:, 0]]] >= 2)
             larger = np.where(a_is_smaller, pairs[:, 1], pairs[:, 0])
-            idx = np.nonzero(flagged)[0]
+            idx = np.nonzero(limited)[0]
             # Order by smaller feature, then highest score, then longest shared boundary, then lowest label of the larger feature
             order = idx[np.lexsort((larger[idx], -shared[idx], -score[idx], smaller[idx]))]
             first = np.ones(order.size, dtype=bool)
             first[1:] = smaller[order][1:] != smaller[order][:-1]
-            merged_pairs = pairs[order[first]]
+            merged = (flagged & ~limited)
+            merged[order[first]] = True
+        merged_pairs = pairs[merged]
 
         # Chains and clusters of merged pairs become one feature (connected components of the pair graph);
         # label 0 stays background

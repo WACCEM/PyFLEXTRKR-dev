@@ -266,6 +266,48 @@ class TestJoinBest:
             combine_features_with_share_boundary(self._bridge(10), join="nearest")
 
 
+class TestJoinGuard:
+
+    def _bridge(self, c_rows):
+        return _blocks((30, 50), (1, 0, 20, 0, 20), (3, 8, 12, 20, 24), (2, 0, c_rows, 24, 44))
+
+    def test_a_group_with_two_large_features_follows_the_best_rule(self):
+        labels = self._bridge(10)               # A 400 px, C 200 px, the piece B 16 px: A and C are both large from 150 px
+        out, n, info = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None, join="guard",
+                                                            guard_min_pixels=150)
+        assert n == 2 and info["groups"] == {1: [1, 3]}                 # as join="best"
+
+    def test_a_group_with_one_large_feature_joins_everything(self):
+        labels = self._bridge(10)
+        out, n, info = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None, join="guard",
+                                                            guard_min_pixels=300)
+        assert n == 1 and info["groups"] == {1: [1, 2, 3]}              # as join="all": C is not large
+
+    def test_only_the_group_with_two_large_features_is_limited(self):
+        # the bridge on the left (A, B, C) and a fragment cluster on the right (D with two small pieces) in the same frame
+        labels = _blocks((30, 90), (1, 0, 20, 0, 20), (3, 8, 12, 20, 24), (2, 0, 10, 24, 44),
+                         (4, 0, 20, 50, 70), (5, 8, 12, 70, 74), (6, 8, 12, 46, 50))
+        out, n, info = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None, join="guard",
+                                                            guard_min_pixels=150)
+        assert info["groups"] == {1: [1, 3], 2: [4, 5, 6]} or info["groups"] == {1: [4, 5, 6], 2: [1, 3]}      # the right cluster has one large feature only
+        assert n == 3
+
+    def test_guard_needs_a_size(self):
+        with pytest.raises(ValueError, match="guard_min_pixels"):
+            combine_features_with_share_boundary(self._bridge(10), join="guard")
+        with pytest.raises(ValueError, match="guard_min_pixels"):
+            combine_features_with_share_boundary(self._bridge(10), join="guard", guard_min_pixels=0)
+
+    def test_a_very_small_guard_equals_best_and_a_huge_one_equals_all(self):
+        labels = self._bridge(10)
+        kwargs = dict(perim_frac_thresh=0.1, equiv_frac_thresh=None)
+        best = combine_features_with_share_boundary(labels, join="best", **kwargs)
+        small = combine_features_with_share_boundary(labels, join="guard", guard_min_pixels=1, **kwargs)
+        every = combine_features_with_share_boundary(labels, join="all", **kwargs)
+        huge = combine_features_with_share_boundary(labels, join="guard", guard_min_pixels=10 ** 9, **kwargs)
+        assert np.array_equal(best[0], small[0]) and np.array_equal(every[0], huge[0])
+
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------

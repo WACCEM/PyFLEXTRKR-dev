@@ -83,8 +83,10 @@ def idfeature_radar3d(
     combine_perim_frac_thresh = config.get("combine_perim_frac_thresh", 0.2)
     combine_equiv_frac_thresh = config.get("combine_equiv_frac_thresh", 0.3)
     combine_equiv_shape = config.get("combine_equiv_shape", "ellipse")
-    # "all": every flagged pair is merged; "best": a feature joins only its best flagged larger neighbor (no bridging)
+    # "all": every flagged pair is merged; "best": a feature joins only its best flagged larger neighbor (no bridging);
+    # "guard": as "all", except in a group of flagged pairs with two or more features of at least combine_guard_min_area_km2 [km2]
     combine_join = config.get("combine_join", "all")
+    combine_guard_min_area_km2 = config.get("combine_guard_min_area_km2", 50000.0)
 
     # Steiner convective/stratiform classification parameters (follow the
     # cell-tracking identification config parameters)
@@ -223,6 +225,7 @@ def idfeature_radar3d(
                 equiv_frac_thresh=combine_equiv_frac_thresh,
                 equiv_shape=combine_equiv_shape,
                 join=combine_join,
+                guard_min_pixels=max(1, int(round(combine_guard_min_area_km2 * 1e6 / (dx * dy)))) if combine_join == "guard" else None,
             )
             logger.debug(
                 f"Combined features sharing a boundary: {combine_info['nfeatures_before']} -> {nfeatures} "
@@ -332,6 +335,8 @@ def idfeature_radar3d(
             feature_params['combine_features_share_boundary'] = 1
             feature_params['combine_equiv_shape'] = combine_equiv_shape
             feature_params['combine_join'] = combine_join
+            if combine_join == "guard":
+                feature_params['combine_guard_min_area_km2'] = combine_guard_min_area_km2
             if combine_perim_frac_thresh is not None:
                 feature_params['combine_perim_frac_thresh'] = combine_perim_frac_thresh
             if combine_equiv_frac_thresh is not None:
