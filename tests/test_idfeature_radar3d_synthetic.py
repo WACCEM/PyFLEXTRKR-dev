@@ -452,6 +452,12 @@ class TestIdfeatureRadar3dCombineFeatures:
         assert on.attrs['combine_features_share_boundary'] == 1
         assert on.attrs['combine_perim_frac_thresh'] == 0.2 and on.attrs['combine_equiv_frac_thresh'] == 0.3
         assert on.attrs['combine_equiv_shape'] == 'ellipse'
+        assert on.attrs['combine_join'] == 'all'
+
+    def test_join_best_is_passed_on_and_recorded(self, tmp_path):
+        best = self._run(tmp_path / 'best', combine_features_share_boundary=True, combine_join='best')
+        assert int(best['nfeatures'].values.squeeze()) == 1          # the two touching blocks have no third neighbor to bridge
+        assert best.attrs['combine_join'] == 'best'
 
     def test_thresholds_decide_and_null_turns_a_test_off(self, tmp_path):
         strict = self._run(tmp_path / 'strict', combine_features_share_boundary=True,

@@ -83,6 +83,8 @@ def idfeature_radar3d(
     combine_perim_frac_thresh = config.get("combine_perim_frac_thresh", 0.2)
     combine_equiv_frac_thresh = config.get("combine_equiv_frac_thresh", 0.3)
     combine_equiv_shape = config.get("combine_equiv_shape", "ellipse")
+    # "all": every flagged pair is merged; "best": a feature joins only its best flagged larger neighbor (no bridging)
+    combine_join = config.get("combine_join", "all")
 
     # Steiner convective/stratiform classification parameters (follow the
     # cell-tracking identification config parameters)
@@ -220,6 +222,7 @@ def idfeature_radar3d(
                 perim_frac_thresh=combine_perim_frac_thresh,
                 equiv_frac_thresh=combine_equiv_frac_thresh,
                 equiv_shape=combine_equiv_shape,
+                join=combine_join,
             )
             logger.debug(
                 f"Combined features sharing a boundary: {combine_info['nfeatures_before']} -> {nfeatures} "
@@ -328,6 +331,7 @@ def idfeature_radar3d(
         if combine_features:
             feature_params['combine_features_share_boundary'] = 1
             feature_params['combine_equiv_shape'] = combine_equiv_shape
+            feature_params['combine_join'] = combine_join
             if combine_perim_frac_thresh is not None:
                 feature_params['combine_perim_frac_thresh'] = combine_perim_frac_thresh
             if combine_equiv_frac_thresh is not None:

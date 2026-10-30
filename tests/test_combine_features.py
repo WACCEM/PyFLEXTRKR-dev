@@ -203,6 +203,70 @@ class TestCombineDecisions:
 
 
 # ---------------------------------------------------------------------------
+# join="best": a feature joins only its best larger neighbor (no bridging)
+# ---------------------------------------------------------------------------
+class TestJoinBest:
+
+    def _bridge(self, c_rows):
+        """Two 20 x 20 systems A (1) and C (2, rows 0..c_rows) and a 4 x 4 piece B (3) between them, A and C not touching.
+        B shares 4 edges with A and min(4, c_rows - 8) edges with C; B's perimeter is 16 edges."""
+        return _blocks((30, 50), (1, 0, 20, 0, 20), (3, 8, 12, 20, 24), (2, 0, c_rows, 24, 44))
+
+    def test_all_ties_two_systems_together_through_the_piece_between_them(self):
+        labels = self._bridge(10)               # B-A 4/16 = 0.25, B-C 2/16 = 0.125, both above 0.1
+        out, n, info = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None)
+        assert n == 1 and info["groups"] == {1: [1, 2, 3]}
+
+    def test_best_joins_the_piece_to_its_best_neighbor_only(self):
+        labels = self._bridge(10)
+        out, n, info = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None, join="best")
+        assert n == 2 and info["groups"] == {1: [1, 3]}                  # A + B; C stays: 2 shared edges of C's 60 = 0.033
+        assert out[labels == 1][0] == out[labels == 3][0] != out[labels == 2][0]
+        assert info["passes"][0]["nflagged"] == 2 and info["passes"][0]["pairs"].tolist() == [[1, 3]]
+
+    def test_best_still_joins_the_second_neighbor_when_it_is_a_fragment(self):
+        # C is a 4 x 10 strip (larger than B, so B decides in pass 1 and picks A: tie, lower label): the 4 edges it shares
+        # with B are 0.14 of the strip's perimeter of 28, flagged in pass 2, while the same stretch is 0.05 of a 20 x 20 system
+        labels = _blocks((30, 50), (1, 0, 20, 0, 20), (3, 8, 12, 20, 24), (2, 8, 12, 24, 34))
+        out, n, info = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None, join="best")
+        assert n == 1 and info["groups"] == {1: [1, 2, 3]} and info["npasses"] == 2
+
+    def test_best_breaks_a_tie_by_the_lower_label_of_the_larger_neighbor(self):
+        labels = self._bridge(20)               # B-A and B-C both 4 edges: same score and shared boundary
+        out, n, info = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None, join="best")
+        assert n == 2 and info["groups"] == {1: [1, 3]}
+
+    def test_best_ranks_by_the_larger_score_of_the_two_tests(self):
+        # B-A is the better neighbor by the raw fraction (4/16 against 2/16) whatever the ellipse test says
+        labels = self._bridge(10)
+        out, n, info = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=0.1, join="best")
+        assert info["groups"] == {1: [1, 3]} and n == 2
+
+    def test_best_keeps_a_chain_of_fragments_in_one_feature(self):
+        # a system A and two strips: F1 shares 20 edges with A (0.4 of its perimeter of 50), F2 shares 20 with F1 (0.43)
+        labels = _blocks((30, 40), (1, 0, 20, 0, 20), (2, 0, 20, 20, 25), (3, 0, 20, 25, 28))
+        out, n, info = combine_features_with_share_boundary(labels, perim_frac_thresh=0.2, equiv_frac_thresh=None, join="best")
+        assert n == 1 and info["groups"] == {1: [1, 2, 3]}
+
+    def test_best_and_all_agree_when_no_feature_has_two_larger_flagged_neighbors(self):
+        labels = _blocks((30, 60), (1, 5, 25, 5, 25), (2, 5, 25, 25, 45))
+        for kwargs in ({}, {"perim_frac_thresh": None}, {"equiv_frac_thresh": None}):
+            a = combine_features_with_share_boundary(labels, **kwargs)
+            b = combine_features_with_share_boundary(labels, join="best", **kwargs)
+            assert np.array_equal(a[0], b[0]) and a[1] == b[1]
+
+    def test_all_is_the_default(self):
+        labels = self._bridge(10)
+        default = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None)
+        explicit = combine_features_with_share_boundary(labels, perim_frac_thresh=0.1, equiv_frac_thresh=None, join="all")
+        assert np.array_equal(default[0], explicit[0]) and default[2]["groups"] == explicit[2]["groups"]
+
+    def test_unknown_join_is_an_error(self):
+        with pytest.raises(ValueError, match="join"):
+            combine_features_with_share_boundary(self._bridge(10), join="nearest")
+
+
+# ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 class TestOutput:

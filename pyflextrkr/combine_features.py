@@ -11,7 +11,8 @@ perimeter of the smaller one. The boundary is counted in unit pixel edges (4-nei
 labels), so a diagonal interface counts (about 2 edges per diagonal step) and two features that meet at a single
 corner point do not. Pairs are found for the whole label array in one pass, chains and clusters of flagged
 pairs are merged at once (scipy connected components), and the test is repeated on the merged features until
-nothing is flagged.
+nothing is flagged. With join="best" a feature joins only its best flagged larger neighbor in a pass, which keeps
+two large systems apart that are only connected through a small piece between them.
 """
 import numpy as np
 from scipy import sparse
@@ -190,6 +191,7 @@ def combine_features_with_share_boundary(
     equiv_frac_thresh=0.3,
     equiv_shape="ellipse",
     max_iterations=10,
+    join="all",
 ):
     """
     Combine features that share a large part of their boundary (optional step after detect-and-spread).
@@ -197,11 +199,17 @@ def combine_features_with_share_boundary(
     A pair of touching features is flagged when the boundary they share is at least
       perim_frac_thresh x (raw perimeter of the smaller feature)   OR
       equiv_frac_thresh x (perimeter of the smooth shape equivalent to the smaller feature).
-    The smaller feature is the one with fewer pixels. All flagged pairs are merged at once (a feature with several
-    flagged neighbors joins them all, chains of flagged pairs form one feature). The test is repeated on the merged
-    features until nothing is flagged, which also merges a small piece that is wedged between two larger ones and
-    shares only a part of its boundary with each. Features that only touch over a short stretch, or at a corner
-    point, are not merged.
+    The smaller feature is the one with fewer pixels. The flagged pairs are merged at once (chains of flagged pairs form
+    one feature), see join for which of them. The test is repeated on the merged features until nothing is flagged.
+    Features that only touch over a short stretch, or at a corner point, are not merged.
+
+    join="all": every flagged pair is merged, so a small piece that is flagged against two larger features joins both
+    and the two larger features become one (bridging). join="best": the smaller feature of a flagged pair joins only
+    its best flagged larger neighbor, the one with the highest score = fraction / threshold (the larger of the two
+    tests when both are on; ties: the longer shared boundary, then the lower label). The other neighbor joins in a
+    later pass only if it is flagged against the merged feature, and then it is the fraction of the smaller of the two
+    that counts, so two large systems are not tied together by the perimeter of a small piece between them. A feature
+    joins at most one larger neighbor per pass, but any number of smaller features can join it.
 
     The boundary and the perimeters are counted in unit pixel edges (see boundary_lengths), so the two thresholds
     are not interchangeable: the raw perimeter is larger than the equivalent one, so it needs the smaller
@@ -220,6 +228,9 @@ def combine_features_with_share_boundary(
             "ellipse" or "circle", see equivalent_perimeter.
         max_iterations: int (optional, default=10)
             Maximum number of merge passes.
+        join: string (optional, default="all")
+            Which flagged pairs are merged in a pass: "all" (every flagged pair) or "best" (one larger neighbor per smaller
+            feature, the one with the highest score). See above.
 
     Returns:
         labels: np.ndarray, 2D, same dtype as feature_number
@@ -230,8 +241,9 @@ def combine_features_with_share_boundary(
         info: dictionary
             nfeatures_before: number of features of the input.
             npasses: number of merge passes that merged something.
-            passes: list of dictionaries, one per merge pass: nflagged, nfeatures (after the pass), and pairs, the flagged
-                pairs as an (nflagged, 2) array of the labels of that pass (pass 1: the labels of feature_number).
+            passes: list of dictionaries, one per merge pass: nflagged (flagged pairs), nfeatures (after the pass), and pairs,
+                the pairs that were merged as an (npairs, 2) array of the labels of that pass (pass 1: the labels of
+                feature_number). With join="all" these are the flagged pairs, with join="best" one per smaller feature.
             converged: True when a pass flagged nothing (False when max_iterations was reached first).
             old_to_new: np.ndarray, index = input label, value = new label (0 = label not in the input).
             groups: dictionary, new label -> input labels that were combined into it (merged features only).
@@ -247,6 +259,8 @@ def combine_features_with_share_boundary(
             raise ValueError(f"{name} must be None or > 0, got {value}")
     if max_iterations < 1:
         raise ValueError(f"max_iterations must be >= 1, got {max_iterations}")
+    if join not in ("all", "best"):
+        raise ValueError(f"join must be 'all' or 'best', got '{join}'")
     if feature_number.size > 0 and feature_number.min() < 0:
         raise ValueError("feature_number must not have negative labels")
 
@@ -275,20 +289,37 @@ def combine_features_with_share_boundary(
 
         # The smaller feature of each pair decides (equal sizes: the lower label)
         area = np.bincount(labels.ravel(), minlength=nlabel + 1)
-        smaller = np.where(area[pairs[:, 0]] <= area[pairs[:, 1]], pairs[:, 0], pairs[:, 1])
+        a_is_smaller = area[pairs[:, 0]] <= area[pairs[:, 1]]
+        smaller = np.where(a_is_smaller, pairs[:, 0], pairs[:, 1])
         flagged = np.zeros(pairs.shape[0], dtype=bool)
+        # score = fraction / threshold of the test(s) that are on (>= 1 is flagged); it only ranks the neighbors of join="best"
+        score = np.zeros(pairs.shape[0])
         if perim_frac_thresh is not None:
             flagged |= shared >= perim_frac_thresh * perimeter[smaller]
+            score = np.maximum(score, shared / (perim_frac_thresh * perimeter[smaller]))
         if equiv_frac_thresh is not None:
-            flagged |= shared >= equiv_frac_thresh * equivalent_perimeter(labels, equiv_shape)[smaller]
+            equiv_perim = equivalent_perimeter(labels, equiv_shape)[smaller]
+            flagged |= shared >= equiv_frac_thresh * equiv_perim
+            score = np.maximum(score, shared / (equiv_frac_thresh * equiv_perim))
         if not flagged.any():
             info["converged"] = True
             break
 
-        # Chains and clusters of flagged pairs become one feature (connected components of the pair graph);
+        # The pairs that are merged: all flagged pairs, or one per smaller feature (its best flagged larger neighbor)
+        merged_pairs = pairs[flagged]
+        if join == "best":
+            larger = np.where(a_is_smaller, pairs[:, 1], pairs[:, 0])
+            idx = np.nonzero(flagged)[0]
+            # Order by smaller feature, then highest score, then longest shared boundary, then lowest label of the larger feature
+            order = idx[np.lexsort((larger[idx], -shared[idx], -score[idx], smaller[idx]))]
+            first = np.ones(order.size, dtype=bool)
+            first[1:] = smaller[order][1:] != smaller[order][:-1]
+            merged_pairs = pairs[order[first]]
+
+        # Chains and clusters of merged pairs become one feature (connected components of the pair graph);
         # label 0 stays background
         graph = sparse.coo_matrix(
-            (np.ones(int(flagged.sum())), (pairs[flagged, 0], pairs[flagged, 1])),
+            (np.ones(merged_pairs.shape[0]), (merged_pairs[:, 0], merged_pairs[:, 1])),
             shape=(nlabel + 1, nlabel + 1),
         )
         _, component = connected_components(graph, directed=False)
@@ -299,7 +330,7 @@ def combine_features_with_share_boundary(
         info["npasses"] += 1
         info["passes"].append({
             "nflagged": int(flagged.sum()), "nfeatures": int(np.unique(labels).size - 1),
-            "pairs": pairs[flagged].copy(),
+            "pairs": merged_pairs.copy(),
         })
 
     # No merge: the input labels are returned as they are
