@@ -126,6 +126,41 @@ def equivalent_perimeter(labels, shape="ellipse"):
     return perimeter
 
 
+def touching_pairs(labels):
+    """
+    Table of the touching pairs of a label array: sizes, shared boundary and the fractions that combine_features_with_share_boundary
+    tests (the shared boundary as a fraction of the perimeter of the smaller feature of the pair).
+
+    Args:
+        labels: np.ndarray, 2D, non-negative integers
+            Label array, 0 = background.
+
+    Returns:
+        pairs: dictionary of 1D np.ndarray, one entry per touching pair (sorted by label)
+            small, large: the labels of the smaller and the larger feature (equal sizes: the lower label is the smaller)
+            area_small, area_large: pixels
+            shared: unit pixel edges shared by the two features
+            perim_small: raw perimeter of the smaller feature [unit pixel edges]
+            equiv_ellipse, equiv_circle: perimeter of the equal-area ellipse / circle of the smaller feature [unit pixel edges]
+            frac_raw, frac_ellipse, frac_circle: shared / perim_small, / equiv_ellipse, / equiv_circle
+    """
+    labels = np.asarray(labels)
+    perimeter, pairs, shared = boundary_lengths(labels)
+    area = np.bincount(labels.ravel(), minlength=perimeter.size)
+    # The smaller feature of each pair (equal sizes: the lower label)
+    a_is_small = area[pairs[:, 0]] <= area[pairs[:, 1]]
+    small = np.where(a_is_small, pairs[:, 0], pairs[:, 1])
+    large = np.where(a_is_small, pairs[:, 1], pairs[:, 0])
+    equiv_ellipse = equivalent_perimeter(labels, "ellipse")[small]
+    equiv_circle = equivalent_perimeter(labels, "circle")[small]
+    perim_small = perimeter[small]
+    return {
+        "small": small, "large": large, "area_small": area[small], "area_large": area[large], "shared": shared,
+        "perim_small": perim_small, "equiv_ellipse": equiv_ellipse, "equiv_circle": equiv_circle,
+        "frac_raw": shared / perim_small, "frac_ellipse": shared / equiv_ellipse, "frac_circle": shared / equiv_circle,
+    }
+
+
 def renumber_by_size(labels):
     """
     Renumber the labels 1..N from the largest to the smallest feature (the convention of label_and_grow_features).
@@ -195,7 +230,8 @@ def combine_features_with_share_boundary(
         info: dictionary
             nfeatures_before: number of features of the input.
             npasses: number of merge passes that merged something.
-            passes: list of dictionaries (nflagged, nfeatures after the pass), one per merge pass.
+            passes: list of dictionaries, one per merge pass: nflagged, nfeatures (after the pass), and pairs, the flagged
+                pairs as an (nflagged, 2) array of the labels of that pass (pass 1: the labels of feature_number).
             converged: True when a pass flagged nothing (False when max_iterations was reached first).
             old_to_new: np.ndarray, index = input label, value = new label (0 = label not in the input).
             groups: dictionary, new label -> input labels that were combined into it (merged features only).
@@ -261,7 +297,10 @@ def combine_features_with_share_boundary(
         labels = lut[labels].astype(labels.dtype)
         to_current = lut[to_current]
         info["npasses"] += 1
-        info["passes"].append({"nflagged": int(flagged.sum()), "nfeatures": int(np.unique(labels).size - 1)})
+        info["passes"].append({
+            "nflagged": int(flagged.sum()), "nfeatures": int(np.unique(labels).size - 1),
+            "pairs": pairs[flagged].copy(),
+        })
 
     # No merge: the input labels are returned as they are
     if info["npasses"] == 0:

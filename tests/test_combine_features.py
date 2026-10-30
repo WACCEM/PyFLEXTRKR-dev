@@ -18,6 +18,7 @@ from pyflextrkr.combine_features import (
     combine_features_with_share_boundary,
     equivalent_perimeter,
     renumber_by_size,
+    touching_pairs,
 )
 from pyflextrkr.label_and_grow_features import label_and_grow_features
 from combine_features_synthetic import make_frame
@@ -95,6 +96,46 @@ class TestEquivalentPerimeter:
     def test_invalid_shape_is_an_error(self):
         with pytest.raises(ValueError):
             equivalent_perimeter(np.ones((3, 3), dtype=int), "square")
+
+
+# ---------------------------------------------------------------------------
+# Table of the touching pairs
+# ---------------------------------------------------------------------------
+class TestTouchingPairs:
+
+    def test_two_squares_sharing_a_whole_side(self):
+        labels = _blocks((30, 60), (1, 5, 25, 5, 25), (2, 5, 25, 25, 45))
+        pairs = touching_pairs(labels)
+        assert len(pairs["shared"]) == 1 and pairs["shared"][0] == 20
+        assert pairs["small"][0] == 1 and pairs["large"][0] == 2          # equal sizes: the lower label is the smaller one
+        assert pairs["area_small"][0] == 400 and pairs["area_large"][0] == 400 and pairs["perim_small"][0] == 80
+        assert pairs["frac_raw"][0] == pytest.approx(0.25)
+        assert pairs["frac_circle"][0] == pytest.approx(20 / (2.0 * np.sqrt(np.pi * 400) * 4.0 / np.pi))
+        assert pairs["frac_ellipse"][0] == pytest.approx(pairs["frac_circle"][0], rel=1e-3)       # a square: ratio 1
+
+    def test_smaller_feature_decides(self):
+        # a 10 x 20 block (200 px) on top of a 20 x 20 square (400 px): the block is the smaller feature
+        labels = _blocks((50, 40), (1, 25, 45, 5, 25), (2, 15, 25, 5, 25))
+        pairs = touching_pairs(labels)
+        assert pairs["small"].tolist() == [2] and pairs["large"].tolist() == [1]
+        assert pairs["frac_raw"][0] == pytest.approx(20 / 60)
+
+    def test_no_touching_pair_gives_empty_columns(self):
+        pairs = touching_pairs(_blocks((30, 60), (1, 2, 8, 2, 8), (2, 12, 18, 30, 40)))
+        assert all(len(v) == 0 for v in pairs.values())
+
+    def test_fractions_are_those_of_the_combine_decision(self):
+        labels = _blocks((30, 60), (1, 5, 25, 5, 25), (2, 5, 25, 25, 45))
+        pairs = touching_pairs(labels)
+        # flagged by the raw test exactly when frac_raw >= the threshold
+        assert combine_features_with_share_boundary(labels, perim_frac_thresh=pairs["frac_raw"][0], equiv_frac_thresh=None)[1] == 1
+        assert combine_features_with_share_boundary(labels, perim_frac_thresh=pairs["frac_raw"][0] + 0.01, equiv_frac_thresh=None)[1] == 2
+
+    def test_info_lists_the_flagged_pairs_of_each_pass(self):
+        labels = _blocks((50, 60), (1, 5, 25, 5, 25), (2, 5, 25, 25, 45), (3, 25, 35, 15, 35))     # the wedged piece
+        _, _, info = combine_features_with_share_boundary(labels)
+        assert info["passes"][0]["pairs"].tolist() == [[1, 2]] and info["passes"][0]["nflagged"] == 1
+        assert info["passes"][1]["nflagged"] == len(info["passes"][1]["pairs"])
 
 
 # ---------------------------------------------------------------------------
