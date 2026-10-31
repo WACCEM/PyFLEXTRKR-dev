@@ -3,6 +3,8 @@ Tests of pyflextrkr.rowstats (row-based storage of the dense track statistics): 
 (values, dtypes, fill values, attributes), independent of the block size, a subset of tracks can be rebuilt, and RaggedArray
 gives the access of the dense array. Synthetic data only.
 """
+import os
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -164,3 +166,46 @@ def test_fill_that_is_not_constant_is_refused(tmp_path):
     ds["area"] = (["tracks", "times"], area, ds["area"].attrs)
     with pytest.raises(ValueError, match="constant fill"):
         dense_to_rows(_write(tmp_path, ds))
+
+
+def test_load_trackstats_reads_both_formats_alike(tmp_path):
+    from pyflextrkr.rowstats import load_trackstats
+    path = _write(tmp_path, _dense())
+    write_rows(dense_to_rows(path), str(tmp_path / "dense.rows"))
+    want = xr.open_dataset(path)                                           # the defaults of xarray: decoded
+    for given in (path, str(tmp_path / "dense.rows")):
+        xr.testing.assert_identical(load_trackstats(given), want)
+    # the .nc name of a file that only exists as a row folder
+    os.remove(path)
+    xr.testing.assert_identical(load_trackstats(path), want)
+    # raw contents, a subset of tracks (the width follows the subset for rows), a subset of variables
+    raw = load_trackstats(str(tmp_path / "dense.rows"), decode=False)
+    assert raw["cloudnumber"].dtype == np.int32 and raw["cloudnumber"].attrs["_FillValue"] == -9999
+    sub = load_trackstats(str(tmp_path / "dense.rows"), tracks=[5, 2], variables=["area"])
+    assert sub.sizes["tracks"] == 2 and "cloudnumber" not in sub and "area" in sub and "merge_cloudnumber" in sub
+    np.testing.assert_array_equal(sub["track_duration"].values, want["track_duration"].values[[5, 2]])
+
+
+def _convert_stats():
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runscripts", "convert_stats.py")
+    spec = importlib.util.spec_from_file_location("convert_stats", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_convert_stats_goes_both_ways_and_selects_tracks(tmp_path):
+    convert = _convert_stats()
+    path = _write(tmp_path, _dense())
+    rows, back, subset = str(tmp_path / "x.rows"), str(tmp_path / "back.nc"), str(tmp_path / "subset.nc")
+    assert convert.main(["to-rows", path, rows, "--block-tracks", "3"]) == 0
+    assert convert.main(["to-dense", rows, back]) == 0
+    _assert_same_dataset(xr.open_dataset(back, mask_and_scale=False, decode_times=False),
+                         xr.open_dataset(path, mask_and_scale=False, decode_times=False))
+    assert convert.main(["to-dense", rows, subset, "--select", "is_mcs=1", "--variables", "area"]) == 0
+    sub = xr.open_dataset(subset, mask_and_scale=False, decode_times=False)
+    want = np.nonzero(xr.open_dataset(path)["is_mcs"].values == 1)[0]
+    assert sub["tracks"].values.tolist() == want.tolist() and "cloudnumber" not in sub and "area" in sub
+    with pytest.raises(SystemExit):
+        convert.main(["to-dense", rows, subset, "--select", "not_a_variable=1"])
