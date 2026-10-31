@@ -266,11 +266,17 @@ def compute_regionprops(config):
         lon_smooth = old_lon_smooth.astype(np.float32)
         lat_smooth = ds["meanlat_smooth"].values.astype(np.float32)
     for itrack in np.where(select_track)[0]:
+        # A track fills only the first track_duration of the ntimes columns, the rest is NaN and stays NaN: smooth these entries
+        # (not all ntimes, which is slow in pure Python for 100,000s of tracks). At least 3, because the smoothing takes other
+        # branches for trajectories of 1 and 2 points (tests/test_smooth_prefix.py: same result as the full row)
+        n = min(ntimes, max(int(track_duration[itrack]), 3))
         lon_s, lat_s = smooth_trajectory(
-            meanlon[itrack], meanlat[itrack], max_speed_kmh=max_speed_kmh, time_step_h=time_resolution,
+            meanlon[itrack, :n], meanlat[itrack, :n], max_speed_kmh=max_speed_kmh, time_step_h=time_resolution,
         )
-        lon_smooth[itrack, :] = lon_s
-        lat_smooth[itrack, :] = lat_s
+        lon_smooth[itrack, :n] = lon_s
+        lat_smooth[itrack, :n] = lat_s
+        lon_smooth[itrack, n:] = meanlon[itrack, n:]
+        lat_smooth[itrack, n:] = meanlat[itrack, n:]
     ds["meanlon_smooth"] = (dims2d, lon_smooth, dict(ds["meanlon_smooth"].attrs))
     ds["meanlat_smooth"] = (dims2d, lat_smooth, dict(ds["meanlat_smooth"].attrs))
     new_nan = int(np.isnan(lon_smooth)[valid_pairs].sum())
