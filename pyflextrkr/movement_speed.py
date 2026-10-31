@@ -497,10 +497,10 @@ def nearest_pair_index(pair_basetime, start_basetime):
     return index
 
 
-def align_movement_to_tracks(results, stats_start_basetime, ntimes, lag):
+def movement_entries(results, stats_start_basetime, ntimes, lag):
     """
-    Movement of the tracks, from the measurements of every file pair to arrays [tracks, times] on the time axis of the
-    track statistics (the first time of a track is the file pair nearest to its start time).
+    Movement of the tracks as a list of (track, time index) entries, from the measurements of every file pair on the time axis
+    of the track statistics (the first time of a track is the file pair nearest to its start time).
 
     Args:
         results: list of tuples
@@ -509,24 +509,23 @@ def align_movement_to_tracks(results, stats_start_basetime, ntimes, lag):
         stats_start_basetime: np.array, shape [ntracks]
             Base time of the first time of every track.
         ntimes: int
-            Length of the times dimension of the track statistics.
+            Length of the times dimension of the track statistics; entries at later time indices are dropped.
         lag: int
             Lag between the files of a pair (lag_for_speed).
 
     Returns:
-        movement: dictionary of np.array(float32), shape [ntracks, ntimes], NaN where not measured:
-            movement_distance [km], movement_speed [m/s], movement_theta [degrees],
-            movement_distance_x, movement_distance_y [km]
+        entries: dictionary or None
+            None if nothing was measured. Else track and k (int64 arrays: track index and time index of every entry that is
+            kept) and the arrays of the entries: movement_distance [km], movement_speed [m/s], movement_theta [degrees],
+            movement_distance_x, movement_distance_y [km].
     """
     ntracks = len(stats_start_basetime)
     npairs = len(results)
-    out = {name: np.full((ntracks, ntimes), np.nan, dtype=np.float32) for name in
-           ("movement_distance", "movement_speed", "movement_theta", "movement_distance_x", "movement_distance_y")}
     if npairs == 0:
-        return out
+        return None
     counts = np.array([len(r[0]) for r in results], dtype=np.int64)
     if counts.sum() == 0:
-        return out
+        return None
     pair_index = np.repeat(np.arange(npairs), counts)
     track = np.concatenate([np.asarray(r[0], dtype=np.int64) for r in results])
     y_lag = np.concatenate([np.asarray(r[1], dtype=float) for r in results])
@@ -550,39 +549,58 @@ def align_movement_to_tracks(results, stats_start_basetime, ntimes, lag):
     last = np.full(ntracks, -1, dtype=np.int64)
     np.maximum.at(last, track[finite], pair_index[finite])
     keep = (start[track] >= 0) & (k >= 0) & (k < ntimes) & (pair_index <= last[track])
-    t, k = track[keep], k[keep]
-    out["movement_distance"][t, k] = movement_mag[keep]
-    out["movement_speed"][t, k] = movement_speed[keep]
-    out["movement_theta"][t, k] = r_dir[keep]
-    out["movement_distance_x"][t, k] = movement_x[keep]
-    out["movement_distance_y"][t, k] = movement_y[keep]
+    return {"track": track[keep], "k": k[keep], "movement_distance": movement_mag[keep],
+            "movement_speed": movement_speed[keep], "movement_theta": r_dir[keep],
+            "movement_distance_x": movement_x[keep], "movement_distance_y": movement_y[keep]}
+
+
+def align_movement_to_tracks(results, stats_start_basetime, ntimes, lag):
+    """
+    Movement of the tracks, from the measurements of every file pair to arrays [tracks, times] on the time axis of the
+    track statistics (the first time of a track is the file pair nearest to its start time).
+
+    Args:
+        results: list of tuples
+            One per file pair: (track_index, y_lag, x_lag, time_lag, base_time, pixel_length) of the tracks that
+            were measured in that pair (movement_of_feature_fft with sparse=True).
+        stats_start_basetime: np.array, shape [ntracks]
+            Base time of the first time of every track.
+        ntimes: int
+            Length of the times dimension of the track statistics.
+        lag: int
+            Lag between the files of a pair (lag_for_speed).
+
+    Returns:
+        movement: dictionary of np.array(float32), shape [ntracks, ntimes], NaN where not measured:
+            movement_distance [km], movement_speed [m/s], movement_theta [degrees],
+            movement_distance_x, movement_distance_y [km]
+    """
+    ntracks = len(stats_start_basetime)
+    out = {name: np.full((ntracks, ntimes), np.nan, dtype=np.float32) for name in
+           ("movement_distance", "movement_speed", "movement_theta", "movement_distance_x", "movement_distance_y")}
+    entries = movement_entries(results, stats_start_basetime, ntimes, lag)
+    if entries is None:
+        return out
+    for name in out:
+        out[name][entries["track"], entries["k"]] = entries[name]
     return out
 
 
-def define_movement_dataset(
-        movement,
-        lag,
-        times_coord,
-        times_dimname,
-        tracks_coord,
-        tracks_dimname,
-):
+def movement_attrs(lag):
     """
-    Dataset of the movement variables ([tracks, times], same structure as the track statistics).
+    Attributes of the movement variables.
 
     Args:
-        movement: dictionary
-            Arrays of align_movement_to_tracks.
         lag: int
             Lag between the files of a pair (lag_for_speed).
-        times_coord, tracks_coord: np.array
-            Coordinates of the times and tracks dimensions.
-        times_dimname, tracks_dimname: string
-            Dimension names.
+
+    Returns:
+        attrs: dictionary
+            {variable name: attributes} of movement_distance, movement_speed, movement_theta, movement_distance_x and
+            movement_distance_y.
     """
     fillval_f = np.nan
-    var_dict = movement
-    var_attrs = {
+    return {
         "movement_distance": {
             "long_name": "Movement distance along angle movement_theta",
             "units": "km",
@@ -612,6 +630,31 @@ def define_movement_dataset(
             "_FillValue": fillval_f,
         },
     }
+
+
+def define_movement_dataset(
+        movement,
+        lag,
+        times_coord,
+        times_dimname,
+        tracks_coord,
+        tracks_dimname,
+):
+    """
+    Dataset of the movement variables ([tracks, times], same structure as the track statistics).
+
+    Args:
+        movement: dictionary
+            Arrays of align_movement_to_tracks.
+        lag: int
+            Lag between the files of a pair (lag_for_speed).
+        times_coord, tracks_coord: np.array
+            Coordinates of the times and tracks dimensions.
+        times_dimname, tracks_dimname: string
+            Dimension names.
+    """
+    var_dict = movement
+    var_attrs = movement_attrs(lag)
     # Define output variable dictionary
     varlist = {}
     for key, value in var_dict.items():
@@ -625,6 +668,62 @@ def define_movement_dataset(
     # Define Dataset
     ds_vars = xr.Dataset(varlist, coords=coordlist)
     return ds_vars
+
+def filter_track_movement(m_mag, m_speed, m_theta, m_x, m_y, times, max_speed_thresh):
+    """
+    Filter and interpolate the movement of one track, in place.
+
+    A track with fewer than 3 speed values below max_speed_thresh gets NaN. For the others the values above the threshold are
+    interpolated (quadratic) from the ones below it.
+
+    Args:
+        m_mag, m_speed, m_theta, m_x, m_y: np.array, shape [times of the track]
+            Movement distance, speed, direction and the two components of the track (views of the arrays, they are changed).
+        times: np.array, shape [times of the track]
+            Time index of each value.
+        max_speed_thresh: float
+            Largest speed that is kept as measured.
+
+    Returns:
+        enough: bool
+            False if the track had too few values and was set to NaN.
+    """
+    fillval_f = np.nan
+    speed = m_speed
+    mask_nan = ~np.isnan(speed)
+    total_mask = mask_nan & (speed < max_speed_thresh)
+    if np.count_nonzero(total_mask) < 3:
+        m_mag[:] = fillval_f
+        m_speed[:] = fillval_f
+        m_theta[:] = fillval_f
+        m_x[:] = fillval_f
+        m_y[:] = fillval_f
+        return False
+    x = times[total_mask]
+    xm = times[mask_nan]
+    spd = speed[total_mask]
+    # because THETA is now not being interpolated
+    theta = m_theta[mask_nan]
+    mag = m_mag[total_mask]
+    intp_r = interp1d(x, spd, kind='quadratic', fill_value=fillval_f, bounds_error=False)
+    # the interpolation of THETA is now not necessary (np.nan also implies no movement --NOW--)
+    intp_mag = interp1d(x, mag, kind='quadratic', fill_value=fillval_f, bounds_error=False)
+
+    # original formula from FELIPERIOSG (already checked as we're dealing with azimuths now)
+    mov_x = intp_mag(xm) * np.sin(np.pi / 180.0 * theta)
+    mov_y = intp_mag(xm) * np.cos(np.pi / 180.0 * theta)
+    # NP.NAN here (in XM) means no movement (check ALTERNATIVE 1 in "offset_to_speed")
+    mov_x[np.isnan(mov_x)] = 0
+    mov_y[np.isnan(mov_y)] = 0
+
+    # Interpolate values
+    m_mag[mask_nan] = intp_mag(xm)
+    m_speed[mask_nan] = intp_r(xm)
+    # m_theta[mask_nan] = intp_theta(xm)
+    m_x[mask_nan] = mov_x
+    m_y[mask_nan] = mov_y
+    return True
+
 
 def filter_interp_speed(dset, config):
     """
@@ -665,40 +764,8 @@ def filter_interp_speed(dset, config):
     m_y_attrs = dset['movement_distance_y'].attrs
 
     for track in np.where(np.any(~np.isnan(m_speed), axis=1))[0]:
-        speed = m_speed[track]
-        mask_nan = ~np.isnan(speed)
-        total_mask = mask_nan & (speed < max_speed_thresh)
-        if np.count_nonzero(total_mask) < 3:
+        if not filter_track_movement(m_mag[track], m_speed[track], m_theta[track], m_x[track], m_y[track], times, max_speed_thresh):
             logger.debug('Not enough values in Track %d' % track)
-            m_mag[track] = fillval_f
-            m_speed[track] = fillval_f
-            m_theta[track] = fillval_f
-            m_x[track] = fillval_f
-            m_y[track] = fillval_f
-        else:
-            x = times[total_mask]
-            xm = times[mask_nan]
-            spd = speed[total_mask]
-        # because THETA is now not being interpolated
-            theta = m_theta[track][mask_nan]
-            mag = m_mag[track][total_mask]
-            intp_r = interp1d(x, spd, kind='quadratic', fill_value=fillval_f, bounds_error=False)
-        # the interpolation of THETA is now not necessary (np.nan also implies no movement --NOW--)
-            intp_mag = interp1d(x, mag, kind='quadratic', fill_value=fillval_f, bounds_error=False)
-
-            # original formula from FELIPERIOSG (already checked as we're dealing with azimuths now)
-            mov_x = intp_mag(xm) * np.sin(np.pi / 180.0 * theta)
-            mov_y = intp_mag(xm) * np.cos(np.pi / 180.0 * theta)
-            # NP.NAN here (in XM) means no movement (check ALTERNATIVE 1 in "offset_to_speed")
-            mov_x[np.isnan(mov_x)] = 0
-            mov_y[np.isnan(mov_y)] = 0
-
-            # Interpolate values
-            m_mag[track][mask_nan] = intp_mag(xm)
-            m_speed[track][mask_nan] = intp_r(xm)
-            # m_theta[track][mask_nan] = intp_theta(xm)
-            m_x[track][mask_nan] = mov_x
-            m_y[track][mask_nan] = mov_y
 
     # Update variables in dataset
     dset['movement_distance'] = ((tracks_dimname, times_dimname), m_mag, m_mag_attrs)
