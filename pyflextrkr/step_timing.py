@@ -326,7 +326,7 @@ class StepTimer:
         if self.client is None:
             return None
         try:
-            return len(self.client.scheduler_info()["workers"])
+            return len(self.client.scheduler_info(n_workers=-1)["workers"])      # the default reports at most 5 workers
         except Exception:
             return None
 
