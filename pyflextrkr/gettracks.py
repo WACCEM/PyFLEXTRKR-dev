@@ -8,6 +8,181 @@ import xarray as xr
 import logging
 from pyflextrkr.ft_utilities import subset_files_timerange, find_maxnclouds
 
+# gettracknumbers stops if more than this fraction of the track files is missing in the middle of the data
+# (each missing track file restarts the tracks there, see the chain check in gettracknumbers)
+MAX_CHAIN_BREAK_FRACTION = 0.05
+
+def write_tracknumbers(tracknumbers_outfile, itrack, basetime, cloudidfiles, tracknumber, trackstatus,
+                       trackmergenumber, tracksplitnumber, trackreset, singletrack_filebase, startdate, enddate,
+                       timegap, n_chain_breaks=0):
+    """
+    Write the track numbers file (the output of gettracknumbers). Also used by stitch_tracks.stitch_tracknumbers.
+
+    Arguments:
+        tracknumbers_outfile: string
+            Output file name; an existing file is replaced.
+        itrack: int
+            Next unused track number (the "ntracks" variable).
+        basetime: numpy array [nfiles] of datetime64
+            Time of each file (column).
+        cloudidfiles: numpy array [nfiles, ncharacters] of "S1"
+            File name of each column.
+        tracknumber, trackstatus, trackmergenumber, tracksplitnumber, trackreset: numpy arrays [1, nfiles, nclouds]
+            Track number of each cloud, status code, number of the track a small cloud merges into / splits from, and
+            the flag of track starts (1) and ends (2).
+        singletrack_filebase, startdate, enddate: string
+            Written to the attributes.
+        timegap: float
+            Maximum time gap [hour], written to the attributes.
+        n_chain_breaks: int (default: 0)
+            Number of places where a track file was missing and the tracks were restarted, written to the attributes.
+
+    Returns:
+        None
+    """
+    logger = logging.getLogger(__name__)
+    nfiles = basetime.shape[0]
+    maxnclouds = tracknumber.shape[2]
+    strlength = cloudidfiles.shape[1]
+
+    logger.debug("Writing all track statistics file")
+    logger.debug((time.ctime()))
+
+    # Check if file already exists. If exists, delete
+    if os.path.isfile(tracknumbers_outfile):
+        os.remove(tracknumbers_outfile)
+
+    # Define output variables dictionary
+    var_dict = {
+        "ntracks": (["time"], np.array([itrack])),
+        "basetimes": (["nfiles"], basetime[:nfiles].astype("datetime64[ns]")),
+        "cloudid_files": (["nfiles", "ncharacters"], cloudidfiles[:nfiles,:]),
+        "track_numbers": (["time", "nfiles", "nclouds"], tracknumber[:,:nfiles,:]),
+        "track_status": (["time", "nfiles", "nclouds"], trackstatus[:,:nfiles,:].astype(int)),
+        "track_mergenumbers": (["time", "nfiles", "nclouds"], trackmergenumber[:,:nfiles,:]),
+        "track_splitnumbers": (["time", "nfiles", "nclouds"], tracksplitnumber[:,:nfiles,:]),
+        "track_reset": (["time", "nfiles", "nclouds"], trackreset[:,:nfiles,:]),
+        }
+    coord_dict = {
+        "time": (["time"], np.arange(0, 1)),
+        "nfiles": (["nfiles"], np.arange(nfiles)),
+        "nclouds": (["nclouds"], np.arange(0, maxnclouds)),
+        "ncharacters": (["ncharacters"], np.arange(0, strlength)),
+    }
+    gattr_dict = {
+        "Title": "Indicates the track each cloud is linked to. " + \
+                 "Flags indicate how the clouds transition(evolve) between files.",
+        # "Conventions": "CF-1.6",
+        "Insitution": "Pacific Northwest National Laboratory",
+        "Contact": "Zhe Feng: zhe.feng@pnnl.gov",
+        "Created": time.ctime(time.time()),
+        # "source": datasource,
+        # "description": datadescription,
+        "singletrack_filebase": singletrack_filebase,
+        "startdate": startdate,
+        "enddate": enddate,
+        "timegap": str(timegap) + "-hours",
+        "n_chain_breaks": int(n_chain_breaks),
+    }
+    # Define Xarray dataset
+    ds_out = xr.Dataset(var_dict, coords=coord_dict, attrs=gattr_dict,)
+
+    # Set variable attributes
+    ds_out.ntracks.attrs["long_name"] = "number of cloud tracks"
+    ds_out.ntracks.attrs["units"] = "unitless"
+
+    ds_out.basetimes.attrs["long_name"] = "epoch time (seconds since 01/01/1970 00:00) of cloudid_files"
+    ds_out.basetimes.attrs["standard_name"] = "time"
+
+    ds_out.cloudid_files.attrs["long_name"] = "filename of each cloudid file used during tracking"
+    ds_out.cloudid_files.attrs["units"] = "unitless"
+
+    ds_out.track_numbers.attrs["long_name"] = "cloud track number"
+    ds_out.track_numbers.attrs["usage"] = "size: 1 by time by number of clouds. " + \
+    "Each column represents a cloudid file (time dimension). " + \
+    "Each row represents a cloud in that file (ex. row 0=cloud 1, row 1000=cloud 1001) through time. " + \
+    "The values indicate the track that cloud is in. This follows the largest cloud in mergers and splits."
+
+    ds_out.track_numbers.attrs["units"] = "unitless"
+    ds_out.track_numbers.attrs["valid_min"] = 1
+    ds_out.track_numbers.attrs["valid_max"] = itrack - 1
+
+    ds_out.track_status.attrs[
+        "long_name"
+    ] = "Flag indicating evolution / behavior for each cloud in a track"
+    ds_out.track_status.attrs["units"] = "unitless"
+    ds_out.track_status.attrs["valid_min"] = 0
+    ds_out.track_status.attrs["valid_max"] = 65
+
+    ds_out.track_mergenumbers.attrs[
+        "long_name"
+    ] = "Number of the track that this small cloud merges into"
+    ds_out.track_mergenumbers.attrs[
+        "usage"
+    ] = "size: 1 by time by number of clouds. Each column represents a cloudid file (time dimension). " + \
+        "Each row represets a cloud in that file through time. " + \
+        "Values give the track number associated with the small clouds in mergers."
+
+    ds_out.track_mergenumbers.attrs["units"] = "unitless"
+    ds_out.track_mergenumbers.attrs["valid_min"] = 1
+    ds_out.track_mergenumbers.attrs["valid_max"] = itrack - 1
+
+    ds_out.track_splitnumbers.attrs[
+        "long_name"
+    ] = "Number of the track that this small cloud splits from"
+    ds_out.track_splitnumbers.attrs[
+        "usage"
+    ] = "size: 1 by time by number of clouds. Each column represents a cloudid file (time). " + \
+        "Each row represets a cloud in that file through time. " + \
+        "Values give the track number associated with the small clouds in the split"
+    ds_out.track_splitnumbers.attrs["units"] = "unitless"
+    ds_out.track_splitnumbers.attrs["valid_min"] = 1
+    ds_out.track_splitnumbers.attrs["valid_max"] = itrack - 1
+
+    ds_out.track_reset.attrs[
+        "long_name"
+    ] = "flag of track starts and abrupt track stops"
+    ds_out.track_reset.attrs[
+        "usage"
+    ] = "Each row represents a cloudid file. Each column represents a cloud in that file. " + \
+        "Numbers indicate if the track started or adruptly ended during this file."
+    ds_out.track_reset.attrs[
+        "values"
+    ] = "0=Track starts and ends within a period of continuous data. " + \
+        "1=Track starts as the first file in the data set or after a data gap. " + \
+        "2=Track ends because data ends or gap in data."
+    ds_out.track_reset.attrs["units"] = "unitless"
+    ds_out.track_reset.attrs["valid_min"] = 0
+    ds_out.track_reset.attrs["valid_max"] = 2
+
+    # Write netcdf file
+    # Touch output file so HDF5 1.14.x H5Fis_accessible() probe does not
+    # fail with ENOENT and emit spurious diagnostics to stderr
+    open(tracknumbers_outfile, 'ab').close()
+    ds_out.to_netcdf(
+        path=tracknumbers_outfile,
+        mode="w",
+        format="NETCDF4_CLASSIC",
+        # unlimited_dims="ntracks",
+        encoding={
+            "ntracks": {"dtype": "int", "zlib": True},
+            "basetimes": {
+                "dtype": "int64",
+                "zlib": True,
+                "units": "seconds since 1970-01-01",
+            },
+            "cloudid_files": {
+                "zlib": True,
+            },
+            "track_numbers": {"dtype": "int", "zlib": True, "_FillValue": -9999},
+            "track_status": {"dtype": "int", "zlib": True, "_FillValue": -9999},
+            "track_mergenumbers": {"dtype": "int", "zlib": True, "_FillValue": -9999},
+            "track_splitnumbers": {"dtype": "int", "zlib": True, "_FillValue": -9999},
+            "track_reset": {"dtype": "int", "zlib": True, "_FillValue": -9999},
+        },
+    )
+
+
 def gettracknumbers(config):
     """
     Track features sequentially from the single track files.
@@ -125,6 +300,9 @@ def gettracknumbers(config):
     logger.debug(f"Number of files: {str(nfiles)}")
     logger.debug((time.ctime()))
     ifill = 0
+    # Chain check: the reference file of each track file must be the new file of the previous track file
+    prev_new_basename = None
+    n_chain_breaks = 0
     # Timers for the log: time reading the track and cloudid files vs the link search and bookkeeping
     t_io = 0.0
     t_loop0 = time.perf_counter()
@@ -199,9 +377,23 @@ def gettracknumbers(config):
         # If missing files exist need to increment track numbers
         if ifile > 0:
             time_diff = np.array([time_new - time_prev]).astype(float)
+            time_gap_found = time_diff > (timegap * 3600)
+            # The reference file of this track file must be the new file of the previous one. If a track file is missing
+            # in between and the two new times are closer than timegap, the test on the time difference does not see it, and
+            # the track numbers of the previous file would be carried to the clouds of another file. Handle it as a gap.
+            chain_broken = os.path.basename(ref_file) != prev_new_basename
+            if chain_broken and not time_gap_found:
+                n_chain_breaks += 1
+                logger.warning(f"Track chain broken: the reference file {os.path.basename(ref_file)} is not the new file of the "
+                               f"previous track file ({prev_new_basename}), a track file is missing. Tracks restart here.")
+                # Stop here, not after the loop: every break adds a column and the arrays have room for 30 % more columns
+                if n_chain_breaks > MAX_CHAIN_BREAK_FRACTION * nfiles:
+                    logger.critical(f"More than {MAX_CHAIN_BREAK_FRACTION:.0%} of the {nfiles} track files are missing in the "
+                                    f"middle of the data. Run tracksingle again. Tracking will now exit.")
+                    sys.exit("Code exits in gettracks.py")
             # Convert timegap from [hour] to [second]
             # if time_diff > (timegap * 3.6 * 10 ** 12):
-            if time_diff > (timegap * 3600):
+            if time_gap_found or chain_broken:
                 logger.info(f"Track terminates on: {ref_date}")
                 logger.info(f"Time difference: {time_diff}")
                 logger.info(f"Maximum timegap allowed: {timegap * 3600}")
@@ -229,6 +421,7 @@ def gettracknumbers(config):
         time_prev = time_new
         cloudidfiles[ifill + 1, :] = list(os.path.basename(new_file))
         basetime[ifill + 1] = basetime_new.item()
+        prev_new_basename = os.path.basename(new_file)
 
         ########################################################################################
         # Compare forward and backward single track matirces to link new and reference clouds
@@ -569,6 +762,8 @@ def gettracknumbers(config):
     t_loop = time.perf_counter() - t_loop0
     logger.info(f"gettracks timing: {t_loop:.1f} s over the file loop, of which reading the track and cloudid files "
                 f"{t_io:.1f} s and link search + bookkeeping {t_loop - t_io:.1f} s")
+    if n_chain_breaks > 0:
+        logger.warning(f"gettracks: {n_chain_breaks} track file(s) missing in the middle of the data, tracks restarted there")
 
     nfiles = ifill + 1
 
@@ -624,142 +819,10 @@ def gettracknumbers(config):
 
     #######################################################################
     # Save file
-    logger.debug("Writing all track statistics file")
-    logger.debug((time.ctime()))
-
-    # Check if file already exists. If exists, delete
-    if os.path.isfile(tracknumbers_outfile):
-        os.remove(tracknumbers_outfile)
-
-    # Define output variables dictionary
-    var_dict = {
-        "ntracks": (["time"], np.array([itrack])),
-        "basetimes": (["nfiles"], basetime[:nfiles].astype("datetime64[ns]")),
-        "cloudid_files": (["nfiles", "ncharacters"], cloudidfiles[:nfiles,:]),
-        "track_numbers": (["time", "nfiles", "nclouds"], tracknumber[:,:nfiles,:]),
-        "track_status": (["time", "nfiles", "nclouds"], trackstatus[:,:nfiles,:].astype(int)),
-        "track_mergenumbers": (["time", "nfiles", "nclouds"], trackmergenumber[:,:nfiles,:]),
-        "track_splitnumbers": (["time", "nfiles", "nclouds"], tracksplitnumber[:,:nfiles,:]),
-        "track_reset": (["time", "nfiles", "nclouds"], trackreset[:,:nfiles,:]),
-        }
-    coord_dict = {
-        "time": (["time"], np.arange(0, 1)),
-        "nfiles": (["nfiles"], np.arange(nfiles)),
-        "nclouds": (["nclouds"], np.arange(0, maxnclouds)),
-        "ncharacters": (["ncharacters"], np.arange(0, strlength)),
-    }
-    gattr_dict = {
-        "Title": "Indicates the track each cloud is linked to. " + \
-                 "Flags indicate how the clouds transition(evolve) between files.",
-        # "Conventions": "CF-1.6",
-        "Insitution": "Pacific Northwest National Laboratory",
-        "Contact": "Zhe Feng: zhe.feng@pnnl.gov",
-        "Created": time.ctime(time.time()),
-        # "source": datasource,
-        # "description": datadescription,
-        "singletrack_filebase": singletrack_filebase,
-        "startdate": startdate,
-        "enddate": enddate,
-        "timegap": str(timegap) + "-hours",
-    }
-    # Define Xarray dataset
-    ds_out = xr.Dataset(var_dict, coords=coord_dict, attrs=gattr_dict,)
-
-    # Set variable attributes
-    ds_out.ntracks.attrs["long_name"] = "number of cloud tracks"
-    ds_out.ntracks.attrs["units"] = "unitless"
-
-    ds_out.basetimes.attrs["long_name"] = "epoch time (seconds since 01/01/1970 00:00) of cloudid_files"
-    ds_out.basetimes.attrs["standard_name"] = "time"
-
-    ds_out.cloudid_files.attrs["long_name"] = "filename of each cloudid file used during tracking"
-    ds_out.cloudid_files.attrs["units"] = "unitless"
-
-    ds_out.track_numbers.attrs["long_name"] = "cloud track number"
-    ds_out.track_numbers.attrs["usage"] = "size: 1 by time by number of clouds. " + \
-    "Each column represents a cloudid file (time dimension). " + \
-    "Each row represents a cloud in that file (ex. row 0=cloud 1, row 1000=cloud 1001) through time. " + \
-    "The values indicate the track that cloud is in. This follows the largest cloud in mergers and splits."
-
-    ds_out.track_numbers.attrs["units"] = "unitless"
-    ds_out.track_numbers.attrs["valid_min"] = 1
-    ds_out.track_numbers.attrs["valid_max"] = itrack - 1
-
-    ds_out.track_status.attrs[
-        "long_name"
-    ] = "Flag indicating evolution / behavior for each cloud in a track"
-    ds_out.track_status.attrs["units"] = "unitless"
-    ds_out.track_status.attrs["valid_min"] = 0
-    ds_out.track_status.attrs["valid_max"] = 65
-
-    ds_out.track_mergenumbers.attrs[
-        "long_name"
-    ] = "Number of the track that this small cloud merges into"
-    ds_out.track_mergenumbers.attrs[
-        "usage"
-    ] = "size: 1 by time by number of clouds. Each column represents a cloudid file (time dimension). " + \
-        "Each row represets a cloud in that file through time. " + \
-        "Values give the track number associated with the small clouds in mergers."
-
-    ds_out.track_mergenumbers.attrs["units"] = "unitless"
-    ds_out.track_mergenumbers.attrs["valid_min"] = 1
-    ds_out.track_mergenumbers.attrs["valid_max"] = itrack - 1
-
-    ds_out.track_splitnumbers.attrs[
-        "long_name"
-    ] = "Number of the track that this small cloud splits from"
-    ds_out.track_splitnumbers.attrs[
-        "usage"
-    ] = "size: 1 by time by number of clouds. Each column represents a cloudid file (time). " + \
-        "Each row represets a cloud in that file through time. " + \
-        "Values give the track number associated with the small clouds in the split"
-    ds_out.track_splitnumbers.attrs["units"] = "unitless"
-    ds_out.track_splitnumbers.attrs["valid_min"] = 1
-    ds_out.track_splitnumbers.attrs["valid_max"] = itrack - 1
-
-    ds_out.track_reset.attrs[
-        "long_name"
-    ] = "flag of track starts and abrupt track stops"
-    ds_out.track_reset.attrs[
-        "usage"
-    ] = "Each row represents a cloudid file. Each column represents a cloud in that file. " + \
-        "Numbers indicate if the track started or adruptly ended during this file."
-    ds_out.track_reset.attrs[
-        "values"
-    ] = "0=Track starts and ends within a period of continuous data. " + \
-        "1=Track starts as the first file in the data set or after a data gap. " + \
-        "2=Track ends because data ends or gap in data."
-    ds_out.track_reset.attrs["units"] = "unitless"
-    ds_out.track_reset.attrs["valid_min"] = 0
-    ds_out.track_reset.attrs["valid_max"] = 2
-
-    # Write netcdf file
-    # Touch output file so HDF5 1.14.x H5Fis_accessible() probe does not
-    # fail with ENOENT and emit spurious diagnostics to stderr
-    open(tracknumbers_outfile, 'ab').close()
     t_write0 = time.perf_counter()
-    ds_out.to_netcdf(
-        path=tracknumbers_outfile,
-        mode="w",
-        format="NETCDF4_CLASSIC",
-        # unlimited_dims="ntracks",
-        encoding={
-            "ntracks": {"dtype": "int", "zlib": True},
-            "basetimes": {
-                "dtype": "int64",
-                "zlib": True,
-                "units": "seconds since 1970-01-01",
-            },
-            "cloudid_files": {
-                "zlib": True,
-            },
-            "track_numbers": {"dtype": "int", "zlib": True, "_FillValue": -9999},
-            "track_status": {"dtype": "int", "zlib": True, "_FillValue": -9999},
-            "track_mergenumbers": {"dtype": "int", "zlib": True, "_FillValue": -9999},
-            "track_splitnumbers": {"dtype": "int", "zlib": True, "_FillValue": -9999},
-            "track_reset": {"dtype": "int", "zlib": True, "_FillValue": -9999},
-        },
-    )
+    write_tracknumbers(tracknumbers_outfile, itrack, basetime[:nfiles], cloudidfiles[:nfiles, :], tracknumber[:, :nfiles, :],
+                       trackstatus[:, :nfiles, :], trackmergenumber[:, :nfiles, :], tracksplitnumber[:, :nfiles, :],
+                       trackreset[:, :nfiles, :], singletrack_filebase, startdate, enddate, timegap, n_chain_breaks)
     logger.info(f"gettracks timing: writing the track numbers file took {time.perf_counter() - t_write0:.1f} s")
     logger.info(tracknumbers_outfile)
     logger.info('Get track numbers done.')
