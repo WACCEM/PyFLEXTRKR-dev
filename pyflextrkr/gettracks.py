@@ -1,3 +1,4 @@
+import itertools
 import numpy as np
 import time
 import sys
@@ -11,6 +12,69 @@ from pyflextrkr.ft_utilities import subset_files_timerange, find_maxnclouds
 # gettracknumbers stops if more than this fraction of the track files is missing in the middle of the data
 # (each missing track file restarts the tracks there, see the chain check in gettracknumbers)
 MAX_CHAIN_BREAK_FRACTION = 0.05
+
+def _link_tables(refcloud_forward_index, newcloud_backward_index):
+    """
+    The links of one pair of cloudid files as lists.
+
+    Arguments:
+        refcloud_forward_index: (masked) numpy array [1, nreference, nlinks]
+            Row r (cloud r + 1 of the reference file) holds the numbers of the new clouds linked forward to it.
+        newcloud_backward_index: (masked) numpy array [1, nnew, nlinks]
+            Row q (cloud q + 1 of the new file) holds the numbers of the reference clouds linked backward to it.
+
+    Returns:
+        fwd_new_of_ref: dictionary {reference cloud number: list of the new clouds linked forward from it}
+        bwd_new_of_ref: dictionary {reference cloud number: list of the new clouds that list it in their backward links}
+        fwd_ref_of_new: dictionary {new cloud number: list of the reference clouds that list it in their forward links}
+            Masked (fill) elements are not links.
+    """
+    forward = np.ma.filled(refcloud_forward_index[0], 0)
+    backward = np.ma.filled(newcloud_backward_index[0], 0)
+    fwd_new_of_ref, bwd_new_of_ref, fwd_ref_of_new = {}, {}, {}
+    rows, cols = np.nonzero(forward > 0)
+    for row, new in zip(rows.tolist(), forward[rows, cols].tolist()):
+        fwd_new_of_ref.setdefault(row + 1, []).append(new)
+        fwd_ref_of_new.setdefault(new, []).append(row + 1)
+    rows, cols = np.nonzero(backward > 0)
+    for row, ref in zip(rows.tolist(), backward[rows, cols].tolist()):
+        bwd_new_of_ref.setdefault(ref, []).append(row + 1)
+    return fwd_new_of_ref, bwd_new_of_ref, fwd_ref_of_new
+
+
+def _link_group(seed, fwd_new_of_ref, bwd_new_of_ref, fwd_ref_of_new):
+    """
+    The group of clouds that are linked, directly or through other clouds, to a reference cloud.
+
+    The group grows until nothing is added: every new cloud that a member is linked to (forward from it, or backward from the new
+    cloud to it) belongs to the group, and every reference cloud that lists such a new cloud in its forward links is a member.
+
+    Arguments:
+        seed: int
+            Number of the reference cloud the group starts from.
+        fwd_new_of_ref, bwd_new_of_ref, fwd_ref_of_new: dictionaries
+            Output of _link_tables.
+
+    Returns:
+        reference_clouds: numpy array of int
+            Sorted numbers of the reference clouds of the group (includes the seed).
+        new_clouds: numpy array of int
+            Sorted numbers of the new clouds of the group (empty if the seed has no links).
+    """
+    members = {seed}
+    stack = [seed]
+    new_clouds = set()
+    while stack:
+        ref = stack.pop()
+        for new in itertools.chain(fwd_new_of_ref.get(ref, ()), bwd_new_of_ref.get(ref, ())):
+            if new not in new_clouds:
+                new_clouds.add(new)
+                for other in fwd_ref_of_new.get(new, ()):
+                    if other not in members:
+                        members.add(other)
+                        stack.append(other)
+    return np.array(sorted(members), dtype=int), np.array(sorted(new_clouds), dtype=int)
+
 
 def write_tracknumbers(tracknumbers_outfile, itrack, basetime, cloudidfiles, tracknumber, trackstatus,
                        trackmergenumber, tracksplitnumber, trackreset, singletrack_filebase, startdate, enddate,
@@ -430,6 +494,9 @@ def gettracknumbers(config):
         # Intiailize matrix for this time period
         # logger.debug('Generating tracks')
         # logger.debug((time.ctime()))
+        # The links of this pair of files as lists (one pass over the link arrays; the groups of linked clouds are then
+        # found without scanning the whole arrays for every cloud)
+        fwd_new_of_ref, bwd_new_of_ref, fwd_ref_of_new = _link_tables(refcloud_forward_index, newcloud_backward_index)
         trackfound = np.ones(nclouds_reference + 1, dtype=int) * -9999
 
         # Loop over all reference clouds
@@ -443,101 +510,12 @@ def gettracknumbers(config):
             # logger.debug((time.ctime()))
             if trackfound[ncr - 1] < 1:
 
-                # Find all clouds (both forward and backward) associated with this reference cloud
-                nreferenceclouds = 0
-                ntemp_referenceclouds = 1  # Start by forcing to see if track exists
-                temp_referenceclouds = [ncr]
-
-                trackpresent = 0
-                # logger.debug('Finding all associated clouds')
-                # logger.debug((time.ctime()))
-                while ntemp_referenceclouds > nreferenceclouds:
-                    associated_referenceclouds = np.copy(temp_referenceclouds).astype(
-                        int
-                    )
-                    nreferenceclouds = ntemp_referenceclouds
-
-                    for nr in range(0, nreferenceclouds):
-                        # logger.debug(('Processing cloud #: ' + str(nr)))
-                        # logger.debug((time.ctime()))
-                        tempncr = associated_referenceclouds[nr]
-
-                        # Find indices of forward linked clouds.
-                        # Need to subtract one since looping based on core number and
-                        # since python starts with indices at zero.
-                        # Row of that core is one less than its number.
-                        newforwardindex = np.array(
-                            np.where(refcloud_forward_index[0, tempncr - 1, :] > 0)
-                        )
-                        nnewforward = np.shape(newforwardindex)[1]
-                        if nnewforward > 0:
-                            core_newforward = refcloud_forward_index[
-                                0, tempncr - 1, newforwardindex[0, :]
-                            ]
-
-                        # Find indices of backwards linked clouds
-                        newbackwardindex = np.array(
-                            np.where(newcloud_backward_index[0, :, :] == tempncr)
-                        )
-                        nnewbackward = np.shape(newbackwardindex)[1]
-                        if nnewbackward > 0:
-                            # Need to add one since want the core index, which starts at one.
-                            # But this is using that row number, which starts at zero.
-                            core_newbackward = (newbackwardindex[0, :] + 1)
-
-                        # Put all the indices associated with new clouds linked to the reference cloud in one vector
-                        if nnewforward > 0:
-                            if trackpresent == 0:
-                                associated_newclouds = core_newforward[:].astype(int)
-                                trackpresent = trackpresent + 1
-                            else:
-                                associated_newclouds = np.append(
-                                    associated_newclouds, core_newforward.astype(int)
-                                )
-
-                        if nnewbackward > 0:
-                            if trackpresent == 0:
-                                associated_newclouds = core_newbackward[:]
-                                trackpresent = trackpresent + 1
-                            else:
-                                associated_newclouds = np.append(
-                                    associated_newclouds, core_newbackward.astype(int)
-                                )
-
-                        if nnewbackward == 0 and nnewforward == 0:
-                            associated_newclouds = []
-
-                        # If the reference cloud is linked to a new cloud
-                        if trackpresent > 0:
-                            # Sort and find the unique new clouds associated with the reference cloud
-                            if len(associated_newclouds) > 1:
-                                associated_newclouds = np.unique(
-                                    np.sort(associated_newclouds)
-                                )
-                            nnewclouds = len(associated_newclouds)
-
-                            # Find reference clouds associated with each new cloud.
-                            # Look to see if these new clouds are linked to other cells in the reference file as well.
-                            for nnew in range(0, nnewclouds):
-                                # Find associated reference clouds
-                                referencecloudindex = np.array(
-                                    np.where(
-                                        refcloud_forward_index[0, :, :]
-                                        == associated_newclouds[nnew]
-                                    )
-                                )
-                                nassociatedreference = np.shape(referencecloudindex)[1]
-                                if nassociatedreference > 0:
-                                    temp_referenceclouds = np.append(
-                                        temp_referenceclouds, referencecloudindex[0] + 1
-                                    )
-                                    temp_referenceclouds = np.unique(
-                                        np.sort(temp_referenceclouds)
-                                    )
-
-                            ntemp_referenceclouds = len(temp_referenceclouds)
-                        else:
-                            nnewclouds = 0
+                # Find all clouds (both forward and backward) associated with this reference cloud:
+                # the group of reference and new clouds that are linked to each other (_link_group)
+                associated_referenceclouds, associated_newclouds = _link_group(
+                    int(ncr), fwd_new_of_ref, bwd_new_of_ref, fwd_ref_of_new)
+                nreferenceclouds = len(associated_referenceclouds)
+                nnewclouds = len(associated_newclouds)
 
                 #################################################################
                 # Now get the track status

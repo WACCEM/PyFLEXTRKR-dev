@@ -58,3 +58,17 @@ def test_too_many_missing_track_files_stop(tmp_path):
     info = syn.write_synthetic_tracking(str(tmp_path / "data"), nframes=20, seed=1, skip_track_files=tuple(range(2, 20, 2)))
     with pytest.raises(SystemExit):
         _run(info, tmp_path, "new", gettracks)
+
+
+@pytest.mark.parametrize("symmetric", [True, False], ids=["symmetric", "asymmetric"])
+@pytest.mark.parametrize("seed", range(6))
+def test_group_search_equals_the_original_with_many_clouds_and_dense_links(tmp_path, seed, symmetric):
+    # Many clouds per file and many links per cloud: large groups of mergers and splits, forward and backward links that
+    # disagree (asymmetric), clouds reached from two groups
+    info = syn.write_synthetic_tracking(str(tmp_path / "data"), nframes=25, seed=100 + seed, max_clouds=45, nlinks=6,
+                                        link_density=0.95, symmetric_links=symmetric, skip_frames=(12,))
+    new = _run(info, tmp_path, "new", gettracks, maxnclouds=60)
+    old = _run(info, tmp_path, "old", ref, maxnclouds=60)
+    assert syn.same_tracknumbers(new, old) == []
+    assert int(new["ntracks"][0]) > 100                      # the data have many tracks, mergers and splits
+    assert (new["track_status"] >= 13).any()                 # statuses of splits and of mergers with splits occur
