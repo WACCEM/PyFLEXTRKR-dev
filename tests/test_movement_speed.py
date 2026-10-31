@@ -380,3 +380,25 @@ class TestMovementSpeedEndToEnd:
         np.testing.assert_allclose(speed[1, :11], 10.0, rtol=1e-5)
         assert np.isnan(speed[1, 11])
         assert np.all(np.isnan(speed[2]))                                                  # track 3 (3x3 pixels) is too small
+
+
+class TestLagForSpeed:
+    """lag_for_speed > 1 pairs the files `lag` steps apart: nfiles - lag pairs. The loop used to run over nfiles - 1 pairs (IndexError)."""
+
+    @pytest.mark.parametrize("lag", [2, 3])
+    def test_a_longer_lag_measures_the_same_motion(self, pixel_dir, lag):
+        config = make_config(pixel_dir, f"lag{lag}")
+        config["lag_for_speed"] = lag
+        ds = xr.open_dataset(new.movement_speed(config), decode_times=False, mask_and_scale=False)
+        speed, distance = ds["movement_speed"].values, ds["movement_distance"].values
+        # track 2 moves 1 pixel (3 km) per 300 s step = 10 m/s, whatever the lag; a pair needs the track in both files
+        n_pairs = NFILES - lag
+        assert np.isfinite(speed[1]).sum() == n_pairs and np.all(np.isnan(speed[1][n_pairs:]))
+        np.testing.assert_allclose(speed[1][:n_pairs], 10.0, rtol=1e-5)
+        # the distance of a pair is divided by the lag: km per step
+        np.testing.assert_allclose(distance[1][:n_pairs], 3.0, rtol=1e-5)
+
+    def test_lag_one_is_not_changed(self, pixel_dir):
+        config = make_config(pixel_dir, "lag1")
+        ds = xr.open_dataset(new.movement_speed(config), decode_times=False, mask_and_scale=False)
+        assert np.isfinite(ds["movement_speed"].values[1]).sum() == NFILES - 1

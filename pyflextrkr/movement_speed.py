@@ -103,14 +103,14 @@ def movement_speed(
     stats_start_basetime = ds_stats.variables['base_time'][:, 0].values
     ds_stats.close()
 
-    # Make file pairs
+    # Make file pairs: the files `lag` steps apart, nfiles - lag pairs (nfiles - 1 for lag 1)
     filepairs = list(zip(filelist[0:-lag], filelist[lag::]))
 
 
     results = []
     # Serial
     if run_parallel == 0:
-        for ifile in range(0, nfiles-1):
+        for ifile in range(len(filepairs)):
             result = movement_of_feature_fft(
                 filepairs[ifile], ntracks,
                 config, sparse=True,
@@ -120,7 +120,7 @@ def movement_speed(
     # Parallel
     elif run_parallel >= 1:
         from dask.distributed import wait       # only the parallel mode needs the `distributed` package (the CI environment has none)
-        for ifile in range(0, nfiles-1):
+        for ifile in range(len(filepairs)):
             result = dask.delayed(movement_of_feature_fft)(
                 filepairs[ifile], ntracks,
                 config, sparse=True,
@@ -589,6 +589,11 @@ def align_movement_to_tracks(results, stats_start_basetime, ntimes, lag):
 def movement_attrs(lag):
     """
     Attributes of the movement variables.
+
+    Note: movement_distance (and its x, y components) is the displacement between the two files of a pair divided by lag, i.e. km per
+    time step, while its 'comments' attribute says "total movement ... between lag estimates"; the text is kept so that files of
+    different versions have the same attributes. movement_speed is the full displacement over the time between the two files, in m/s,
+    so it does not depend on lag. At lag 1 the two readings agree.
 
     Args:
         lag: int

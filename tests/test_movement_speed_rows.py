@@ -55,6 +55,14 @@ def test_rows_step_equals_dense_step_for_other_speed_thresholds(pixel_dir, thres
     assert table_differences(dense, rows) == []
 
 
+@pytest.mark.parametrize("lag", [2, 3])
+def test_rows_step_equals_dense_step_for_longer_lags(pixel_dir, lag):
+    dense, rows = run_both(pixel_dir, f"rows_lag{lag}", lag_for_speed=lag)
+    assert table_differences(dense, rows) == []
+    speed = rows.entries["movement_speed"]
+    assert np.isfinite(speed).sum() >= 10 - lag + 1                       # track 2 alone has nfiles - lag values
+
+
 def test_the_robust_variables_are_kept_and_the_movement_variables_added(pixel_dir):
     _, rows = run_both(pixel_dir, "rows_c")
     robust = read_tables(make_config(pixel_dir, "rows_c")["stats_outpath"] + f"robust_{DATES}.rows")

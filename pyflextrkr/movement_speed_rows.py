@@ -95,16 +95,16 @@ def movement_speed_rows(
     has_entries = duration > 0
     stats_start_basetime[has_entries] = tables.entries["base_time"][offsets[:-1][has_entries]]
 
-    # Movement of every file pair (the function of the dense step)
+    # Movement of every file pair (the function of the dense step): the files `lag` steps apart, nfiles - lag pairs
     filepairs = list(zip(filelist[0:-lag], filelist[lag::]))
     results = []
     if run_parallel == 0:
-        for ifile in range(0, nfiles - 1):
+        for ifile in range(len(filepairs)):
             results.append(movement_of_feature_fft(filepairs[ifile], ntracks, config, sparse=True))
         final_result = results
     elif run_parallel >= 1:
         from dask.distributed import wait       # only the parallel mode needs the `distributed` package (the CI environment has none)
-        for ifile in range(0, nfiles - 1):
+        for ifile in range(len(filepairs)):
             results.append(dask.delayed(movement_of_feature_fft)(filepairs[ifile], ntracks, config, sparse=True))
         final_result = dask.compute(*results)
         wait(final_result)
