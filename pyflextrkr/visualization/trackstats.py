@@ -9,10 +9,14 @@ One function per kind of track statistics file:
     get_generic_track_stats  generic feature tracks (meanlon / meanlat)
     get_cartesian_track_stats  tracks of a domain in x/y (meters or km, optionally scaled)
 
-Called by: mcs_cli, cell_cli, generic_cli, cartesian_cli. Calls: xarray, numpy.
+The files are read with rowstats.load_trackstats: a dense netCDF file stays lazy (as xarray.open_dataset), a row folder
+(stats_format: rows) is rebuilt as dense arrays of the variables the function uses.
+
+Called by: mcs_cli, cell_cli, generic_cli, cartesian_cli. Calls: rowstats.load_trackstats, numpy.
 """
 import numpy as np
-import xarray as xr
+
+from pyflextrkr.rowstats import load_trackstats
 
 #-----------------------------------------------------------------------
 def _select_tracks(dss, start_datetime, end_datetime):
@@ -56,7 +60,7 @@ def get_mcs_track_stats(trackstats_file, start_datetime, end_datetime, dt_thres,
             Dictionary containing track stats data.
     """
     # Read track stats file
-    dss = xr.open_dataset(trackstats_file)
+    dss = load_trackstats(trackstats_file, variables=['base_time', 'meanlon', 'meanlat', 'meanlon_smooth', 'meanlat_smooth', 'pf_lon', 'pf_lat', 'pf_lon_centroid', 'pf_lat_centroid', 'pf_area'], fragments=False)
     idx, ntracks, time_res = _select_tracks(dss, start_datetime, end_datetime)
 
     # Check if smoothed coordinates exist, otherwise use regular coordinates
@@ -123,7 +127,7 @@ def get_cell_track_stats(trackstats_file, start_datetime, end_datetime, dt_thres
             Dictionary containing track stats data.
     """
     # Read track stats file
-    dss = xr.open_dataset(trackstats_file)
+    dss = load_trackstats(trackstats_file, variables=['base_time', 'cell_meanlon', 'cell_meanlat'], fragments=False)
     idx, ntracks, time_res = _select_tracks(dss, start_datetime, end_datetime)
 
     # Only the tracks that live at least min_hours
@@ -182,7 +186,7 @@ def get_generic_track_stats(trackstats_file, start_datetime, end_datetime, dt_th
             Dictionary containing track stats data.
     """
     # Read track stats file
-    dss = xr.open_dataset(trackstats_file)
+    dss = load_trackstats(trackstats_file, variables=['base_time', 'meanlon', 'meanlat'], fragments=False)
     idx, ntracks, time_res = _select_tracks(dss, start_datetime, end_datetime)
 
     # Calculate track lifetime
@@ -219,7 +223,7 @@ def get_cartesian_track_stats(trackstats_file, start_datetime, end_datetime, dt_
             Dictionary containing track stats data.
     """
     # Read track stats file
-    dss = xr.open_dataset(trackstats_file)
+    dss = load_trackstats(trackstats_file, variables=['base_time', 'meanlon', 'meanlat', 'pf_lon', 'pf_lat'], fragments=False)
     idx, ntracks, time_res = _select_tracks(dss, start_datetime, end_datetime)
 
     # Calculate track lifetime

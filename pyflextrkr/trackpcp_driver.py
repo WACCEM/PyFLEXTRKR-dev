@@ -44,6 +44,7 @@ from pyflextrkr.ft_utilities import (
 )
 from pyflextrkr.trackvar_io import open_data_source, class_info
 from pyflextrkr.parallel_utils import run_bounded
+from pyflextrkr.rowstats import load_trackstats, stats_exists
 from pyflextrkr import trackpcp_func as F
 
 MAX_BAD_FRACTION = 0.05
@@ -111,18 +112,20 @@ def _pixel_files(config, S):
 
 
 def open_tracks(config, S):
-    """Track statistics file (lazy), the base times and the class information."""
+    """Track statistics file (dense netCDF or row folder), the base times and the class information."""
     logger = logging.getLogger(__name__)
     stats_file = f"{config['stats_outpath']}{S['stats_filebase']}{config['startdate']}_{config['enddate']}.nc"
-    if not os.path.isfile(stats_file):
+    if not stats_exists(stats_file):
         logger.critical(f"{stats_file} not found. Tracking will now exit.")
         sys.exit(1)
-    ds = xr.open_dataset(stats_file, mask_and_scale=False, decode_times=False)
+    cv = S["class_varname"]
+    # Dense netCDF file (lazy) or row folder (rebuilt as dense arrays of the variables used here)
+    ds = load_trackstats(stats_file, variables=["base_time", "meanlon", "meanlat"] + ([cv] if cv else []), fragments=False,
+                         mask_and_scale=False, decode_times=False)
     basetime = ds["base_time"].values.astype(float)
     ntracks, ntimes = basetime.shape
     T = {"ds": ds, "stats_file": stats_file, "basetime": basetime, "ntracks": ntracks, "ntimes": ntimes,
          "class_lut": None, "class2d": None, "class_values": None, "class_names": None}
-    cv = S["class_varname"]
     if cv and cv in ds:
         var = ds[cv]
         vals = var.values

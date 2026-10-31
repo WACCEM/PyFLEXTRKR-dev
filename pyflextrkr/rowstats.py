@@ -1029,7 +1029,7 @@ def table_differences(a, b, ignore_global_attrs=("Created_on",)):
 
 
 def load_trackstats(path, tracks=None, variables=None, width=None, mask_and_scale=True, decode_times=True, tracks_dim="tracks",
-                    times_dim="times"):
+                    times_dim="times", slots_dim="mergers", fragments=True):
     """
     Dense xarray Dataset of a track statistics file in either format: the helper for code that was written for the dense files.
 
@@ -1053,8 +1053,12 @@ def load_trackstats(path, tracks=None, variables=None, width=None, mask_and_scal
             _FillValue attributes, as the pipeline steps read the files.
         decode_times: bool (default: True)
             As in xarray.open_dataset: time units decoded (False: the numbers).
-        tracks_dim, times_dim: string (default: 'tracks', 'times')
+        tracks_dim, times_dim, slots_dim: string (default: 'tracks', 'times', 'mergers')
             Names of the dimensions of a dense file.
+        fragments: bool (default: True)
+            False: leave out the [tracks, times, slots] merge / split fragment variables (other three-dimensional variables, e.g.
+            [tracks, times, nmaxpf], stay). With variables=[] the result then has only the per-track variables, the cheap first
+            look at a file (a row folder never builds a dense array for them).
 
     Returns:
         ds: xarray.Dataset
@@ -1063,11 +1067,33 @@ def load_trackstats(path, tracks=None, variables=None, width=None, mask_and_scal
     if folder is None and not os.path.exists(path) and path.endswith(".nc") and os.path.isdir(path[:-3] + ".rows"):
         folder = path[:-3] + ".rows"
     if folder is not None:
-        ds = RowStats.open(folder).to_xarray(tracks=tracks, variables=variables, width=width)
+        tables = RowStats.open(folder).tables(variables)
+        if not fragments:
+            tables = RowTables(tables.tracks, tables.entries, {}, dict(tables.meta, vars_3d=[]))
+        ds = rows_to_dense(tables, tracks=tracks, width=width)
         return xr.decode_cf(ds, mask_and_scale=mask_and_scale, decode_times=decode_times)
     ds = xr.open_dataset(path, mask_and_scale=mask_and_scale, decode_times=decode_times)
     if variables is not None:
         ds = ds.drop_vars([v for v in ds.data_vars if ds[v].dims == (tracks_dim, times_dim) and v not in variables])
+    if not fragments:
+        ds = ds.drop_vars([v for v in ds.data_vars if ds[v].dims == (tracks_dim, times_dim, slots_dim)])
     if tracks is not None:
         ds = ds.isel({tracks_dim: np.asarray(tracks, dtype=np.int64)})
     return ds
+
+
+def stats_exists(path):
+    """
+    Does a track statistics file exist, in either format? The check for code that asked os.path.isfile for the dense file.
+
+    Args:
+        path: string
+            Dense netCDF file, row folder, or the .nc name of a statistics file that may only exist as a row folder
+            (the names load_trackstats accepts).
+
+    Returns:
+        exists: bool
+    """
+    if os.path.exists(path):
+        return True
+    return path.endswith(".nc") and os.path.isdir(path[:-3] + ".rows")

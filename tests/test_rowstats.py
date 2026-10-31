@@ -188,6 +188,39 @@ def test_load_trackstats_reads_both_formats_alike(tmp_path):
     np.testing.assert_array_equal(sub["track_duration"].values, want["track_duration"].values[[5, 2]])
 
 
+def test_load_trackstats_without_fragments_gives_the_per_track_variables_in_either_format(tmp_path):
+    from pyflextrkr.rowstats import load_trackstats
+    path = _write(tmp_path, _dense())
+    write_rows(dense_to_rows(path), str(tmp_path / "dense.rows"))
+    for given in (path, str(tmp_path / "dense.rows")):
+        first = load_trackstats(given, variables=[], fragments=False)
+        assert set(first.data_vars) == {"track_duration", "is_mcs", "lifecycle_index"}          # no [tracks, times] and no slot variables
+        with_slots = load_trackstats(given, variables=["area"], fragments=False)
+        assert set(with_slots.data_vars) == {"track_duration", "is_mcs", "lifecycle_index", "area"}
+        full = load_trackstats(given, variables=[])
+        assert "merge_area" in full and full["merge_area"].dims == ("tracks", "times", "mergers")
+    a, b = (load_trackstats(g, variables=[], fragments=False) for g in (path, str(tmp_path / "dense.rows")))
+    xr.testing.assert_identical(a, b)
+    # a dense file with another three-dimensional variable (Tb+PF: [tracks, times, nmaxpf]) keeps it
+    tbpf = _dense()
+    tbpf["pf_area"] = (["tracks", "times", "nmaxpf"], np.zeros((NTRACKS, NTIMES, 2), dtype=np.float32))
+    other = str(tmp_path / "tbpf.nc")
+    tbpf.to_netcdf(other, format="NETCDF4", unlimited_dims="tracks")
+    kept = load_trackstats(other, variables=["area"], fragments=False)
+    assert "pf_area" in kept and "merge_area" not in kept
+
+
+def test_stats_exists_finds_either_format(tmp_path):
+    from pyflextrkr.rowstats import stats_exists
+    path = _write(tmp_path, _dense())
+    assert stats_exists(path) and not stats_exists(str(tmp_path / "other.nc"))
+    write_rows(dense_to_rows(path), str(tmp_path / "dense.rows"))
+    assert stats_exists(str(tmp_path / "dense.rows"))
+    os.remove(path)
+    assert stats_exists(path)                                              # the .nc name of a file that only exists as a row folder
+    assert not stats_exists(str(tmp_path / "other.nc")) and not stats_exists(str(tmp_path / "missing.rows"))
+
+
 def _convert_stats():
     import importlib.util
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runscripts", "convert_stats.py")
