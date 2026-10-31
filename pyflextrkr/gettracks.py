@@ -246,7 +246,9 @@ def gettracknumbers(config):
 
     fillval_f = np.nan
     missingfrac = 0.3
-    nfiles_m = int(nfiles*(1.+missingfrac))
+    # Room for the columns of all files, the extra columns of gaps, and the first file (+ 2 also covers a period of 1-3 track files,
+    # which needs nfiles + 1 columns); the output is cut to the columns used
+    nfiles_m = int(nfiles*(1.+missingfrac)) + 2
     tracknumber = np.full((1, nfiles_m, maxnclouds), fillval, dtype=int)
     referencetrackstatus = np.full((nfiles_m, maxnclouds), fillval_f, dtype=float)
     newtrackstatus = np.full((nfiles_m, maxnclouds), fillval_f, dtype=float)

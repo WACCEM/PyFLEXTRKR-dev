@@ -69,8 +69,35 @@ def _random_links(rng, n_from, n_to, nlinks, density):
     return links
 
 
+def _transpose_links(forward, n_to, nlinks):
+    """
+    The backward links that mirror the forward links: cloud q of the other file is linked back to every cloud r whose forward
+    links contain q.
+
+    Args:
+        forward: numpy.ndarray [1, n_from + 1, nlinks]
+            Forward links (see _random_links).
+        n_to: int
+            Number of clouds of the other file.
+        nlinks: int
+            Maximum links per cloud.
+
+    Returns:
+        backward: numpy.ndarray [1, n_to + 1, nlinks] of int
+    """
+    backward = np.full((1, n_to + 1, nlinks), FILLVAL, dtype=int)
+    count = np.zeros(n_to + 1, dtype=int)
+    for r in range(1, forward.shape[1]):
+        for q in forward[0, r - 1]:
+            if q > 0 and count[q - 1] < nlinks:
+                backward[0, q - 1, count[q - 1]] = r
+                count[q - 1] += 1
+    return backward
+
+
 def write_synthetic_tracking(folder, nframes=12, seed=0, max_clouds=8, nlinks=4, dt=300, t0="2020-01-01 00:00:00",
-                             skip_frames=(), skip_track_files=(), timegap_hours=0.25, link_density=0.8):
+                             skip_frames=(), skip_track_files=(), timegap_hours=0.25, link_density=0.8,
+                             symmetric_links=False):
     """
     Write cloudid_*.nc and track_*.nc files of random clouds.
 
@@ -97,6 +124,10 @@ def write_synthetic_tracking(folder, nframes=12, seed=0, max_clouds=8, nlinks=4,
             Frames further apart than this get no track file (as in tracksingle).
         link_density: float (default: 0.8)
             Probability that a cloud has links.
+        symmetric_links: bool (default: False)
+            True: the backward links are the transpose of the forward links (a link seen from both sides, as in clean
+            tracksingle output). False: forward and backward links are drawn independently, so they disagree; gettracknumbers
+            then sometimes reaches a cloud from two groups (the real c4 and c7 tracking has none of this).
 
     Returns:
         info: dictionary
@@ -121,7 +152,8 @@ def write_synthetic_tracking(folder, nframes=12, seed=0, max_clouds=8, nlinks=4,
         if not (0 < hours < timegap_hours) or b in skip_track_files:
             continue
         forward = _random_links(rng, ncl[a], ncl[b], nlinks, link_density)
-        backward = _random_links(rng, ncl[b], ncl[a], nlinks, link_density)
+        backward = _transpose_links(forward, ncl[b], nlinks) if symmetric_links else \
+            _random_links(rng, ncl[b], ncl[a], nlinks, link_density)
         ds = xr.Dataset(
             {
                 "basetime_new": (["time"], np.array([pd.to_datetime(epoch[b], unit="s")], dtype="datetime64[ns]")),
@@ -212,13 +244,40 @@ def file_names(data):
     return ["".join(c.decode() for c in row.ravel()) for row in data["cloudid_files"]]
 
 
-def same_tracknumbers(a, b):
+def stale_reset_zeros(stitched, whole):
+    """
+    Entries where the continuous result has track_reset 0 for a track that is NOT new in that column (its number is in the
+    column before) and the stitched result has the fill value.
+
+    These stale zeros are left by gettracknumbers when a cloud is reached from two groups of linked clouds (forward and backward
+    links that disagree): the first group gives the cloud a new track and flags the start, the second group overwrites the number
+    with a continuing one. The end flag written over the last column of a period hides them, so a stitched file cannot have them.
+
+    Args:
+        stitched, whole: dictionary
+            Output of read_tracknumbers for the stitched and the continuous result (same shape).
+
+    Returns:
+        mask: numpy.ndarray of bool, shape of track_reset
+    """
+    numbers, reset = whole["track_numbers"][0], whole["track_reset"][0]
+    mask = np.zeros(reset.shape, dtype=bool)
+    for col in range(1, reset.shape[0]):
+        previous = numbers[col - 1][numbers[col - 1] > 0]
+        mask[col] = (reset[col] == 0) & (numbers[col] > 0) & np.isin(numbers[col], previous) & \
+            (stitched["track_reset"][0][col] == FILLVAL)
+    return mask[None]
+
+
+def same_tracknumbers(a, b, allow_stale_reset=False):
     """
     Whether two tracknumbers files hold the same tracking result.
 
     Args:
         a, b: dictionary or string
-            Output of read_tracknumbers, or the file path.
+            Output of read_tracknumbers, or the file path. For allow_stale_reset a is the stitched and b the continuous result.
+        allow_stale_reset: bool (default: False)
+            Do not count the stale zeros of track_reset (see stale_reset_zeros) as differences.
 
     Returns:
         problems: list of strings
@@ -230,6 +289,10 @@ def same_tracknumbers(a, b):
     for name in TRACK_VARIABLES:
         if a[name].shape != b[name].shape:
             problems.append(f"{name}: shape {a[name].shape} vs {b[name].shape}")
-        elif not np.array_equal(a[name], b[name]):
-            problems.append(f"{name}: {int(np.count_nonzero(a[name] != b[name]))} elements differ")
+            continue
+        different = a[name] != b[name]
+        if name == "track_reset" and allow_stale_reset:
+            different &= ~stale_reset_zeros(a, b)
+        if different.any():
+            problems.append(f"{name}: {int(np.count_nonzero(different))} elements differ")
     return problems
