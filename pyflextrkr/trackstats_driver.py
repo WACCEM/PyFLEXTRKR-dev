@@ -203,9 +203,11 @@ def trackstats_driver(config):
         out_dict[ivar] = np.array([])
         out_dict_attrs[ivar] = var_attrs[ivar]
 
-    # Initialize row/col indices arrays
-    row_idx = np.array([])
-    col_idx = np.array([])
+    # Per-file pieces of the variables and of the row/col indices: concatenated once after the loop (concatenating onto the
+    # growing arrays at every file copies everything again each time: 6 s for 1,189 files, 5.6 min for a month and 13 h for a
+    # year of 105,000 files). The empty float array in front gives the same dtype as the file-by-file concatenation did.
+    pieces = {ivar: [] for ivar in var_names}
+    row_pieces, col_pieces = [], []
 
     # Collect results
     for nf in range(0, nfiles):
@@ -225,17 +227,20 @@ def trackstats_driver(config):
             )
 
             itracklength = out_dict["track_duration"][tracknumbertmp]
-            # Loop over each variable and assign values to output dictionary
+            # Keep the values of this file
             for ivar in var_names:
-                # Concatenate arrays for 2D variables
-                out_dict[ivar] = np.concatenate(
-                    (out_dict[ivar], iResult[ivar])
-                )
+                pieces[ivar].append(iResult[ivar])
             # row, column indices for sparse matrix (row:tracks, col:times)
             # Collect all entries unconditionally; filtering happens after the
             # auto-update check so that max_trackduration is already final.
-            row_idx = np.concatenate((row_idx, tracknumbertmp)).astype(int)
-            col_idx = np.concatenate((col_idx, itracklength - 1)).astype(int)
+            row_pieces.append(tracknumbertmp)
+            col_pieces.append(itracklength - 1)
+
+    # Assign the values of all files to the output dictionary
+    for ivar in var_names:
+        out_dict[ivar] = np.concatenate([np.array([])] + pieces[ivar])
+    row_idx = np.concatenate([np.array([])] + row_pieces).astype(int)
+    col_idx = np.concatenate([np.array([])] + col_pieces).astype(int)
 
     logger.info(f"trackstats: collecting the per-file results took {(time.time() - t0_collect) / 60.0:.2f} min")
 
