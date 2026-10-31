@@ -5,8 +5,10 @@ and `[tracks, times, slots]` arrays. They are almost empty: a track lives for `t
 has the width of the longest track, and the merge / split fragments fill a few of the 50 slots. For the 4-day case c4 (31,137
 tracks, 1,189 frames) the arrays are 21.7 GB uncompressed, for a month about 180 GB, for a year about 3 TB.
 
-With `stats_format: rows` the same numbers are stored as three tables, one row per thing that exists: the file is a few MB, the
-steps need memory and time for the entries that exist (about 20 million for a year), and a year fits in **one** file.
+With `stats_format: rows` the same numbers are stored as three tables, one row per thing that exists: the file is a few MB for c4 (125 MB
+for May 2025, whose dense file is 1.23 GB on disk), the steps need memory and time for the entries that exist (1.7 million per month, about
+20 million for a year), and a year fits in **one** file. Measured: identifymcs of a month takes 3.3 min instead of 31 min, of six months
+17.7 min with 5.5 GB; regionprops of a month 3.9 min instead of 36 min.
 `stats_format: dense` (the default) writes the netCDF files as before; the two formats hold identical numbers, and a helper gives
 the dense arrays back for any selection of tracks.
 
