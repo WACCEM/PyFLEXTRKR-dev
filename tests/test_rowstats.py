@@ -179,8 +179,10 @@ def test_load_trackstats_reads_both_formats_alike(tmp_path):
     os.remove(path)
     xr.testing.assert_identical(load_trackstats(path), want)
     # raw contents, a subset of tracks (the width follows the subset for rows), a subset of variables
-    raw = load_trackstats(str(tmp_path / "dense.rows"), decode=False)
+    raw = load_trackstats(str(tmp_path / "dense.rows"), mask_and_scale=False, decode_times=False)
     assert raw["cloudnumber"].dtype == np.int32 and raw["cloudnumber"].attrs["_FillValue"] == -9999
+    masked = load_trackstats(str(tmp_path / "dense.rows"), mask_and_scale=True, decode_times=False)   # as the consumers of the files do
+    assert masked["cloudnumber"].dtype == np.float64 and np.isnan(masked["cloudnumber"].values).any()
     sub = load_trackstats(str(tmp_path / "dense.rows"), tracks=[5, 2], variables=["area"])
     assert sub.sizes["tracks"] == 2 and "cloudnumber" not in sub and "area" in sub and "merge_cloudnumber" in sub
     np.testing.assert_array_equal(sub["track_duration"].values, want["track_duration"].values[[5, 2]])

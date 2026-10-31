@@ -1028,13 +1028,15 @@ def table_differences(a, b, ignore_global_attrs=("Created_on",)):
     return out
 
 
-def load_trackstats(path, tracks=None, variables=None, width=None, decode=True, tracks_dim="tracks", times_dim="times"):
+def load_trackstats(path, tracks=None, variables=None, width=None, mask_and_scale=True, decode_times=True, tracks_dim="tracks",
+                    times_dim="times"):
     """
     Dense xarray Dataset of a track statistics file in either format: the helper for code that was written for the dense files.
 
-    The same call reads a dense netCDF file (mcs_tracks_robust_X.nc) and a row folder (mcs_tracks_robust_X.rows), and a file name
-    ending in .nc whose file does not exist but whose row folder does (so scripts that build the old file names keep working).
-    The result has the dimensions, names, dtypes, fill values and attributes of the dense file.
+    A drop-in for xarray.open_dataset(path, mask_and_scale=..., decode_times=...) on the statistics files: the same call reads a dense
+    netCDF file (mcs_tracks_robust_X.nc) and a row folder (mcs_tracks_robust_X.rows), and a file name ending in .nc whose file does not
+    exist but whose row folder does (so scripts that build the old file names keep working). The result has the dimensions, names,
+    dtypes, fill values and attributes of the dense file.
 
     Args:
         path: string
@@ -1046,9 +1048,11 @@ def load_trackstats(path, tracks=None, variables=None, width=None, decode=True, 
             [tracks, times] variables to load; the 1-D variables and the merge / split variables are always loaded.
         width: int (default: None)
             Length of the times dimension of a subset of tracks from a row folder (rows_to_dense).
-        decode: bool (default: True)
-            Apply the CF decoding that xarray.open_dataset does by default (fill values to NaN, time units); False gives the
-            raw file contents (mask_and_scale=False, decode_times=False), as the pipeline steps read them.
+        mask_and_scale: bool (default: True)
+            As in xarray.open_dataset: fill values to NaN and scale factors applied. False gives the raw values and the
+            _FillValue attributes, as the pipeline steps read the files.
+        decode_times: bool (default: True)
+            As in xarray.open_dataset: time units decoded (False: the numbers).
         tracks_dim, times_dim: string (default: 'tracks', 'times')
             Names of the dimensions of a dense file.
 
@@ -1060,8 +1064,8 @@ def load_trackstats(path, tracks=None, variables=None, width=None, decode=True, 
         folder = path[:-3] + ".rows"
     if folder is not None:
         ds = RowStats.open(folder).to_xarray(tracks=tracks, variables=variables, width=width)
-        return xr.decode_cf(ds) if decode else ds
-    ds = xr.open_dataset(path, mask_and_scale=decode, decode_times=decode)
+        return xr.decode_cf(ds, mask_and_scale=mask_and_scale, decode_times=decode_times)
+    ds = xr.open_dataset(path, mask_and_scale=mask_and_scale, decode_times=decode_times)
     if variables is not None:
         ds = ds.drop_vars([v for v in ds.data_vars if ds[v].dims == (tracks_dim, times_dim) and v not in variables])
     if tracks is not None:
