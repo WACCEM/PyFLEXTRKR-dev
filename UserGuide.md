@@ -221,6 +221,15 @@ The script replaces the STARTDATE and ENDDATE in [a config template](https://git
 Similarly, an [example script](https://github.com/FlexTRKR/PyFLEXTRKR/blob/main/Analysis/make_monthly_processlist.sh) is provided to demonstrate how to post process large amount of tracking outputs to get monthly means. The example script creates a tasklist for calculating multiple years of monthly mean MCS statistics files that can be run in parallel using [TaskFarmer](https://docs.nersc.gov/jobs/workflow/taskfarmer/) on DOE's HPC system [NERSC](https://www.nersc.gov/). An example slurm script using TaskFarmer to run the tasklist is provided [here](https://github.com/FlexTRKR/PyFLEXTRKR/blob/main/Analysis/slurm.submit_mcs_monthly_rainmap.sh). The post processed monthly data can then be further analyzed and visualized, see [**Gallery of Statistical Analysis**](https://github.com/FlexTRKR/PyFLEXTRKR/blob/main/AnalysisGallery.md) for more examples.
 
 
+## **1.7.	Long runs: stitching periods and row-based statistics**
+
+Two options for tracking many months or years (radar MCS pipeline, `run_mcs_radar3d.py`):
+
+- **Stitching.** Periods (e.g., months) that share one cloudid file at their boundary are tracked at the same time in separate jobs, and their track numbers are joined afterwards into the file that one `gettracknumbers` run over all of them would have made, so that a track that crosses a boundary stays one track: [docs/stitching.md](docs/stitching.md).
+- **Row-based statistics** (`stats_format: rows`). The statistics files of identifymcs, regionprops and speed are stored as Parquet tables with one row per (track, time) that exists, instead of mostly empty `[tracks, times, slots]` arrays: a year fits in one file, the serial steps take seconds, and `load_trackstats` returns the usual dense Dataset of any selection of tracks: [docs/rowstats.md](docs/rowstats.md).
+
+With `verify_step_outputs: True` (default) every step of `run_mcs_radar3d.py` checks its outputs and the run exits with code 1 if they are not complete; `skip_completed_steps: True` continues a run that stopped by skipping the steps that are complete.
+
 # **2.	Algorithm and Workflow**
 
 ---
