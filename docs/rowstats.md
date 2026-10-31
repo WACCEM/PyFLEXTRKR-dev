@@ -42,7 +42,10 @@ Three ways, from "my code was written for the dense files" to "I want to learn p
 
 1. **`load_trackstats`** returns the dense `xarray.Dataset` of any file, in either format, for all tracks or a selection. The result
    has the names, dimensions, dtypes, fill values and attributes of the dense file, so existing code works unchanged. A file name that
-   ends in `.nc` but exists only as a `.rows` folder is found too.
+   ends in `.nc` but exists only as a `.rows` folder is found too. A row folder is rebuilt as dense arrays only for what is asked
+   for: pass `variables=[...]` (the `[tracks, times]` variables) and, for a window, `tracks=[...]`; `fragments=False` leaves out the
+   `[tracks, times, slots]` merge / split variables, so `load_trackstats(path, variables=[], fragments=False)` is the cheap first look at
+   the per-track variables of a file of any size. `stats_exists(path)` is `os.path.isfile` for a file that may be dense or rows.
 2. **`RowStats`** gives numpy access that looks like `a[track, time]`: no dense array is built.
 3. **pandas**: `rs.to_pandas("tracks" | "entries" | "fragments")`.
 
