@@ -159,3 +159,56 @@ def test_run_step_skips_completed_steps_runs_later_steps_and_verifies(run):
     assert stop.value.code == 1
     so.run_step("identifymcs", dict(config, run_identifymcs=True, verify_step_outputs=False), state, lambda cfg: calls.append("id"))
     assert calls[-1] == "id"
+
+
+def _write_rows_tables(folder, tracks, entries=None, global_attrs=None):
+    """
+    Write small row tables (three tracks of two entries each) for the checks of stats_format: rows.
+
+    Args:
+        folder: string
+            Output folder.
+        tracks: dictionary
+            {name: values [3]} 1-D variables.
+        entries: dictionary (default: None)
+            {name: values [6]} [tracks, times] variables.
+        global_attrs: dictionary (default: None)
+            Global attributes.
+    """
+    from pyflextrkr.rowstats import TableBuilder, write_rows
+    builder = TableBuilder(np.full(3, 2), 2, global_attrs=global_attrs)
+    for name, values in tracks.items():
+        builder.add_track_var(name, np.asarray(values))
+    for name, values in (entries or {}).items():
+        builder.add_entry_var(name, np.asarray(values, dtype=float), fill=np.nan)
+    write_rows(builder.build(), folder)
+
+
+def test_rows_mode_checks_read_the_row_folders(run):
+    info, config, tmp_path = run
+    config = dict(config, stats_format="rows")
+    os.makedirs(config["stats_outpath"], exist_ok=True)
+    assert so.rows_mode(config) and not so.rows_mode({})
+    assert so.stats_output(config, "mcs_tracks_").endswith("mcs_tracks_" + config["startdate"] + "_" + config["enddate"] + ".rows")
+    assert so.stats_output({"stats_outpath": "s/", "startdate": "a", "enddate": "b"}, "x_") == "s/x_a_b.nc"
+    # identifymcs
+    assert "does not exist" in so.check_step_outputs("identifymcs", config)[1]
+    folder = so.stats_output(config, "mcs_tracks_")
+    _write_rows_tables(folder, {"track_duration": [2, 2, 2], "is_mcs": [1, 0, 0]})
+    assert "variables ['track_class'] are missing" in so.check_step_outputs("identifymcs", config)[1]
+    _write_rows_tables(folder, {"track_duration": [2, 2, 2], "is_mcs": [1, 0, 0], "track_class": [1, 2, 3]})
+    assert so.check_step_outputs("identifymcs", config)[0]
+    # regionprops: the attributes in the meta data
+    robust = so.stats_output(config, "mcs_tracks_robust_")
+    for attrs, expected in (({"n_pairs_not_computed": 0, "n_pairs_area_mismatch": 0}, True),
+                            ({"n_pairs_not_computed": 0, "n_pairs_area_mismatch": 7}, False), ({}, False)):
+        _write_rows_tables(robust, {"track_duration": [2, 2, 2]}, global_attrs=attrs)
+        assert so.check_step_outputs("regionprops", config)[0] is expected
+    # speed: finite movement speeds in the entries
+    final = so.stats_output(config, "mcs_tracks_final_")
+    _write_rows_tables(final, {"track_duration": [2, 2, 2]}, {"base_time": np.arange(6)})
+    assert so.check_step_outputs("speed", config)[1] == "movement_speed is not in the file"
+    _write_rows_tables(final, {"track_duration": [2, 2, 2]}, {"movement_speed": np.full(6, np.nan)})
+    assert not so.check_step_outputs("speed", config)[0]
+    _write_rows_tables(final, {"track_duration": [2, 2, 2]}, {"movement_speed": [1.0, np.nan] * 3})
+    assert so.check_step_outputs("speed", config)[0]

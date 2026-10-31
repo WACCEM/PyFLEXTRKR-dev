@@ -82,6 +82,51 @@ def _stats_file(config, filebase):
     return f"{config['stats_outpath']}{filebase}{config['startdate']}_{config['enddate']}.nc"
 
 
+def rows_mode(config):
+    """
+    Are the statistics of the MCS steps (identifymcs, regionprops, speed) row tables (config stats_format: rows)?
+
+    Args:
+        config: dictionary
+            Loaded config.
+
+    Returns:
+        rows: bool
+            False for the dense netCDF files (stats_format: dense, the default).
+    """
+    return config.get("stats_format", "dense") == "rows"
+
+
+def stats_output(config, filebase):
+    """
+    Path of the statistics file or row folder of a step: <stats_outpath><filebase><startdate>_<enddate> plus .nc (dense) or
+    .rows (stats_format: rows).
+
+    Args:
+        config: dictionary
+            Loaded config.
+        filebase: string
+            File base name (mcsradarstats_filebase, mcsrobust_filebase or mcsfinal_filebase).
+
+    Returns:
+        path: string
+    """
+    return f"{config['stats_outpath']}{filebase}{config['startdate']}_{config['enddate']}" + (".rows" if rows_mode(config) else ".nc")
+
+
+def _open_rows(folder):
+    """
+    Open a row folder for a check; (None, message) if it does not exist or cannot be read.
+    """
+    if not os.path.isdir(folder):
+        return None, f"{os.path.basename(folder)} does not exist"
+    try:
+        from pyflextrkr.rowstats import RowStats
+        return RowStats.open(folder), ""
+    except (OSError, ValueError, KeyError) as err:
+        return None, f"{os.path.basename(folder)} cannot be read ({err})"
+
+
 def _cloudid_files(config):
     """
     Cloudid files of the period and their times.
@@ -153,6 +198,13 @@ def _check_trackstats(config, strict):
 
 
 def _check_identifymcs(config, strict):
+    if rows_mode(config):
+        rs, message = _open_rows(stats_output(config, config.get("mcsradarstats_filebase", "mcs_tracks_")))
+        if rs is None:
+            return False, message
+        missing = [v for v in ("is_mcs", "track_class", "track_duration") if v not in rs.tracks]
+        ntracks = len(rs.duration)
+        return (not missing and ntracks > 0), (f"variables {missing} are missing" if missing else f"{ntracks} tracks")
     ds, message = _open(_stats_file(config, config.get("mcsradarstats_filebase", "mcs_tracks_")))
     if ds is None:
         return False, message
@@ -163,11 +215,17 @@ def _check_identifymcs(config, strict):
 
 
 def _check_regionprops(config, strict):
-    ds, message = _open(_stats_file(config, config["mcsrobust_filebase"]))
-    if ds is None:
-        return False, message
-    with ds:
-        attrs = {k: ds.getncattr(k) for k in ("n_pairs_not_computed", "n_pairs_area_mismatch") if k in ds.ncattrs()}
+    if rows_mode(config):
+        rs, message = _open_rows(stats_output(config, config["mcsrobust_filebase"]))
+        if rs is None:
+            return False, message
+        attrs = {k: rs.meta["global_attrs"][k] for k in ("n_pairs_not_computed", "n_pairs_area_mismatch") if k in rs.meta["global_attrs"]}
+    else:
+        ds, message = _open(_stats_file(config, config["mcsrobust_filebase"]))
+        if ds is None:
+            return False, message
+        with ds:
+            attrs = {k: ds.getncattr(k) for k in ("n_pairs_not_computed", "n_pairs_area_mismatch") if k in ds.ncattrs()}
     bad = {k: int(v) for k, v in attrs.items() if int(v) != 0}
     if bad or len(attrs) < 2:
         return False, f"attributes {bad or 'n_pairs_*'}: pairs without a merged mask or with a merged mask area different from total_area"
@@ -183,6 +241,14 @@ def _check_mapfeature(config, strict):
 
 
 def _check_speed(config, strict):
+    if rows_mode(config):
+        rs, message = _open_rows(stats_output(config, config["mcsfinal_filebase"]))
+        if rs is None:
+            return False, message
+        if "movement_speed" not in rs.meta["vars_2d"]:
+            return False, "movement_speed is not in the file"
+        n_finite = int(np.isfinite(np.asarray(rs["movement_speed"].flat, dtype=float)).sum())
+        return n_finite > 0, f"{n_finite} finite speeds"
     ds, message = _open(_stats_file(config, config["mcsfinal_filebase"]))
     if ds is None:
         return False, message
