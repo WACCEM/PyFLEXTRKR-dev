@@ -364,6 +364,8 @@ def compute_regionprops(config):
 
     #########################################################################
     # Write output
+    # (the INFO time stamps of the lifecycle line, "Writing" and the file name below give the write time)
+    logger.info(f"Writing {statistics_outfile}")
     if os.path.isfile(statistics_outfile):
         os.remove(statistics_outfile)
     comp = dict(zlib=True)

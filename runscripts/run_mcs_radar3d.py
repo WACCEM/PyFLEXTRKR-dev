@@ -4,6 +4,7 @@ import logging
 import dask
 from dask.distributed import Client, LocalCluster
 from pyflextrkr.ft_utilities import load_config, setup_logging
+from pyflextrkr.step_timing import timed_step
 from pyflextrkr.idfeature_driver import idfeature_driver
 from pyflextrkr.tracksingle_driver import tracksingle_driver
 from pyflextrkr.gettracks import gettracknumbers
@@ -37,6 +38,8 @@ if __name__ == '__main__':
 
     ################################################################################################
     # Parallel processing options
+    # client stays None in serial; it is passed to timed_step for the worker count and the Dask report
+    client = None
     run_parallel = config.get('run_parallel', 0)
     if run_parallel == 1:
         # Set Dask temporary directory for workers
@@ -60,31 +63,40 @@ if __name__ == '__main__':
     else:
         logger.info(f"Running in serial.")
 
+    # Every step runs inside timed_step: one INFO line with its wall time; with `step_profile_dir` set in the config
+    # also the step ledger, memory timeline and profiles (pyflextrkr/step_timing.py)
+
     # Step 1 - Identify features
     if config.get('run_idfeature', False):
-        idfeature_driver(config)
+        with timed_step('idfeature', config, client):
+            idfeature_driver(config)
 
     # Step 2 - Link features in time adjacent files
     if config.get('run_tracksingle', False):
-        tracksingle_driver(config)
+        with timed_step('tracksingle', config, client):
+            tracksingle_driver(config)
 
     # Step 3 - Track features through the entire dataset
     if config.get('run_gettracks', False):
-        tracknumbers_filename = gettracknumbers(config)
+        with timed_step('gettracks', config, client):
+            tracknumbers_filename = gettracknumbers(config)
 
     # Step 4 - Calculate track statistics
     if config.get('run_trackstats', False):
-        trackstats_filename = trackstats_driver(config)
+        with timed_step('trackstats', config, client):
+            trackstats_filename = trackstats_driver(config)
 
     # Step 5 - Identify MCS from radar statistics (MCS criteria, feature classes, merge/split folding)
     # (writes mcsradarstats_filebase, like the Tb pipelines' mcstbstats_filebase)
     if config.get('run_identifymcs', False):
-        mcsstats_filename = identifymcs_radar(config)
+        with timed_step('identifymcs', config, client):
+            mcsstats_filename = identifymcs_radar(config)
 
     # Step 6 - Recompute shape and extremes on the merged mask (own feature + folded merge/split fragments),
     # then stage the lifecycle (reads mcsradarstats_filebase, writes mcsrobust_filebase)
     if config.get('run_regionprops', False):
-        robuststats_filename = compute_regionprops(config)
+        with timed_step('regionprops', config, client):
+            robuststats_filename = compute_regionprops(config)
 
     # Step 7 - Map tracking to pixel files
     # (same file naming as the Tb+PF pipelines: reads mcsrobust_filebase)
@@ -94,12 +106,14 @@ if __name__ == '__main__':
             logger.critical(f"{robust_file} not found: run_regionprops writes it from the run_identifymcs output. "
                             f"Tracking will now exit.")
             sys.exit(1)
-        mapfeature_driver(config, trackstats_filebase=config['mcsrobust_filebase'])
+        with timed_step('mapfeature', config, client):
+            mapfeature_driver(config, trackstats_filebase=config['mcsrobust_filebase'])
 
     # Step 8 - Movement speed calculation
     # (reads mcsrobust_filebase, writes mcsfinal_filebase)
     if config.get('run_speed', False):
-        movement_speed(config)
+        with timed_step('speed', config, client):
+            movement_speed(config)
 
     # Clean up resources
     if run_parallel >= 1:

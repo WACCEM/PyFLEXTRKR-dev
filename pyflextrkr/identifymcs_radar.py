@@ -620,6 +620,8 @@ def identifymcs_radar(config):
                         f"({nmaxmerge}) fragments attached to one track at one time. "
                         f"Increase nmaxlinks to avoid this.")
 
+    logger.info("Merge/split fragments attached to their parent tracks")
+
     #########################################################################
     # Optional safety-valve filtering (default: keep everything)
     #########################################################################
@@ -784,6 +786,8 @@ def identifymcs_radar(config):
     #########################################################################
     # Write output
     #########################################################################
+    # (the INFO time stamps of "attached", "Writing" and the file name below give the assembly and write times)
+    logger.info(f"Writing {statistics_outfile}")
     if os.path.isfile(statistics_outfile):
         os.remove(statistics_outfile)
     comp = dict(zlib=True)

@@ -155,7 +155,9 @@ def trackstats_driver(config):
 
     #########################################################################################
     # Create arrays to store output
+    logger.info(f"trackstats: per-file statistics of {nfiles} files done in {(time.time() - t0_files) / 60.0:.2f} min")
     logger.debug("Collecting track statistics")
+    t0_collect = time.time()
 
     max_trackduration = int(max(duration_range))
     numtracks = int(numtracks.item())
@@ -235,6 +237,8 @@ def trackstats_driver(config):
             row_idx = np.concatenate((row_idx, tracknumbertmp)).astype(int)
             col_idx = np.concatenate((col_idx, itracklength - 1)).astype(int)
 
+    logger.info(f"trackstats: collecting the per-file results took {(time.time() - t0_collect) / 60.0:.2f} min")
+
     #########################################################################################
     # Check data max duration against config set up
     data_max_trackduration = np.nanmax(out_dict["track_duration"])
@@ -292,7 +296,7 @@ def trackstats_driver(config):
             )
 
     t1_files = (time.time() - t0_files) / 60.0
-    logger.debug(("Files processing time (min): ", t1_files))
+    logger.info(f"trackstats: files stage + collect + sparse arrays took {t1_files:.2f} min")
     logger.debug("Finish collecting track statistics")
 
     trackidx_all = np.arange(0, len(out_dict["track_duration"]))
@@ -307,7 +311,7 @@ def trackstats_driver(config):
         out_dict, out_dict_attrs, fillval, max_trackduration)
 
     t1_status = (time.time() - t0_status) / 60.0
-    logger.debug(("Start/end status processing time (min): ", t1_status))
+    logger.info(f"trackstats: start/end status took {t1_status:.2f} min")
     logger.debug("Starting and ending status done")
 
     #########################################################################################
@@ -373,7 +377,7 @@ def trackstats_driver(config):
         (adjusted_out_splitnumber, row_col_ind), shape=shape_2d, dtype=np.int32,
     )
     t1_ms = (time.time() - t0_ms) / 60.0
-    logger.debug(("Correct merge/split processing time (min): ", t1_ms))
+    logger.info(f"trackstats: merge/split correction took {t1_ms:.2f} min")
     logger.debug("Merge and split adjustments done")
 
     #########################################################################################
@@ -407,13 +411,17 @@ def trackstats_driver(config):
 
     # Write dense arrays output file
     if trackstats_dense_netcdf == 1:
+        t0_write = time.time()
         write_trackstats_dense(config, fillval, fillval_f,
                                max_trackduration, numtracks, out_dict, out_dict_attrs, times_dimname,
                                times_idx_varname, tracks_dimname, tracks_idx_varname, trackstats_outfile)
+        logger.info(f"trackstats: dense file written in {(time.time() - t0_write) / 60.0:.2f} min")
 
     # Write sparse arrays output file
+    t0_write = time.time()
     write_trackstats_sparse(config, numtracks, out_dict_attrs, out_dict, row_out, tracks_dimname,
                             trackstats_sparse_outfile)
+    logger.info(f"trackstats: sparse file written in {(time.time() - t0_write) / 60.0:.2f} min")
     # import pdb; pdb.set_trace()
     return trackstats_outfile
 

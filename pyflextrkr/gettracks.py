@@ -125,6 +125,9 @@ def gettracknumbers(config):
     logger.debug(f"Number of files: {str(nfiles)}")
     logger.debug((time.ctime()))
     ifill = 0
+    # Timers for the log: time reading the track and cloudid files vs the link search and bookkeeping
+    t_io = 0.0
+    t_loop0 = time.perf_counter()
 
     for ifile in range(0, nfiles):
         logger.info(os.path.basename(files[ifile]))
@@ -134,6 +137,7 @@ def gettracknumbers(config):
         # logger.debug('Load track data')
         # logger.debug((time.ctime()))
         # singletracking_data = Dataset(tracking_outpath + files[ifile], "r")
+        t_io0 = time.perf_counter()
         singletracking_data = Dataset(files[ifile], "r")
         # Number of clouds in reference file
         nclouds_reference = int(np.nanmax(singletracking_data["nclouds_ref"][:]) + 1)
@@ -174,6 +178,7 @@ def gettracknumbers(config):
         newcloudid_data = Dataset(new_file, "r")
         npix_new = newcloudid_data[featuresize_varname][:]
         newcloudid_data.close()
+        t_io += time.perf_counter() - t_io0
 
         # Remove possible extra time dimension to make sure npix is a 1D array
         # npix_reference = npix_reference.squeeze()
@@ -561,6 +566,9 @@ def gettracknumbers(config):
     trackstatus[np.isnan(trackstatus)] = -9999
 
     logger.debug("Tracking Done")
+    t_loop = time.perf_counter() - t_loop0
+    logger.info(f"gettracks timing: {t_loop:.1f} s over the file loop, of which reading the track and cloudid files "
+                f"{t_io:.1f} s and link search + bookkeeping {t_loop - t_io:.1f} s")
 
     nfiles = ifill + 1
 
@@ -729,6 +737,7 @@ def gettracknumbers(config):
     # Touch output file so HDF5 1.14.x H5Fis_accessible() probe does not
     # fail with ENOENT and emit spurious diagnostics to stderr
     open(tracknumbers_outfile, 'ab').close()
+    t_write0 = time.perf_counter()
     ds_out.to_netcdf(
         path=tracknumbers_outfile,
         mode="w",
@@ -751,6 +760,7 @@ def gettracknumbers(config):
             "track_reset": {"dtype": "int", "zlib": True, "_FillValue": -9999},
         },
     )
+    logger.info(f"gettracks timing: writing the track numbers file took {time.perf_counter() - t_write0:.1f} s")
     logger.info(tracknumbers_outfile)
     logger.info('Get track numbers done.')
     return tracknumbers_outfile
