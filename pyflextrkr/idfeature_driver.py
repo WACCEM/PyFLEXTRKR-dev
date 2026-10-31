@@ -179,8 +179,9 @@ def idfeature_driver(config):
 
         # Serial
         if run_parallel == 0:
+            final_result = []
             for ifile in range(0, nfiles):
-                id_feature(rawdatafiles[ifile], config)
+                final_result.append(id_feature(rawdatafiles[ifile], config))
         # Parallel
         elif run_parallel >= 1:
             results = []
@@ -191,6 +192,11 @@ def idfeature_driver(config):
             wait(final_result)
         else:
             sys.exit('Valid parallelization flag not provided')
+
+        # radar_feature: record the frames that were skipped (miss_thresh), for the output check of the run script
+        if feature_type == "radar_feature":
+            from pyflextrkr.step_outputs import write_idfeature_manifest
+            write_idfeature_manifest(config, nfiles, list(final_result))
 
     logger.info('Done with features from raw data.')
     return

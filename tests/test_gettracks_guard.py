@@ -32,6 +32,28 @@ def test_same_result_as_the_original_on_consistent_input(tmp_path, seed, skip_fr
         assert (new["track_reset"] == 2).any(axis=2).sum() == 2 and (new["track_reset"] == 1).any(axis=2).sum() == 2
 
 
+@pytest.mark.parametrize("zero_frames", [(6,), (0,), (15,), (3, 4, 5), tuple(range(16))])
+@pytest.mark.parametrize("skip_frames", [(), (9,)])
+def test_frames_without_features_give_the_result_of_the_original(tmp_path, zero_frames, skip_frames):
+    # a frame without features has a cloudid file (nfeatures 0) and track files without links; a skipped frame has neither
+    info = syn.write_synthetic_tracking(str(tmp_path / "data"), nframes=16, seed=4, zero_frames=zero_frames,
+                                        skip_frames=skip_frames, symmetric_links=True)
+    new = _run(info, tmp_path, "new", gettracks)
+    old = _run(info, tmp_path, "old", ref)
+    assert syn.same_tracknumbers(new, old) == []
+    assert int(new["attrs"]["n_chain_breaks"]) == 0                       # no track file is missing
+
+
+def test_a_frame_without_features_ends_the_tracks(tmp_path):
+    info = syn.write_synthetic_tracking(str(tmp_path / "data"), nframes=16, seed=4, zero_frames=(6,), symmetric_links=True)
+    new = _run(info, tmp_path, "new", gettracks)
+    names = syn.file_names(new)
+    before, empty, after = (names.index(info["names"][f]) for f in (5, 6, 7))
+    numbers = new["track_numbers"][0]
+    # none of the clouds of frame 7 continues a track of frame 5 or of the frames before the empty frame
+    assert numbers[after][numbers[after] > 0].min() > numbers[: before + 1].max()
+
+
 def test_missing_track_file_restarts_the_tracks(tmp_path):
     # the track file of the pair (5, 6) is missing; (4, 5) and (6, 7) are 10 min apart, closer than timegap, so only the chain check sees it
     # (40 frames: one missing track file is 2.6 % of them, below the 5 % limit at which gettracknumbers stops)

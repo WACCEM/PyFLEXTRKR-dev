@@ -12,8 +12,15 @@ The checks look at the files of the run (names from the config), not at the logs
 pairwise track files against the pairs that tracksingle makes, the last file of the track numbers, the statistics files, the
 attributes of the robust file (n_pairs_not_computed, n_pairs_area_mismatch), the pixel files and the speed variables.
 
+Frames without features and skipped frames: idfeature_radar3d writes a cloudid file for a frame without features (it ends the tracks,
+a missing file would look like a data gap); a frame skipped by the optional miss_thresh guard has no file. idfeature_driver records
+the number of skipped frames in idfeature_manifest.json (radar_feature), so the skip decision "one cloudid file per input file" counts
+them. A period in which no cloudid file has a feature has no tracks: trackstats writes an empty file, the checks pass with a warning
+and the steps after trackstats are skipped (state["empty"]).
+
 Author: Zhe Feng | zhe.feng@pnnl.gov
 """
+import json
 import logging
 import os
 import sys
@@ -151,14 +158,118 @@ def _open(path):
         return None, f"{os.path.basename(path)} cannot be read ({err})"
 
 
+def idfeature_manifest_path(config):
+    """
+    Path of the manifest that idfeature_driver writes (radar_feature): <tracking_outpath>idfeature_manifest.json
+    """
+    return os.path.join(config["tracking_outpath"], "idfeature_manifest.json")
+
+
+def write_idfeature_manifest(config, n_inputs, returned):
+    """
+    Record how many input frames idfeature wrote a cloudid file for and how many it skipped (miss_thresh), so that the check
+    "one cloudid file per input file" can count the skipped frames.
+
+    Args:
+        config: dictionary
+            Loaded config (tracking_outpath, miss_thresh, start_basetime, end_basetime).
+        n_inputs: int
+            Number of input files (calls of the feature identification function).
+        returned: list
+            What the calls returned: the cloudid file name(s), or None when every time of the call was skipped.
+    """
+    skipped = sum(1 for r in returned if r is None)
+    as_number = lambda v: None if v is None else float(v)
+    manifest = {"n_inputs": int(n_inputs), "n_calls_written": len(returned) - skipped, "n_calls_skipped": skipped,
+                "miss_thresh": as_number(config.get("miss_thresh")), "start_basetime": as_number(config.get("start_basetime")),
+                "end_basetime": as_number(config.get("end_basetime"))}
+    with open(idfeature_manifest_path(config), "w") as f:
+        json.dump(manifest, f)
+
+
+def read_idfeature_manifest(config, n_inputs):
+    """
+    The manifest of idfeature if it belongs to this period.
+
+    Args:
+        config: dictionary
+            Loaded config.
+        n_inputs: int
+            Number of input files in the period now.
+
+    Returns:
+        manifest: dictionary or None
+            None if there is none, it cannot be read, or it was written for another period or number of inputs.
+    """
+    try:
+        with open(idfeature_manifest_path(config)) as f:
+            manifest = json.load(f)
+    except (OSError, ValueError):
+        return None
+    same = lambda a, b: (a is None and b is None) or (a is not None and b is not None and float(a) == float(b))
+    if manifest.get("n_inputs") != n_inputs or not same(manifest.get("start_basetime"), config.get("start_basetime")) \
+            or not same(manifest.get("end_basetime"), config.get("end_basetime")):
+        return None
+    return manifest
+
+
+def period_has_no_features(config):
+    """
+    Do all the cloudid files of the period have zero features? (A period or a small domain without any feature has no tracks.)
+
+    Only the cloudid files are read, one after the other, until one has a feature, so a normal period costs one file.
+
+    Args:
+        config: dictionary
+            Loaded config (nfeature_varname, default 'nfeatures').
+
+    Returns:
+        empty: bool
+            True if there is at least one cloudid file and none has a feature; False if one has a feature or if a file cannot be
+            read (cannot tell).
+    """
+    try:
+        files, _ = _cloudid_files(config)
+    except OSError:
+        return False
+    if not files:
+        return False
+    name = config.get("nfeature_varname", "nfeatures")
+    for path in files:
+        try:
+            with Dataset(path) as ds:
+                if int(np.max(np.ma.filled(ds[name][:], 0))) > 0:
+                    return False
+        except (OSError, KeyError, IndexError, ValueError):
+            return False
+    return True
+
+
+def trackstats_ntracks(config):
+    """
+    Number of tracks in the sparse trackstats file, None if the file does not exist or cannot be read.
+    """
+    ds, _ = _open(_stats_file(config, config["trackstats_sparse_filebase"]))
+    if ds is None:
+        return None
+    with ds:
+        return ds.dimensions[config.get("tracks_dimname", "tracks")].size
+
+
+EMPTY_NOTE = "no tracks: none of the cloudid files of the period has a feature"
+
+
 def _check_idfeature(config, strict):
     files, _ = _cloudid_files(config)
     n_input = len(subset_files_timerange(
         config["clouddata_path"], config.get("databasename", ""), config["start_basetime"], config["end_basetime"],
         time_format=config.get("time_format", "yyyymodd_hhmmss"), subdir_format=config.get("clouddata_subdir_format"))[0])
-    message = f"{len(files)} cloudid files for {n_input} input files"
+    # Frames skipped by the miss_thresh guard have no cloudid file: the manifest of idfeature_driver says how many
+    manifest = read_idfeature_manifest(config, n_input)
+    skipped = int(manifest["n_calls_skipped"]) if manifest is not None else 0
+    message = f"{len(files)} cloudid files for {n_input} input files" + (f" ({skipped} frames skipped by miss_thresh)" if skipped else "")
     # Inputs that cannot be read (or have no feature file) leave gaps, which the step logs; only an empty result is an error
-    return (len(files) == n_input and n_input > 0) if strict else len(files) > 0, message
+    return (len(files) + skipped == n_input and n_input > 0) if strict else len(files) > 0, message
 
 
 def _check_tracksingle(config, strict):
@@ -183,6 +294,8 @@ def _check_gettracks(config, strict):
     files, _ = _cloudid_files(config)
     if not files or os.path.basename(files[-1]) != last:
         return False, f"the last file of the track numbers is {last}, the last cloudid file is {os.path.basename(files[-1]) if files else None}"
+    if ntracks <= 1 and period_has_no_features(config):
+        return True, f"{EMPTY_NOTE}, last file {last}"
     return ntracks > 1, f"{ntracks - 1} track numbers, last file {last}" + (f", {n_breaks} chain break(s)" if n_breaks else "")
 
 
@@ -192,6 +305,9 @@ def _check_trackstats(config, strict):
         return False, message
     with ds:
         ntracks = ds.dimensions[config.get("tracks_dimname", "tracks")].size
+    # A period without features has no tracks and no dense file: trackstats writes only the empty sparse file
+    if ntracks == 0 and period_has_no_features(config):
+        return True, EMPTY_NOTE
     if config.get("trackstats_dense_netcdf", 0) == 1 and not os.path.isfile(_stats_file(config, config["trackstats_filebase"])):
         return False, "the dense trackstats file does not exist"
     return ntracks > 0, f"{ntracks} tracks"
@@ -311,10 +427,14 @@ def run_step(step, config, state, func, client=None, **kwargs):
     logger = logging.getLogger(__name__)
     if not config.get(f"run_{step}", False):
         return None
+    if state.get("empty") and step in STEPS_AFTER_TRACKSTATS:
+        logger.warning(f"Step {step} skipped: {EMPTY_NOTE}")
+        return None
     if config.get("skip_completed_steps", False) and not state["stale"]:
         ok, message = check_step_outputs(step, config, strict=True)
         if ok:
             logger.info(f"Step {step} skipped: its outputs are complete ({message})")
+            _note_empty(step, config, state)
             return None
         logger.info(f"Step {step} runs: its outputs are not complete ({message})")
     state["stale"] = True
@@ -326,4 +446,25 @@ def run_step(step, config, state, func, client=None, **kwargs):
             logger.critical(f"Step {step} did not make complete outputs: {message}. Tracking will now exit.")
             sys.exit(1)
         logger.info(f"Step {step} outputs verified: {message}")
+    _note_empty(step, config, state)
     return result
+
+
+STEPS_AFTER_TRACKSTATS = ("identifymcs", "regionprops", "mapfeature", "speed")
+
+
+def _note_empty(step, config, state):
+    """
+    After trackstats: a period without any tracked feature has nothing for the later steps; remember it in state["empty"].
+
+    Args:
+        step: string
+            The step that just finished or was skipped.
+        config: dictionary
+            Loaded config.
+        state: dictionary
+            Shared state of the run; gets state["empty"] = True when trackstats made zero tracks and no cloudid file has a feature.
+    """
+    if step == "trackstats" and trackstats_ntracks(config) == 0 and period_has_no_features(config):
+        logging.getLogger(__name__).warning(f"{EMPTY_NOTE}: the steps after trackstats are skipped")
+        state["empty"] = True

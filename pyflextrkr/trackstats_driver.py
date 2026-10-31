@@ -163,15 +163,23 @@ def trackstats_driver(config):
     numtracks = int(numtracks.item())
 
     # Make a variable list and get attributes from one of the returned dictionaries
-    # Loop over each return results till one that is not None
+    # Loop over each return results till one that is not None. A file without tracks returns the tuple (None, None), so the
+    # dictionary (first entry) is tested: a first frame without features used to fail here although later frames had tracks.
     counter = 0
+    var_names = None
     while counter < nfiles:
-        if final_result[counter] is not None:
+        if final_result[counter] is not None and final_result[counter][0] is not None:
             var_names = list(final_result[counter][0].keys())
             # Get variable attributes
             var_attrs = final_result[counter][1]
             break
         counter += 1
+    if var_names is None:
+        # No file has a tracked feature (a period or a small domain without features): nothing to collect. Write an empty
+        # sparse file (zero tracks) so that the files of the later steps exist and the run ends cleanly instead of failing here.
+        logger.warning(f"trackstats: none of the {nfiles} files has a tracked feature, writing an empty trackstats file")
+        write_empty_trackstats_sparse(config, trackstats_sparse_outfile)
+        return trackstats_outfile
     # Drop variables from the list
     var_names.remove("uniquetracknumbers")
     var_names.remove("numtracks")
@@ -353,6 +361,14 @@ def trackstats_driver(config):
     else:
         numtracks = len(out_dict["track_duration"])
         trackidx_keep = trackidx_all
+
+    if numtracks == 0:
+        # No track is left (every track was shorter than the minimum duration: a period or a small domain without features
+        # has only the one-file tracks that gettracks gives the extra, unlinked cloud of each file). Write an empty sparse file
+        # and end here; the merger/split correction below cannot work on zero tracks.
+        logger.warning("trackstats: no track is left after removing the short tracks, writing an empty trackstats file")
+        write_empty_trackstats_sparse(config, trackstats_sparse_outfile)
+        return trackstats_outfile
 
     #########################################################################################
     # Correct merger and split cloud numbers
@@ -573,6 +589,38 @@ def adjust_position_continuous_simple(values, thresh, pbc_max_domain_fraction):
             adjustment_made = True  # Adjustment was made
             
     return adjusted_values, adjustment_made
+
+
+def write_empty_trackstats_sparse(config, trackstats_sparse_outfile):
+    """
+    Write a sparse trackstats file without tracks (for a period in which no file has a tracked feature).
+
+    It has the variables that the steps after trackstats read first (track_duration, the merge / split links and the two index
+    variables of the sparse layout), all of length zero.
+
+    Args:
+        config: dictionary
+            Config parameters (tracks_dimname, times_dimname).
+        trackstats_sparse_outfile: string
+            Output file name.
+    """
+    tracks_dimname = config["tracks_dimname"]
+    sparse_dimname = "sparse_index"
+    empty = np.zeros(0, dtype=np.int32)
+    ds = xr.Dataset(
+        {
+            "track_duration": ([tracks_dimname], empty),
+            "end_merge_tracknumber": ([tracks_dimname], empty),
+            "start_split_tracknumber": ([tracks_dimname], empty),
+            f"{tracks_dimname}_indices": ([sparse_dimname], empty),
+            f"{config['times_dimname']}_indices": ([sparse_dimname], empty),
+        },
+        coords={tracks_dimname: np.zeros(0, dtype=np.int64), sparse_dimname: np.zeros(0, dtype=np.int64)},
+        attrs={"Title": "Track statistics (sparse): no tracked feature in this period"},
+    )
+    if os.path.isfile(trackstats_sparse_outfile):
+        os.remove(trackstats_sparse_outfile)
+    ds.to_netcdf(trackstats_sparse_outfile, mode="w", format="NETCDF4", unlimited_dims=[tracks_dimname, sparse_dimname])
 
 
 def write_trackstats_sparse(config, numtracks, out_dict_attrs, out_dict, row_out, tracks_dimname,

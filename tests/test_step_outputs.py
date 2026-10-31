@@ -12,6 +12,7 @@ import pytest
 
 import synthetic_tracks as syn
 from pyflextrkr import gettracks, step_outputs as so
+from pyflextrkr.trackstats_driver import write_empty_trackstats_sparse
 
 T0 = int(pd.Timestamp("2020-01-01 00:00:00", tz="UTC").timestamp())
 
@@ -31,12 +32,20 @@ def test_track_file_name_and_missing_pairs():
     assert so.find_missing_pairs(files, times, existing | {so.track_file_name(times[2])}, 0.25) == []
 
 
-@pytest.fixture
-def run(tmp_path):
+def make_run(tmp_path, **tracking_kwargs):
     """
     A small finished tracking run: input files, cloudid and track files, and the config that describes it.
+
+    Args:
+        tmp_path: pathlib.Path
+            Folder for the run.
+        **tracking_kwargs:
+            Options of synthetic_tracks.write_synthetic_tracking (e.g. zero_frames).
+
+    Returns:
+        info, config, tmp_path
     """
-    info = syn.write_synthetic_tracking(str(tmp_path / "tracking"), nframes=12, seed=3, symmetric_links=True)
+    info = syn.write_synthetic_tracking(str(tmp_path / "tracking"), nframes=12, seed=3, symmetric_links=True, **tracking_kwargs)
     inputs = tmp_path / "input"
     inputs.mkdir()
     for frame in info["frames"]:
@@ -48,8 +57,16 @@ def run(tmp_path):
         databasename="in_", time_format="yyyymodd_hhmmss", trackstats_sparse_filebase="trackstats_sparse_",
         trackstats_filebase="trackstats_", mcsradarstats_filebase="mcs_tracks_", mcsrobust_filebase="mcs_tracks_robust_",
         mcsfinal_filebase="mcs_tracks_final_", pixeltracking_filebase="mcstrack_", pixeltracking_outpath=str(tmp_path / "pixel") + "/",
-        tracks_dimname="tracks", trackstats_dense_netcdf=0)
+        tracks_dimname="tracks", times_dimname="times", trackstats_dense_netcdf=0)
     return info, config, tmp_path
+
+
+@pytest.fixture
+def run(tmp_path):
+    """
+    A small finished tracking run (see make_run).
+    """
+    return make_run(tmp_path)
 
 
 def _stats_path(config, filebase):
@@ -212,3 +229,68 @@ def test_rows_mode_checks_read_the_row_folders(run):
     assert not so.check_step_outputs("speed", config)[0]
     _write_rows_tables(final, {"track_duration": [2, 2, 2]}, {"movement_speed": [1.0, np.nan] * 3})
     assert so.check_step_outputs("speed", config)[0]
+
+
+def test_idfeature_manifest_counts_the_frames_skipped_by_miss_thresh(run):
+    info, config, _ = run
+    names = [info["names"][f] for f in info["frames"]]
+    os.remove(f"{config['tracking_outpath']}{names[5]}")                          # frame 5 was skipped: no cloudid file
+    assert not so.check_step_outputs("idfeature", config, strict=True)[0]       # no manifest: it looks incomplete, as before
+    returned = [None if i == 5 else name for i, name in enumerate(names)]         # what the calls of idfeature_driver returned
+    so.write_idfeature_manifest(config, len(names), returned)
+    ok, message = so.check_step_outputs("idfeature", config, strict=True)
+    assert ok and "11 cloudid files for 12 input files (1 frames skipped by miss_thresh)" in message
+    # a manifest that does not belong to this period or number of inputs is ignored
+    assert so.read_idfeature_manifest(config, 12)["n_calls_skipped"] == 1
+    assert so.read_idfeature_manifest(config, 13) is None
+    assert so.read_idfeature_manifest(dict(config, start_basetime=config["start_basetime"] - 3600), 12) is None
+    # a file that is missing without having been skipped is still found
+    os.remove(f"{config['tracking_outpath']}{names[6]}")
+    assert not so.check_step_outputs("idfeature", config, strict=True)[0]
+    assert so.check_step_outputs("idfeature", config, strict=False)[0]
+
+
+def test_a_period_without_features_passes_with_a_warning_and_skips_the_later_steps(tmp_path, caplog):
+    info, config, _ = make_run(tmp_path, zero_frames=tuple(range(12)))
+    config = dict(config, skip_completed_steps=True, **{f"run_{step}": True for step in so.STEPS})
+    assert so.period_has_no_features(config)
+    calls = []
+
+    def empty_trackstats(cfg):
+        calls.append("trackstats")
+        write_empty_trackstats_sparse(cfg, _stats_path(cfg, "trackstats_sparse_"))
+
+    def run_all(state):
+        so.run_step("gettracks", config, state, gettracks.gettracknumbers)
+        so.run_step("trackstats", config, state, empty_trackstats)
+        for step in ("identifymcs", "regionprops", "mapfeature", "speed"):
+            assert so.run_step(step, config, state, lambda cfg, step=step: calls.append(step)) is None
+
+    state = {"stale": False}
+    with caplog.at_level("WARNING"):
+        run_all(state)
+    assert calls == ["trackstats"] and state["empty"] is True
+    assert any("no tracks: none of the cloudid files" in r.message and "identifymcs" in r.message for r in caplog.records)
+    # submitted again: gettracks and trackstats are complete (the empty file counts), the later steps are skipped again
+    calls.clear()
+    state = {"stale": False}
+    run_all(state)
+    assert calls == [] and state["empty"] is True and state["stale"] is False
+
+
+def test_zero_tracks_only_pass_when_no_cloudid_file_has_a_feature(run):
+    info, config, _ = run
+    os.makedirs(config["stats_outpath"], exist_ok=True)
+    write_empty_trackstats_sparse(config, _stats_path(config, "trackstats_sparse_"))
+    ok, message = so.check_step_outputs("trackstats", config)
+    assert not ok and message == "0 tracks"                                       # the frames have features: no tracks is an error
+    state = {"stale": False}
+    so._note_empty("trackstats", config, state)
+    assert "empty" not in state
+
+
+def test_an_empty_period_needs_no_dense_trackstats_file(tmp_path):
+    info, config, _ = make_run(tmp_path, zero_frames=tuple(range(12)))
+    write_empty_trackstats_sparse(config, _stats_path(config, "trackstats_sparse_"))
+    config = dict(config, trackstats_dense_netcdf=1)
+    assert so.check_step_outputs("trackstats", config) == (True, so.EMPTY_NOTE)

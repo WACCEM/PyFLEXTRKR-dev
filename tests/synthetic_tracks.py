@@ -97,7 +97,7 @@ def _transpose_links(forward, n_to, nlinks):
 
 def write_synthetic_tracking(folder, nframes=12, seed=0, max_clouds=8, nlinks=4, dt=300, t0="2020-01-01 00:00:00",
                              skip_frames=(), skip_track_files=(), timegap_hours=0.25, link_density=0.8,
-                             symmetric_links=False):
+                             symmetric_links=False, zero_frames=()):
     """
     Write cloudid_*.nc and track_*.nc files of random clouds.
 
@@ -128,6 +128,9 @@ def write_synthetic_tracking(folder, nframes=12, seed=0, max_clouds=8, nlinks=4,
             True: the backward links are the transpose of the forward links (a link seen from both sides, as in clean
             tracksingle output). False: forward and backward links are drawn independently, so they disagree; gettracknumbers
             then sometimes reaches a cloud from two groups (the real c4 and c7 tracking has none of this).
+        zero_frames: tuple of int (default: none)
+            Frames that exist but have no feature (nfeatures = 0, as idfeature_radar3d writes for an echo-free frame). Their
+            clouds are drawn first and then removed, so the other frames are the same as without this option.
 
     Returns:
         info: dictionary
@@ -141,6 +144,9 @@ def write_synthetic_tracking(folder, nframes=12, seed=0, max_clouds=8, nlinks=4,
     epoch = {i: t0_epoch + i * dt for i in frames}
     ncl = {i: int(rng.integers(1, max_clouds + 1)) for i in frames}
     npix = {i: rng.integers(1, 60, ncl[i]).astype(np.int32) for i in frames}
+    for i in zero_frames:
+        if i in ncl:
+            ncl[i], npix[i] = 0, np.zeros(0, dtype=np.int32)
     names = {i: f"cloudid_{_stamp(epoch[i])}.nc" for i in frames}
     for i in frames:
         xr.Dataset({"npix_feature": (["feature"], npix[i]), "nfeatures": ([], np.int32(ncl[i]))}).to_netcdf(

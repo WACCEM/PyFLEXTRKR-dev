@@ -103,7 +103,7 @@ if __name__ == '__main__':
 
     # Step 7 - Map tracking to pixel files
     # (same file naming as the Tb+PF pipelines: reads mcsrobust_filebase)
-    if config.get('run_mapfeature', False):
+    if config.get('run_mapfeature', False) and not state.get('empty'):
         robust_file = stats_output(config, config['mcsrobust_filebase'])
         if not os.path.exists(robust_file):
             logger.critical(f"{robust_file} not found: run_regionprops writes it from the run_identifymcs output. "
