@@ -10,6 +10,11 @@ import numpy as np
 from pyflextrkr.rowstats import dense_to_rows, write_rows
 from test_rowstats import _dense, _write
 
+
+def _write_path(tmp_path):
+    """The dense file that test_the_cookbook_recipes_run made (named dense.nc by test_rowstats._write)."""
+    return str(tmp_path / "dense.nc")
+
 DOC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "rowstats.md")
 
 
@@ -49,3 +54,9 @@ def test_the_cookbook_recipes_run(tmp_path):
     assert namespace["tracks"].shape[0] == dense.sizes["tracks"] and len(namespace["mcs"]) == len(selected)
     assert namespace["peak"].index.tolist() == [t for t in selected if dense["track_duration"].values[t] > 0]
     assert np.isclose(namespace["value"], dense["area"].values[1, 0], equal_nan=True)
+    # the dense file written by the cookbook is the dense file again
+    import xarray as xr
+    back = xr.open_dataset(namespace["dense_file"], mask_and_scale=False, decode_times=False)
+    want = xr.open_dataset(_write_path(tmp_path), mask_and_scale=False, decode_times=False)
+    assert os.path.basename(namespace["dense_file"]) == "mcs_tracks_robust.nc" and set(back.variables) == set(want.variables)
+    assert all(np.array_equal(back[v].values, want[v].values, equal_nan=want[v].dtype.kind == "f") for v in want.variables)

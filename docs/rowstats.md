@@ -134,6 +134,30 @@ python runscripts/convert_stats.py to-dense mcs_tracks_robust_X.rows mcs_only.nc
 python runscripts/convert_stats.py to-rows  mcs_tracks_robust_X.nc   mcs_tracks_robust_X.rows        # an old dense file
 ```
 
+## Dense netCDF from row tables
+
+Everything that was written for the old dense files keeps working through `load_trackstats` (above). If you prefer the dense netCDF file itself, for
+a tool outside Python or to hand a file to someone, write it after the tracking is done: the file has the layout, names, dtypes, fill
+values, attributes, unlimited tracks dimension and zlib compression of the file the dense step wrote, and the name that step gave it (the row
+folder name with `.rows` replaced by `.nc`, next to it).
+
+```python
+from pyflextrkr.rowstats import write_dense_netcdf
+dense_file = write_dense_netcdf(path, block_tracks=4000)     # mcs_tracks_robust_<dates>.rows -> mcs_tracks_robust_<dates>.nc, next to it
+```
+
+```bash
+python runscripts/convert_stats.py to-dense mcs_tracks_robust_X.rows                   # same, the target is the name of the old file
+python runscripts/convert_stats.py to-dense mcs_tracks_robust_X.rows other_name.nc --overwrite
+python runscripts/convert_stats.py to-dense mcs_tracks_final_X.rows mcs_only.nc --select is_mcs=1 --variables area majoraxis
+```
+
+The file is written `block_tracks` tracks at a time (4000 by default on the command line), so the memory is that of one block, not of the file; the
+result does not depend on the block size. Even so a month as dense arrays is a 180 GB array in the file (the file is compressed and much smaller) and
+a year does not make sense: use `tracks=` / `--select` and `variables=` / `--variables` to write the tracks and variables that you need. An existing
+target is an error unless `overwrite=True` / `--overwrite`. Round trip: `dense_to_rows` followed by `write_dense_netcdf` gives back every
+variable, dtype, fill value and attribute of the original dense file (`tests/test_rowstats.py`).
+
 ## For developers: a step in rows mode
 
 The steps keep the numbers of the dense steps and change only where they live: a `(track, time)` pair is the position

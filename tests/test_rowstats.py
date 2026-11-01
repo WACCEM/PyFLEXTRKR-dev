@@ -221,6 +221,71 @@ def test_stats_exists_finds_either_format(tmp_path):
     assert not stats_exists(str(tmp_path / "other.nc")) and not stats_exists(str(tmp_path / "missing.rows"))
 
 
+def _rows_in_folder(tmp_path, ds=None):
+    """
+    A dense file (dense.nc) and its row folder under the name of a step output (r/mcs_tracks_a_b.rows, so that the default dense name
+    r/mcs_tracks_a_b.nc is free).
+    """
+    path = _write(tmp_path, _dense() if ds is None else ds)
+    folder = tmp_path / "r"
+    folder.mkdir()
+    rows = str(folder / "mcs_tracks_a_b.rows")
+    write_rows(dense_to_rows(path), rows)
+    return path, rows
+
+
+def _raw(path):
+    return xr.open_dataset(path, mask_and_scale=False, decode_times=False)
+
+
+def test_write_dense_netcdf_gives_back_the_dense_file_under_the_old_name(tmp_path):
+    from pyflextrkr.rowstats import dense_netcdf_name, write_dense_netcdf
+    path, rows = _rows_in_folder(tmp_path)
+    assert dense_netcdf_name(rows) == rows[:-5] + ".nc" and dense_netcdf_name("a/b.nc") == "a/b.nc"
+    out = write_dense_netcdf(rows)
+    assert out == rows[:-5] + ".nc"                                         # mcs_tracks_a_b.rows -> mcs_tracks_a_b.nc, next to it
+    _assert_same_dataset(_raw(out), _raw(path))                              # every variable, dtype, fill value and attribute
+    import netCDF4
+    with netCDF4.Dataset(out) as nc:
+        assert nc.dimensions["tracks"].isunlimited() and nc["area"].filters()["zlib"]
+    with pytest.raises(FileExistsError):
+        write_dense_netcdf(rows)                                             # an existing file is not replaced silently
+    assert write_dense_netcdf(rows, overwrite=True) == out
+
+
+@pytest.mark.parametrize("block", [1, 2, 3, 7, 100])
+def test_write_dense_netcdf_does_not_depend_on_the_block_size(tmp_path, block):
+    from pyflextrkr.rowstats import write_dense_netcdf
+    path, rows = _rows_in_folder(tmp_path)
+    out = write_dense_netcdf(rows, str(tmp_path / f"blocks_{block}.nc"), block_tracks=block)
+    _assert_same_dataset(_raw(out), _raw(path))
+
+
+def test_write_dense_netcdf_selection_and_the_nc_name_of_a_rows_only_file(tmp_path):
+    from pyflextrkr.rowstats import load_trackstats, write_dense_netcdf
+    path, rows = _rows_in_folder(tmp_path)
+    # the .nc name of a statistics file that exists only as a row folder (no .nc file next to it yet)
+    one = write_dense_netcdf(rows[:-5] + ".nc", str(tmp_path / "one.nc"), tracks=[5, 2, 0], variables=["area"])
+    blocks = write_dense_netcdf(rows, str(tmp_path / "blocks.nc"), tracks=[5, 2, 0], variables=["area"], block_tracks=2)
+    _assert_same_dataset(_raw(blocks), _raw(one))
+    want = load_trackstats(rows, tracks=[5, 2, 0], variables=["area"], mask_and_scale=False, decode_times=False)
+    _assert_same_dataset(_raw(one), want)
+    assert _raw(one).sizes["tracks"] == 3 and "cloudnumber" not in _raw(one) and "area" in _raw(one)
+    with pytest.raises(FileNotFoundError):
+        write_dense_netcdf(str(tmp_path / "missing.rows"))
+
+
+def test_convert_stats_to_dense_without_a_target_uses_the_old_name(tmp_path):
+    convert = _convert_stats()
+    path, rows = _rows_in_folder(tmp_path)
+    assert convert.main(["to-dense", rows, "--block-tracks", "3"]) == 0
+    _assert_same_dataset(_raw(rows[:-5] + ".nc"), _raw(path))
+    with pytest.raises(SystemExit):                                          # exists now: an error without --overwrite
+        convert.main(["to-dense", rows])
+    assert convert.main(["to-dense", rows, "--overwrite"]) == 0
+    assert convert.main(["to-dense", rows[:-5] + ".nc", str(tmp_path / "from_nc_name.nc")]) == 0     # the .nc name of the folder works too
+
+
 def _convert_stats():
     import importlib.util
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runscripts", "convert_stats.py")

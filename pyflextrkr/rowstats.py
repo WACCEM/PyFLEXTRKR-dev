@@ -1097,3 +1097,108 @@ def stats_exists(path):
     if os.path.exists(path):
         return True
     return path.endswith(".nc") and os.path.isdir(path[:-3] + ".rows")
+
+
+def rows_folder(path):
+    """
+    The row folder of a statistics file name: the folder itself, or the folder next to a .nc name that only exists as rows.
+
+    Args:
+        path: string
+            Row folder, or the .nc name of a statistics file whose row folder exists.
+
+    Returns:
+        folder: string
+
+    Raises:
+        FileNotFoundError: if neither exists.
+    """
+    if os.path.isdir(path):
+        return path
+    if path.endswith(".nc") and os.path.isdir(path[:-3] + ".rows"):
+        return path[:-3] + ".rows"
+    raise FileNotFoundError(f"no row folder: {path}")
+
+
+def dense_netcdf_name(path):
+    """
+    Name of the dense netCDF file that belongs to a row folder: the folder name with .rows replaced by .nc, next to it. The row
+    folders are named like the dense files of the old steps (mcs_tracks_<start>_<end>.rows, mcs_tracks_robust_..., mcs_tracks_final_...),
+    so the dense file gets the name the old step gave it.
+
+    Args:
+        path: string
+            Row folder (.rows), or the .nc name of a file that only exists as a row folder.
+
+    Returns:
+        name: string
+    """
+    return path[:-5] + ".nc" if path.endswith(".rows") else path if path.endswith(".nc") else path.rstrip("/") + ".nc"
+
+
+def write_dense_netcdf(path, outfile=None, tracks=None, variables=None, block_tracks=None, overwrite=False):
+    """
+    Write a row-table statistics file as a dense netCDF file, as the dense steps of the pipeline wrote it (the layout of every
+    reader of the old files): same dimensions, variable names, dtypes, fill values and attributes, an unlimited tracks dimension and
+    zlib compression. dense_to_rows followed by this function gives back the original file variable by variable.
+
+    A whole month as dense arrays is 180 GB: pass tracks / variables to write a part (a year does not fit), or block_tracks to write
+    the file block by block so that only one block of tracks is in memory at a time. The result does not depend on the block size.
+
+    Args:
+        path: string
+            Row folder, or the .nc name of a statistics file that exists only as a row folder.
+        outfile: string (default: None)
+            Output file. None: the name of the dense file of the old step, the row folder name with .rows replaced by .nc in the same
+            folder (dense_netcdf_name).
+        tracks: array-like of int (default: None = all tracks)
+            Track indices (0-based) to write, in the given order; the times dimension is then as long as their longest track.
+        variables: list of strings (default: None = all)
+            [tracks, times] variables to write (the 1-D variables and the merge / split variables are always written).
+        block_tracks: int (default: None = all tracks in one block)
+            Number of tracks built and written at a time.
+        overwrite: bool (default: False)
+            Replace an existing output file; False: an existing file is an error.
+
+    Returns:
+        outfile: string
+            The file that was written.
+
+    Raises:
+        FileNotFoundError: no row folder.
+        FileExistsError: the output file exists and overwrite is False.
+    """
+    import netCDF4
+    folder = rows_folder(path)
+    outfile = dense_netcdf_name(folder) if outfile is None else outfile
+    if os.path.exists(outfile) and not overwrite:
+        raise FileExistsError(f"{outfile} exists (overwrite=True replaces it)")
+    rs = RowStats.open(folder)
+    tables = rs.tables(variables)
+    tdim = rs.meta["tracks_dim"]
+    ntracks = len(tables.duration)
+    sel = np.arange(ntracks) if tracks is None else np.asarray(tracks, dtype=np.int64)
+    # One width for all blocks: the original times dimension, or the longest selected track
+    width = rs.meta["dims"][rs.meta["times_dim"]] if tracks is None else int(tables.duration[sel].max()) if len(sel) else 0
+    step = len(sel) if not block_tracks or block_tracks >= len(sel) else int(block_tracks)
+    step = max(step, 1)
+    encoding = lambda ds: {v: dict(zlib=True) for v in ds.data_vars}
+    if os.path.exists(outfile):
+        os.remove(outfile)
+
+    # First block: written with xarray (creates the dimensions, variables, attributes, fill values and the unlimited tracks dimension)
+    first = rows_to_dense(tables, tracks=sel[:step], width=width)
+    first.to_netcdf(outfile, mode="w", format="NETCDF4", unlimited_dims=tdim, encoding=encoding(first))
+    if step >= len(sel):
+        return outfile
+
+    # The other blocks: appended along the unlimited tracks dimension, raw values (no mask or scale applied)
+    with netCDF4.Dataset(outfile, "a") as nc:
+        nc.set_auto_maskandscale(False)
+        for start in range(step, len(sel), step):
+            block = rows_to_dense(tables, tracks=sel[start:start + step], width=width)
+            stop = start + block.sizes[tdim]
+            for name in block.variables:
+                if block[name].dims and block[name].dims[0] == tdim:
+                    nc[name][start:stop] = block[name].values
+    return outfile

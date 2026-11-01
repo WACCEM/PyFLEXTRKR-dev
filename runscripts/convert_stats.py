@@ -3,14 +3,18 @@ Convert a track statistics file between the dense netCDF layout and the row tabl
 
     python runscripts/convert_stats.py to-rows  mcs_tracks_robust_X.nc    mcs_tracks_robust_X.rows
     python runscripts/convert_stats.py to-dense mcs_tracks_robust_X.rows  mcs_tracks_robust_X.nc
+    python runscripts/convert_stats.py to-dense mcs_tracks_robust_X.rows                  # target: the name of the old dense file (.rows -> .nc)
     python runscripts/convert_stats.py to-dense mcs_tracks_robust_X.rows  mcs_mcs_X.nc --select is_mcs=1
     python runscripts/convert_stats.py to-dense mcs_tracks_robust_X.rows  subset.nc    --select track_class=1,2 --variables area majoraxis
 
 to-rows reads the dense file block by block (memory of one block, not of the file) and checks that the dense layout can be
-rebuilt exactly. to-dense builds the dense arrays of the selected tracks only (a whole year does not fit in memory as dense
-arrays): --select NAME=V1,V2 keeps the tracks whose 1-D variable NAME has one of the values, --variables limits the
-[tracks, times] variables. The tracks coordinate of the dense file keeps the track numbers of the whole file (pixel track number =
-index + 1). The dense file is written with zlib compression and an unlimited tracks dimension, as the pipeline steps do.
+rebuilt exactly. to-dense writes the dense file block by block too (rowstats.write_dense_netcdf, --block-tracks tracks at a
+time; the result does not depend on the block size), so a month (180 GB of dense arrays) needs the memory of one block; a whole
+year as dense arrays is too big for any node: --select NAME=V1,V2 keeps the tracks whose 1-D variable NAME has one of the values,
+--variables limits the [tracks, times] variables. The tracks coordinate of the dense file keeps the track numbers of the whole
+file (pixel track number = index + 1). The dense file is written with zlib compression and an unlimited tracks dimension, as the
+pipeline steps do, and is the same file the dense step would have written (values, dtypes, fill values, attributes). An existing
+target is an error unless --overwrite is given.
 
 Author: Zhe Feng | zhe.feng@pnnl.gov
 """
@@ -57,24 +61,32 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Convert a track statistics file between dense netCDF and row tables.")
     parser.add_argument("direction", choices=["to-rows", "to-dense"], help="to-rows: dense .nc -> row folder; to-dense: row folder -> dense .nc")
     parser.add_argument("source", help="input file (to-rows) or row folder (to-dense)")
-    parser.add_argument("target", help="output row folder (to-rows) or dense file (to-dense)")
-    parser.add_argument("--block-tracks", type=int, default=4000, help="to-rows: tracks per block (default: %(default)s)")
+    parser.add_argument("target", nargs="?", default=None,
+                        help="output row folder (to-rows) or dense file (to-dense); default: the name of the dense file of the old "
+                             "step (mcs_tracks_X.rows -> mcs_tracks_X.nc), or mcs_tracks_X.nc -> mcs_tracks_X.rows")
+    parser.add_argument("--block-tracks", type=int, default=4000, help="tracks per block, to-rows and to-dense (default: %(default)s)")
     parser.add_argument("--select", default=None, help="to-dense: keep the tracks with NAME=V1,V2 (a 1-D variable), e.g. is_mcs=1")
     parser.add_argument("--variables", nargs="+", default=None, help="to-dense: the [tracks, times] variables to write (default: all)")
+    parser.add_argument("--overwrite", action="store_true", help="to-dense: replace an existing target file")
     args = parser.parse_args(argv)
 
-    from pyflextrkr.rowstats import RowStats, dense_to_rows, write_rows
+    from pyflextrkr.rowstats import RowStats, dense_netcdf_name, dense_to_rows, rows_folder, write_dense_netcdf, write_rows
     if args.direction == "to-rows":
-        write_rows(dense_to_rows(args.source, block_tracks=args.block_tracks), args.target)
-        print(f"{args.source} -> {args.target}")
+        target = args.target or (args.source[:-3] + ".rows" if args.source.endswith(".nc") else args.source + ".rows")
+        write_rows(dense_to_rows(args.source, block_tracks=args.block_tracks), target)
+        print(f"{args.source} -> {target}")
         return 0
-    stats = RowStats.open(args.source)
+    source = rows_folder(args.source)
+    stats = RowStats.open(source)
     tracks = select_tracks(stats, args.select)
-    ds = stats.to_xarray(tracks=tracks, variables=args.variables)
-    tracks_dim = stats.meta["tracks_dim"]
-    ds.to_netcdf(args.target, mode="w", format="NETCDF4", unlimited_dims=tracks_dim,
-                 encoding={v: dict(zlib=True) for v in ds.data_vars})
-    print(f"{args.source} -> {args.target}: {ds.sizes[tracks_dim]} tracks, times dimension {ds.sizes[stats.meta['times_dim']]}")
+    target = args.target or dense_netcdf_name(source)
+    try:
+        write_dense_netcdf(source, target, tracks=tracks, variables=args.variables, block_tracks=args.block_tracks,
+                           overwrite=args.overwrite)
+    except FileExistsError as error:
+        raise SystemExit(f"{error}")
+    ntracks = len(stats.duration) if tracks is None else len(tracks)
+    print(f"{source} -> {target}: {ntracks} tracks")
     return 0
 
 
