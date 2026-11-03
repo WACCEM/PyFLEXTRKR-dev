@@ -56,7 +56,18 @@ def test_rows_step_equals_dense_step(tmp_path, radius_km):
     assert rows.tracks["lifecycle_evaluated"].tolist() == [1, 1] and rows.meta["global_attrs"]["n_pairs_not_computed"] == 0
 
 
-def test_rows_step_with_the_dilation_radius_recomputed_in_the_worker(tmp_path):
+def test_rows_step_with_conv_diameter_sum(tmp_path):
+    """First-pass tables with conv_diameter_sum: the merged-mask values are the same in both modes (3 and 1 cells of 16.93 km)."""
+    config, _ = build_run(tmp_path, radius_km=10.0, with_conv_diameter_sum=True)
+    config.update(mcs_length_method="conv_diameter_sum", mcs_length_thresh=40)
+    dense, rows = run_both(config)
+    assert table_differences(dense, rows) == []
+    one_cell = 2.0 * np.sqrt(25 * 9.0 / np.pi)
+    values = rows.entries["conv_diameter_sum"].reshape(-1)
+    np.testing.assert_allclose(np.unique(values[np.isfinite(values)]), [one_cell, 3 * one_cell], rtol=1e-5)
+
+
+def test_rows_step_with_the_clusters_dilated_further_in_the_worker(tmp_path):
     config, _ = build_run(tmp_path, radius_km=10.0)
     config["conv_dilate_overwrite_radius_km"] = 20.0
     config["x_dimname"] = "x"
@@ -64,7 +75,8 @@ def test_rows_step_with_the_dilation_radius_recomputed_in_the_worker(tmp_path):
     config["dy"] = 3000
     dense, rows = run_both(config)
     assert table_differences(dense, rows) == []
-    assert rows.meta["global_attrs"]["conv_dilate_radius_km_idfeature"] == 10.0
+    assert rows.meta["global_attrs"]["conv_dilate_overwrite_radius_km"] == 20.0
+    np.testing.assert_array_equal(rows.meta["global_attrs"]["radii_expand_km"], [10.0])
 
 
 def test_rows_step_with_missing_cloudid_files(tmp_path):

@@ -7,7 +7,7 @@ The same MCS identification, merge/split fragment folding and feature classifica
 Memory and time follow the number of entries (about 20 million for a year) and not tracks x longest track x 50 slots (about
 3 TB for a year).
 
-The per-track tests (identify_mcs_periods, find_mergesplit_parents, resolve_fragment_roots, classify_feature_class,
+The per-track tests (identify_mcs_periods_by_method, find_mergesplit_parents, resolve_fragment_roots, classify_feature_class,
 classify_track_class) are those of identifymcs_radar.py, called with slices of the flat arrays. Only the two functions that
 work on the [tracks, times] arrays of the fragments have a flat version here (release_noncoexisting_fragments_flat,
 attach_fragments_flat), written to give the same result as the dense ones; tests/test_identifymcs_rows.py checks that the
@@ -24,7 +24,7 @@ import time
 import numpy as np
 
 from pyflextrkr.identifymcs_radar import (
-    classify_feature_class, classify_track_class, find_mergesplit_parents, identify_mcs_periods,
+    classify_feature_class, classify_track_class, find_mergesplit_parents, identify_mcs_periods_by_method, mcs_length_varname,
     mcs_params_from_config, resolve_fragment_roots,
 )
 from pyflextrkr.rowstats import FRAGMENT_KINDS, TableBuilder, gather_index, load_sparse_entries, write_rows
@@ -33,7 +33,7 @@ from pyflextrkr.smooth_trajectory import smooth_trajectory
 # Attributes of the variables that this step makes (the sparse trackstats variables keep the attributes of their file)
 ATTRS_1D = {
     "is_mcs": "Flag indicating if this track meets the radar MCS criteria at any time",
-    "track_class": "Most-organized feature class observed on this track: 1=MCS, 2=multi-cell, 3=isolated-cell, 4=non-convective",
+    "track_class": "Most-organized feature class observed on this track: 1=MCS, 2=multi-cell, 3=single-cell, 4=stratiform",
 }
 
 
@@ -249,7 +249,14 @@ def identifymcs_radar_rows(config):
     end_merge_tracknumber = ds_1d["end_merge_tracknumber"].values.astype(float)
     start_split_tracknumber = ds_1d["start_split_tracknumber"].values.astype(float)
     track_lifetime_hr = track_duration * time_resolution
-    majoraxis, dbz45, basetime, ncells = flat["majoraxis"], flat[mcs_dbz45_area_varname], flat["base_time"], flat["ncells"]
+    length_varname = mcs_length_varname(params)
+    if length_varname not in flat:
+        logger.critical(f"ERROR: mcs_length_method '{params['mcs_length_method']}' needs the variable '{length_varname}', which is "
+                        f"not in the trackstats file. Rerun run_trackstats, or set mcs_length_method: majoraxis. "
+                        f"Available: {list(flat.keys())}")
+        logger.critical("Tracking will now exit.")
+        sys.exit()
+    length, dbz45, basetime, ncells = flat[length_varname], flat[mcs_dbz45_area_varname], flat["base_time"], flat["ncells"]
     conv_area, strat_area, area = flat["conv_area"], flat["strat_area"], flat["area"]
     cloudnumber, track_status = flat["cloudnumber"], flat["track_status"]
 
@@ -266,7 +273,7 @@ def identifymcs_radar_rows(config):
         if ilength <= 0:
             continue
         sl = slice(offsets[nt], offsets[nt + 1])
-        mcs_status, track_is_mcs = identify_mcs_periods(majoraxis[sl], dbz45[sl], basetime[sl], time_resolution, params)
+        mcs_status, track_is_mcs = identify_mcs_periods_by_method(length[sl], dbz45[sl], basetime[sl], time_resolution, params)
         mcs_status_flat[sl] = mcs_status
         is_mcs[nt] = track_is_mcs
         feature_class = classify_feature_class(mcs_status, ncells[sl].astype(int), fillval)
@@ -274,7 +281,7 @@ def identifymcs_radar_rows(config):
         track_class[nt] = classify_track_class(feature_class, fillval)
     logger.info(f"Number of radar-defined MCS: {int(np.sum(is_mcs))}")
     if not is_mcs.any():
-        logger.warning("No MCS identified (per mcs_majoraxis_thresh/mcs_dbz45_area_thresh/mcs_duration_thresh). "
+        logger.warning("No MCS identified (per mcs_length_method/mcs_length_thresh/mcs_dbz45_area_thresh/mcs_duration_thresh). "
                        "Continuing - all non-fragment tracks are still kept and classified.")
 
     #########################################################################
@@ -338,9 +345,12 @@ def identifymcs_radar_rows(config):
     global_attrs = dict(ds_1d.attrs)
     global_attrs.update({
         "Title": "Final track statistics with radar-based MCS identification and classification",
-        "mcs_majoraxis_thresh_km": params['mcs_majoraxis_thresh'], "mcs_dbz45_area_thresh_km2": params['mcs_dbz45_area_thresh'],
+        "mcs_length_method": params['mcs_length_method'], "mcs_length_thresh_km": params['mcs_length_thresh'],
+        "mcs_dbz45_area_thresh_km2": params['mcs_dbz45_area_thresh'],
         "mcs_duration_thresh_hour": params['mcs_duration_thresh'], "Created_on": time.ctime(time.time()),
     })
+    if params['mcs_length_method'] == "majoraxis":
+        global_attrs["mcs_majoraxis_thresh_km"] = params['mcs_majoraxis_thresh']
     builder = TableBuilder(kept_duration, width, nslots=nmaxmerge, tracks_dim=tracks_dimname, times_dim=times_dimname,
                            global_attrs=global_attrs)
 
@@ -398,7 +408,7 @@ def identifymcs_radar_rows(config):
     builder.add_track_var("track_class", track_class[keep_track_indices],
                           {"long_name": ATTRS_1D["track_class"], "units": "unitless", "_FillValue": fillval})
     builder.add_entry_var("feature_class", feature_class_flat[index], {
-        "long_name": "Per-time feature class: 1=MCS, 2=multi-cell, 3=isolated-cell, 4=non-convective", "units": "unitless",
+        "long_name": "Per-time feature class: 1=MCS, 2=multi-cell, 3=single-cell, 4=stratiform", "units": "unitless",
         "_FillValue": fillval}, fill=fillval)
     # mcs_status is 0 (not the _FillValue) where a track has no entry, as in the dense file
     builder.add_entry_var("mcs_status", mcs_status_flat[index], {

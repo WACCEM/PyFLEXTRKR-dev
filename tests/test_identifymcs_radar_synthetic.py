@@ -15,6 +15,10 @@ from pyflextrkr.identifymcs_radar import identifymcs_radar
 from pyflextrkr.identifymcs_radar import (
     group_contiguous_indices,
     identify_mcs_periods,
+    identify_mcs_periods_conv_diameter,
+    identify_mcs_periods_by_method,
+    mcs_length_varname,
+    mcs_params_from_config,
     find_mergesplit_parents,
     resolve_fragment_roots,
     release_noncoexisting_fragments,
@@ -22,6 +26,7 @@ from pyflextrkr.identifymcs_radar import (
     classify_feature_class,
     classify_track_class,
     CLASS_MCS, CLASS_MULTICELL, CLASS_ISOLATED_CELL, CLASS_NON_CONVECTIVE,
+    CLASS_SINGLE_CELL, CLASS_STRATIFORM,
 )
 
 DT = 1.0 / 12.0  # 5-minute time resolution [hour]
@@ -32,6 +37,9 @@ MCS_PARAMS = {
     'mcs_duration_thresh': 4.0,
     'mcs_gap_hour': 0.25,
 }
+
+# The same criteria with the convective-cell size test
+MCS_PARAMS_DIAMETER = dict(MCS_PARAMS, mcs_length_method='conv_diameter_sum', mcs_length_thresh=100.0)
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +117,105 @@ class TestIdentifyMcsPeriods:
         mcs_status, is_mcs = identify_mcs_periods(majoraxis, dbz45, basetime, DT, MCS_PARAMS)
         assert not is_mcs
         assert np.all(mcs_status == 0)
+
+
+# ---------------------------------------------------------------------------
+# identify_mcs_periods_conv_diameter / identify_mcs_periods_by_method / parameters
+# ---------------------------------------------------------------------------
+
+class TestIdentifyMcsPeriodsConvDiameter:
+    def _make_track(self, n, diameter_val=150.0, dbz45_val=10.0):
+        return np.full(n, diameter_val), np.full(n, dbz45_val), np.arange(n) * DT * 3600.0
+
+    def test_sustained_mcs(self):
+        diameter, dbz45, basetime = self._make_track(60)
+        mcs_status, is_mcs = identify_mcs_periods_conv_diameter(diameter, dbz45, basetime, DT, MCS_PARAMS_DIAMETER)
+        assert is_mcs
+        assert np.all(mcs_status == 1)
+
+    def test_too_short_not_mcs(self):
+        diameter, dbz45, basetime = self._make_track(20)
+        _, is_mcs = identify_mcs_periods_conv_diameter(diameter, dbz45, basetime, DT, MCS_PARAMS_DIAMETER)
+        assert not is_mcs
+
+    def test_threshold_is_inclusive_and_below_is_not_mcs(self):
+        diameter, dbz45, basetime = self._make_track(60, diameter_val=100.0)
+        assert identify_mcs_periods_conv_diameter(diameter, dbz45, basetime, DT, MCS_PARAMS_DIAMETER)[1]
+        diameter, dbz45, basetime = self._make_track(60, diameter_val=99.9)
+        assert not identify_mcs_periods_conv_diameter(diameter, dbz45, basetime, DT, MCS_PARAMS_DIAMETER)[1]
+
+    def test_no_45dbz_area_never_mcs(self):
+        diameter, dbz45, basetime = self._make_track(60, dbz45_val=0.0)
+        assert not identify_mcs_periods_conv_diameter(diameter, dbz45, basetime, DT, MCS_PARAMS_DIAMETER)[1]
+
+    def test_gap_bridged_and_long_gap_breaks(self):
+        diameter, dbz45, basetime = self._make_track(60)
+        diameter[30:32] = 0.0           # 10 min, within mcs_gap_hour
+        assert identify_mcs_periods_conv_diameter(diameter, dbz45, basetime, DT, MCS_PARAMS_DIAMETER)[1]
+        diameter[30:40] = 0.0           # 50 min: two runs of 2.5 h and 1.7 h, neither reaches 4 h
+        assert not identify_mcs_periods_conv_diameter(diameter, dbz45, basetime, DT, MCS_PARAMS_DIAMETER)[1]
+
+    def test_nan_and_empty(self):
+        diameter, dbz45, basetime = self._make_track(60)
+        diameter[:] = np.nan
+        mcs_status, is_mcs = identify_mcs_periods_conv_diameter(diameter, dbz45, basetime, DT, MCS_PARAMS_DIAMETER)
+        assert not is_mcs and np.all(mcs_status == 0)
+        mcs_status, is_mcs = identify_mcs_periods_conv_diameter(np.array([]), np.array([]), np.array([]), DT, MCS_PARAMS_DIAMETER)
+        assert len(mcs_status) == 0 and not is_mcs
+
+    def test_same_logic_as_the_major_axis_test(self):
+        """Both tests share the run / gap / duration logic: the same series gives the same periods."""
+        rng = np.random.default_rng(3)
+        series = np.where(rng.random(120) < 0.8, 150.0, 20.0)
+        dbz45 = np.full(120, 5.0)
+        basetime = np.arange(120) * DT * 3600.0
+        a = identify_mcs_periods(series, dbz45, basetime, DT, MCS_PARAMS)
+        b = identify_mcs_periods_conv_diameter(series, dbz45, basetime, DT, MCS_PARAMS_DIAMETER)
+        np.testing.assert_array_equal(a[0], b[0])
+        assert a[1] == b[1]
+
+
+class TestMcsLengthMethod:
+    def test_defaults_give_the_original_test(self):
+        """A config from before mcs_length_method existed: the major axis with mcs_majoraxis_thresh."""
+        params = mcs_params_from_config({'mcs_majoraxis_thresh': 80})
+        assert params['mcs_length_method'] == 'majoraxis'
+        assert params['mcs_length_thresh'] == 80
+        assert params['mcs_majoraxis_thresh'] == 80
+        assert mcs_length_varname(params) == 'majoraxis'
+        assert mcs_params_from_config({})['mcs_length_thresh'] == 100
+
+    def test_conv_diameter_sum_config(self):
+        params = mcs_params_from_config({'mcs_length_method': 'conv_diameter_sum', 'mcs_length_thresh': 120})
+        assert params['mcs_length_thresh'] == 120
+        assert mcs_length_varname(params) == 'conv_diameter_sum'
+        # the old key is not the threshold of the new method
+        assert mcs_params_from_config({'mcs_length_method': 'conv_diameter_sum', 'mcs_majoraxis_thresh': 50})['mcs_length_thresh'] == 50
+
+    def test_mcs_length_thresh_wins_for_majoraxis_too(self):
+        params = mcs_params_from_config({'mcs_length_thresh': 90, 'mcs_majoraxis_thresh': 100})
+        assert params['mcs_length_thresh'] == params['mcs_majoraxis_thresh'] == 90
+
+    def test_unknown_method_raises(self):
+        with pytest.raises(ValueError):
+            mcs_params_from_config({'mcs_length_method': 'diameter'})
+        with pytest.raises(ValueError):
+            mcs_length_varname({'mcs_length_method': 'diameter'})
+
+    def test_dispatch(self):
+        """A stratiform shield with small cores: 150 km major axis, 40 km of cell diameters."""
+        n = 60
+        length_major, length_diam = np.full(n, 150.0), np.full(n, 40.0)
+        dbz45, basetime = np.full(n, 5.0), np.arange(n) * DT * 3600.0
+        major = mcs_params_from_config({})
+        diam = mcs_params_from_config({'mcs_length_method': 'conv_diameter_sum', 'mcs_length_thresh': 100})
+        assert identify_mcs_periods_by_method(length_major, dbz45, basetime, DT, major)[1]
+        assert not identify_mcs_periods_by_method(length_diam, dbz45, basetime, DT, diam)[1]
+        assert identify_mcs_periods_by_method(length_diam, dbz45, basetime, DT, dict(diam, mcs_length_thresh=30))[1]
+        # params dicts written before mcs_length_method existed (like MCS_PARAMS) keep working
+        assert identify_mcs_periods_by_method(length_major, dbz45, basetime, DT, MCS_PARAMS)[1]
+        # the major-axis method honours mcs_length_thresh
+        assert not identify_mcs_periods_by_method(length_major, dbz45, basetime, DT, dict(major, mcs_length_thresh=200))[1]
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +554,33 @@ class TestClassification:
         assert fc[2] == CLASS_ISOLATED_CELL
         assert fc[3] == CLASS_NON_CONVECTIVE
 
+    def test_names_of_the_classes(self):
+        """Stratiform / single cell / multi cell are the former non-convective / isolated cell / multi-cell (same codes)."""
+        assert (CLASS_MCS, CLASS_MULTICELL, CLASS_SINGLE_CELL, CLASS_STRATIFORM) == (1, 2, 3, 4)
+        assert CLASS_ISOLATED_CELL == CLASS_SINGLE_CELL and CLASS_NON_CONVECTIVE == CLASS_STRATIFORM
+
+    def test_classes_are_exclusive_and_cover_every_step(self):
+        """MCS first, then stratiform (0 cells), single cell (1 cell), multi cell (2+): one class for every ncells."""
+        ncells = np.arange(0, 12)
+        for mcs_flag in (0, 1):
+            fc = classify_feature_class(np.full(len(ncells), mcs_flag), ncells)
+            assert np.all(np.isin(fc, [CLASS_MCS, CLASS_MULTICELL, CLASS_SINGLE_CELL, CLASS_STRATIFORM]))
+            if mcs_flag:
+                assert np.all(fc == CLASS_MCS)
+            else:
+                np.testing.assert_array_equal(fc, [CLASS_STRATIFORM, CLASS_SINGLE_CELL] + [CLASS_MULTICELL] * 10)
+
+    def test_track_class_non_mcs_by_the_largest_cell_count(self):
+        """A non-MCS track is stratiform with no cell at any step, single cell with at most one, multi cell with two or more."""
+        zeros = np.zeros(6, dtype=int)
+        no_mcs = np.zeros(6, dtype=int)
+        stratiform = classify_feature_class(no_mcs, zeros)
+        single = classify_feature_class(no_mcs, np.array([0, 0, 1, 1, 0, 0]))
+        multi = classify_feature_class(no_mcs, np.array([0, 1, 1, 2, 1, 0]))
+        assert classify_track_class(stratiform) == CLASS_STRATIFORM
+        assert classify_track_class(single) == CLASS_SINGLE_CELL
+        assert classify_track_class(multi) == CLASS_MULTICELL
+
     def test_fillval_passthrough(self):
         mcs_status = np.array([0])
         ncells = np.array([-9999])
@@ -493,6 +627,7 @@ def _build_sparse_trackstats_file(tmp_path):
     base_time = np.zeros((ntracks, max_trackduration))
     ncells = np.zeros((ntracks, max_trackduration))
     conv_area = np.zeros((ntracks, max_trackduration))
+    conv_diameter_sum = np.zeros((ntracks, max_trackduration))
     conv_majoraxis = np.zeros((ntracks, max_trackduration))
     strat_area = np.zeros((ntracks, max_trackduration))
     cloudnumber = np.zeros((ntracks, max_trackduration), dtype=np.int32)
@@ -518,6 +653,7 @@ def _build_sparse_trackstats_file(tmp_path):
     base_time[1, 0:d1] = t0_epoch + 10000.0 + np.arange(d1) * dt_sec
     majoraxis[1, 0:d1] = 30.0
     ncells[1, 0:d1] = 1
+    conv_diameter_sum[1, 0:d1] = 11.3
     area[1, 0:d1] = 80.0
     meanlat[1, 0:d1] = 36.0
     meanlon[1, 0:d1] = -99.0
@@ -529,6 +665,7 @@ def _build_sparse_trackstats_file(tmp_path):
     area_45dbz[2, 0:d2] = 50.0
     conv_area[2, 0:d2] = 50.0
     ncells[2, 0:d2] = 3
+    conv_diameter_sum[2, 0:d2] = 40.0    # three small cells in a 150 km feature: long, but not 100 km of cells
     conv_majoraxis[2, 0:10] = 20.0       # not yet organized
     conv_majoraxis[2, 10:d2] = 150.0     # organized from step 10 (50 min in)
     strat_area[2, 0:40] = 0.0
@@ -556,6 +693,7 @@ def _build_sparse_trackstats_file(tmp_path):
         "base_time": _flatten(base_time),
         "ncells": _flatten(ncells).astype(np.int32),
         "conv_area": _flatten(conv_area),
+        "conv_diameter_sum": _flatten(conv_diameter_sum),
         "conv_majoraxis": _flatten(conv_majoraxis),
         "strat_area": _flatten(strat_area),
         "cloudnumber": _flatten(cloudnumber).astype(np.int32),
@@ -763,3 +901,55 @@ class TestIdentifymcsRadarEndToEnd:
         config["duration_range_auto_update"] = False
         with pytest.raises(SystemExit):
             identifymcs_radar(config)
+
+
+class TestIdentifymcsRadarConvDiameter:
+    """The driver with mcs_length_method conv_diameter_sum (the sparse file's long track has 150 km major axis, 40 km of cells)."""
+
+    def test_major_axis_method_is_the_default_and_unchanged(self, tmp_path):
+        stats_path = _build_sparse_trackstats_file(tmp_path)
+        config = _make_driver_config(stats_path)
+        ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
+        mcs = int(np.where(ds["track_duration"].values == 70)[0][0])
+        assert ds["is_mcs"].values[mcs] == 1
+        assert ds.attrs["mcs_length_method"] == "majoraxis"
+        assert ds.attrs["mcs_length_thresh_km"] == 100
+        assert ds.attrs["mcs_majoraxis_thresh_km"] == 100
+
+    def test_small_cells_in_a_long_feature_are_not_mcs(self, tmp_path):
+        stats_path = _build_sparse_trackstats_file(tmp_path)
+        config = _make_driver_config(stats_path)
+        config.update(mcs_length_method="conv_diameter_sum", mcs_length_thresh=100)
+        ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
+        mcs = int(np.where(ds["track_duration"].values == 70)[0][0])
+        assert np.all(ds["is_mcs"].values == 0)
+        # three cells at every step: multi-cell; the one-cell track: single cell
+        assert ds["track_class"].values[mcs] == CLASS_MULTICELL
+        assert ds["track_class"].values[int(np.where(ds["track_duration"].values == 10)[0][0])] == CLASS_SINGLE_CELL
+        assert ds.attrs["mcs_length_method"] == "conv_diameter_sum"
+        assert ds.attrs["mcs_length_thresh_km"] == 100
+        assert "mcs_majoraxis_thresh_km" not in ds.attrs
+
+    def test_lower_threshold_gives_the_mcs(self, tmp_path):
+        stats_path = _build_sparse_trackstats_file(tmp_path)
+        config = _make_driver_config(stats_path)
+        config.update(mcs_length_method="conv_diameter_sum", mcs_length_thresh=30)
+        ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
+        mcs = int(np.where(ds["track_duration"].values == 70)[0][0])
+        assert ds["is_mcs"].values[mcs] == 1
+        assert ds["track_class"].values[mcs] == CLASS_MCS
+        assert ds.sizes["tracks"] == 2      # the fragment is still folded into the MCS
+
+    def test_missing_variable_exits_with_a_hint(self, tmp_path):
+        stats_path = _build_sparse_trackstats_file(tmp_path)
+        sparse_file = os.path.join(stats_path, "trackstats_sparse_20250101.0000_20250101.1200.nc")
+        ds = xr.open_dataset(sparse_file).load()
+        ds.close()
+        ds.drop_vars("conv_diameter_sum").to_netcdf(sparse_file)
+        config = _make_driver_config(stats_path)
+        config["mcs_length_method"] = "conv_diameter_sum"
+        with pytest.raises(SystemExit):
+            identifymcs_radar(config)
+        # the major-axis method does not need the variable
+        config["mcs_length_method"] = "majoraxis"
+        assert os.path.isfile(identifymcs_radar(config))

@@ -45,7 +45,9 @@ Three ways, from "my code was written for the dense files" to "I want to learn p
    ends in `.nc` but exists only as a `.rows` folder is found too. A row folder is rebuilt as dense arrays only for what is asked
    for: pass `variables=[...]` (the `[tracks, times]` variables) and, for a window, `tracks=[...]`; `fragments=False` leaves out the
    `[tracks, times, slots]` merge / split variables, so `load_trackstats(path, variables=[], fragments=False)` is the cheap first look at
-   the per-track variables of a file of any size. `stats_exists(path)` is `os.path.isfile` for a file that may be dense or rows.
+   the per-track variables of a file of any size (a row folder does not read the fragments table or the index columns of the entries table for it). `track_variables=[...]` limits the per-track variables too: only their columns of the
+   tracks table are read (the track maps need 4 of the 13 per-track variables of 2.9 million tracks: 525 MiB and 0.8 s against 1,810 MiB and 1.8 s); `[]` gives none, the tracks index is in the result only if `"tracks"` is listed.
+   `stats_exists(path)` is `os.path.isfile` for a file that may be dense or rows.
 2. **`RowStats`** gives numpy access that looks like `a[track, time]`: no dense array is built.
 3. **pandas**: `rs.to_pandas("tracks" | "entries" | "fragments")`.
 

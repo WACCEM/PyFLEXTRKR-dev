@@ -206,6 +206,7 @@ def calc_stats_singlefile(
             out_conv_area = np.full(numtracks, fillval_f, dtype=np.float32)
             out_strat_area = np.full(numtracks, fillval_f, dtype=np.float32)
             out_ncells = np.full(numtracks, fillval, dtype=np.int32)
+            out_conv_diameter_sum = np.full(numtracks, fillval_f, dtype=np.float32)
             out_maxETH10 = np.full(numtracks, fillval_f, dtype=np.float32)
             out_maxETH20 = np.full(numtracks, fillval_f, dtype=np.float32)
             out_maxETH30 = np.full(numtracks, fillval_f, dtype=np.float32)
@@ -540,10 +541,27 @@ def calc_stats_singlefile(
                         out_conv_area[itrack] = core_npix * pixel_radius ** 2
                         out_strat_area[itrack] = strat_npix * pixel_radius ** 2
 
-                    # Number of unique convective cells within this feature
+                    # Number of unique convective cells within this feature, and the sum of their
+                    # circular-equivalent diameters 2*sqrt(A_i/pi) [km] (conv_area cannot be used for
+                    # this: it is the total area, and the sum of square roots is not the square root of
+                    # the sum). One bincount over the cell labels gives every cell's pixel count or area.
                     feature_cellnumber = file_cellnumber[corecold_indices[0], corecold_indices[1]]
-                    unique_cells = np.unique(feature_cellnumber[feature_cellnumber > 0])
-                    out_ncells[itrack] = len(unique_cells)
+                    in_cell = feature_cellnumber > 0
+                    if np.any(in_cell):
+                        unique_cells, cell_inverse = np.unique(feature_cellnumber[in_cell], return_inverse=True)
+                        if area_method == "latlon":
+                            cell_areas = np.bincount(
+                                cell_inverse,
+                                weights=np.nan_to_num(pixel_area[corecold_indices[0][in_cell], corecold_indices[1][in_cell]]),
+                                minlength=len(unique_cells),
+                            )
+                        else:
+                            cell_areas = np.bincount(cell_inverse, minlength=len(unique_cells)) * pixel_radius ** 2
+                        out_ncells[itrack] = len(unique_cells)
+                        out_conv_diameter_sum[itrack] = np.sum(2.0 * np.sqrt(cell_areas / np.pi))
+                    else:
+                        out_ncells[itrack] = 0
+                        out_conv_diameter_sum[itrack] = 0.0
 
                     # Whole-feature and convective-only area exceeding each
                     # configured dBZ threshold
@@ -696,7 +714,7 @@ def calc_stats_singlefile(
                 out_max_dbz,
                 out_majoraxis, out_minoraxis, out_aspectratio,
                 out_orientation, out_eccentricity, out_conv_majoraxis,
-                out_conv_area, out_strat_area, out_ncells,
+                out_conv_area, out_strat_area, out_ncells, out_conv_diameter_sum,
                 out_maxETH10, out_maxETH20, out_maxETH30, out_maxETH40, out_maxETH50,
                 dbz_area_threshs, out_area_dbz, out_conv_area_dbz,
             )
@@ -1062,7 +1080,7 @@ def define_extra_radar_feature(
         out_max_dbz,
         out_majoraxis, out_minoraxis, out_aspectratio,
         out_orientation, out_eccentricity, out_conv_majoraxis,
-        out_conv_area, out_strat_area, out_ncells,
+        out_conv_area, out_strat_area, out_ncells, out_conv_diameter_sum,
         out_maxETH10, out_maxETH20, out_maxETH30, out_maxETH40, out_maxETH50,
         dbz_area_threshs, out_area_dbz, out_conv_area_dbz,
 ):
@@ -1090,6 +1108,9 @@ def define_extra_radar_feature(
             Convective / stratiform area of a feature.
         out_ncells: np.array
             Number of unique convective cells within a feature.
+        out_conv_diameter_sum: np.array
+            Sum of the circular-equivalent diameters 2*sqrt(A_i/pi) [km] of the convective cells
+            within a feature (0 if the feature has no cell).
         out_maxETH10 ... out_maxETH50: np.array
             Maximum echo-top heights in convective pixels of a feature.
         dbz_area_threshs: list
@@ -1120,6 +1141,7 @@ def define_extra_radar_feature(
         "conv_area": out_conv_area,
         "strat_area": out_strat_area,
         "ncells": out_ncells,
+        "conv_diameter_sum": out_conv_diameter_sum,
         "maxETH_10dbz": out_maxETH10,
         "maxETH_20dbz": out_maxETH20,
         "maxETH_30dbz": out_maxETH30,
@@ -1207,6 +1229,11 @@ def define_extra_radar_feature(
             "long_name": "Number of unique convective cells in a feature",
             "units": "unitless",
             "_FillValue": fillval,
+        },
+        "conv_diameter_sum": {
+            "long_name": "Sum of the circular-equivalent diameters (2*sqrt(A/pi)) of the convective cells in a feature",
+            "units": "km",
+            "_FillValue": fillval_f,
         },
         "maxETH_10dbz": {
             "long_name": "Maximum 10dBZ echo-top height in convective pixels of a feature",

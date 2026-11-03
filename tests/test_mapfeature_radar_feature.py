@@ -31,9 +31,9 @@ F2_COLS = slice(22, 25)
 
 
 def _build_cloudid(tmp_path, conv_radius_km=None):
-    """conv_radius_km: write conv_feature_number at that dilation radius, with a second convective block 5 px (15 km)
-    from the first (rows 6-9, cols 14-17); None: no conv_feature_number and one block, as the cloudid files of
-    the other tests."""
+    """conv_radius_km: write cell_cluster_number (the groups of the convective pixels grown by that radius, the stand-in of
+    the inflated cells of idfeature_radar3d), with a second convective block 5 px (15 km) from the first (rows 6-9,
+    cols 14-17); None: no cell_cluster_number and one block, as the cloudid files of the other tests."""
     feature_number = np.zeros((NY, NX), dtype=np.int32)
     feature_number[F1_ROWS, F1_COLS] = 1
     feature_number[F2_ROWS, F2_COLS] = 2
@@ -74,10 +74,9 @@ def _build_cloudid(tmp_path, conv_radius_km=None):
     }
     conv_kwargs = {}
     if conv_radius_km is not None:
-        config['conv_dilate_radius_km'] = conv_radius_km
         conv_kwargs = {
-            'conv_feature_number': dilate_label_conv_mask(convsf == 4, conv_radius_km * 1000.0, DX, DX),
-            'feature_params': {'conv_dilate_radius_km': conv_radius_km},
+            'cell_cluster_number': dilate_label_conv_mask(convsf == 4, conv_radius_km * 1000.0, DX, DX),
+            'feature_params': {'radii_expand_km': np.array([conv_radius_km])},
         }
     cloudid_outfile = os.path.join(str(tmp_path), f"cloudid_{file_datestring}_{file_timestring}.nc")
     write_radar_featureid(
@@ -190,8 +189,8 @@ class TestMapFeatureRadarFeature:
 
 
 class TestConvDilateOverwrite:
-    """conv_dilate_overwrite_radius_km: the pixel files get the convective groups that regionprops_driver used for the
-    statistics (recomputed from convsf), not the groups of the cloudid file."""
+    """conv_dilate_overwrite_radius_km: the pixel files get the cell clusters that regionprops_driver used for the
+    statistics (the clusters of the cloudid file dilated further and labeled again), not the clusters of the cloudid file."""
 
     @staticmethod
     def _map(tmp_path, conv_radius_km, **config_extra):
@@ -211,34 +210,29 @@ class TestConvDilateOverwrite:
         )
         return xr.open_dataset(outfile, decode_times=False, mask_and_scale=False), cloudid_outfile
 
-    def test_groups_are_recomputed_at_the_overwrite_radius(self, tmp_path):
+    def test_clusters_are_dilated_further_at_the_overwrite_radius(self, tmp_path):
         ds, cloudid = self._map(tmp_path, 5.0, dx=DX, dy=DX, conv_dilate_overwrite_radius_km=9)
-        groups = ds["conv_feature_number"].values.squeeze()
-        np.testing.assert_array_equal(groups, dilate_label_conv_mask(ds["convsf"].values.squeeze() == 4, 9000.0, DX, DX))
-        assert groups[7, 7] == groups[7, 16] > 0              # the two blocks, 15 km apart, are one group at 9 km
+        groups = ds["cell_cluster_number"].values.squeeze()
         with xr.open_dataset(cloudid, decode_times=False, mask_and_scale=False) as own:
-            own_groups = own["conv_feature_number"].values.squeeze()
-        assert own_groups[7, 7] != own_groups[7, 16]           # two groups at the 5 km of the cloudid file
-        assert ds["conv_feature_number"].dims == ("time", "lat", "lon")
-        assert ds["conv_feature_number"].attrs["dilation_radius_km"] == 9.0
-        assert ds["conv_feature_number"].attrs["units"] == "unitless"
-        assert "conv_dilate_overwrite_radius_km" in ds["conv_feature_number"].attrs["comments"]
-        assert ds.attrs["conv_dilate_radius_km"] == 9.0
-        assert ds.attrs["conv_dilate_radius_km_idfeature"] == 5.0
+            own_groups = own["cell_cluster_number"].values.squeeze()
+        np.testing.assert_array_equal(groups, dilate_label_conv_mask(own_groups > 0, 9000.0, DX, DX))
+        assert groups[7, 7] == groups[7, 16] > 0              # the two blocks, 15 km apart, are one group at 9 km
+        assert own_groups[7, 7] != own_groups[7, 16]           # two clusters in the cloudid file (blocks grown by 5 km)
+        assert ds["cell_cluster_number"].dims == ("time", "lat", "lon")
+        assert ds["cell_cluster_number"].attrs["dilation_radius_km"] == 9.0
+        assert ds["cell_cluster_number"].attrs["units"] == "unitless"
+        assert "conv_dilate_overwrite_radius_km" in ds["cell_cluster_number"].attrs["comments"]
+        assert ds.attrs["conv_dilate_overwrite_radius_km"] == 9.0
+        np.testing.assert_array_equal(ds.attrs["radii_expand_km"], [5.0])
 
-    def test_without_the_option_the_groups_of_the_cloudid_file_are_copied(self, tmp_path):
+    def test_without_the_option_the_clusters_of_the_cloudid_file_are_copied(self, tmp_path):
         for extra in ({}, {"conv_dilate_overwrite_radius_km": None, "dx": DX, "dy": DX}):
             ds, cloudid = self._map(tmp_path, 5.0, **extra)
             with xr.open_dataset(cloudid, decode_times=False, mask_and_scale=False) as own:
-                np.testing.assert_array_equal(ds["conv_feature_number"].values, own["conv_feature_number"].values)
-            assert ds["conv_feature_number"].attrs["dilation_radius_km"] == 5.0
-            assert ds.attrs["conv_dilate_radius_km"] == 5.0
-            assert "conv_dilate_radius_km_idfeature" not in ds.attrs
+                np.testing.assert_array_equal(ds["cell_cluster_number"].values, own["cell_cluster_number"].values)
+            assert "dilation_radius_km" not in ds["cell_cluster_number"].attrs
+            assert "conv_dilate_overwrite_radius_km" not in ds.attrs
 
-    def test_the_variable_is_added_when_the_cloudid_file_has_none(self, tmp_path):
-        ds, _ = self._map(tmp_path, None, dx=DX, dy=DX, conv_dilate_overwrite_radius_km=9)
-        groups = ds["conv_feature_number"].values.squeeze()
-        np.testing.assert_array_equal(groups, dilate_label_conv_mask(ds["convsf"].values.squeeze() == 4, 9000.0, DX, DX))
-        assert groups.max() == 1
-        assert ds["conv_feature_number"].attrs["dilation_radius_km"] == 9.0
-        assert ds.attrs["conv_dilate_radius_km"] == 9.0
+    def test_a_cloudid_file_without_clusters_gives_a_message(self, tmp_path):
+        with pytest.raises(ValueError, match="cell_cluster_number.*radii_expand"):
+            self._map(tmp_path, None, dx=DX, dy=DX, conv_dilate_overwrite_radius_km=9)

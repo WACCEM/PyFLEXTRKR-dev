@@ -107,9 +107,17 @@ def random_sparse_file(tmp_path, seed, ntracks=70, nmissing=3, ntiny=0):
     cloudnumber = field(rng.integers(1, 500, shape).astype(np.int32))
     track_status = field(rng.integers(0, 40, shape).astype(np.int32))
     ncells = field(rng.integers(0, 5, shape).astype(np.int32))
+    # conv_diameter_sum from its own random stream (the streams of the other variables stay as they were): 140 km all the time on
+    # every second MCS-sized track, 40 km on the others (a long feature with small cells), so that the two MCS size tests differ
+    diameter_rng = np.random.default_rng(seed + 1000)
+    conv_diameter_sum = field(diameter_rng.uniform(0, 160, shape))
+    cells_big = is_big & (np.arange(ntracks) % 2 == 1)
+    conv_diameter_sum[is_big] = np.where(valid[is_big], 40.0, 0.0)
+    conv_diameter_sum[cells_big] = np.where(valid[cells_big], 140.0, 0.0)
     sparse_values = {"majoraxis": majoraxis, "area_45dbz": random_f(0, 4000), "base_time": base_time, "ncells": ncells,
                      "conv_area": conv_area, "strat_area": strat_area, "cloudnumber": cloudnumber,
-                     "track_status": track_status, "area": area, "meanlat": lat, "meanlon": lon}
+                     "track_status": track_status, "area": area, "meanlat": lat, "meanlon": lon,
+                     "conv_diameter_sum": conv_diameter_sum}
 
     # Sparse entries: the valid ones, except a few that are left out
     rows, cols = np.nonzero(valid)
@@ -239,6 +247,20 @@ def test_rows_step_equals_dense_step_on_random_tracks(tmp_path, seed):
     dense, rows = run_both(stats_path, nmaxlinks=1 + seed % 4)                    # a full slot dimension in some of the files
     assert table_differences(dense, rows) == []
     assert len(rows.fragments["track"]) > 0 and rows.tracks["is_mcs"].any()
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_rows_step_equals_dense_step_with_the_conv_diameter_sum_test(tmp_path, seed):
+    """mcs_length_method conv_diameter_sum: the same tracks are MCS in both modes, and not those of the major-axis test."""
+    stats_path = random_sparse_file(tmp_path, seed)
+    overrides = dict(mcs_length_method="conv_diameter_sum", mcs_length_thresh=100, nmaxlinks=1 + seed % 4)
+    dense, rows = run_both(stats_path, **overrides)
+    assert table_differences(dense, rows) == []
+    major_axis_rows = read_tables(identifymcs_radar_rows(dict(_make_driver_config(stats_path))))
+    n_new, n_old = rows.tracks["is_mcs"].sum(), major_axis_rows.tracks["is_mcs"].sum()
+    assert 0 < n_new <= n_old
+    if seed == 0:                                   # this file has MCS-sized tracks of both kinds
+        assert n_new < n_old
 
 
 @pytest.mark.parametrize("seed", range(5))

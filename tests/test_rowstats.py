@@ -210,6 +210,48 @@ def test_load_trackstats_without_fragments_gives_the_per_track_variables_in_eith
     assert "pf_area" in kept and "merge_area" not in kept
 
 
+def test_load_trackstats_track_variables_reads_only_those_columns(tmp_path, monkeypatch):
+    from pyflextrkr import rowstats
+    from pyflextrkr.rowstats import load_trackstats
+    path = _write(tmp_path, _dense())
+    rows = str(tmp_path / "dense.rows")
+    write_rows(dense_to_rows(path), rows)
+    full = load_trackstats(rows, variables=[], fragments=False)
+    # exactly the asked per-track variables, with the values of the full load, in both formats (the duration column that gives the
+    # offsets is read but is not a result unless asked for)
+    for names in (["is_mcs"], ["track_duration", "is_mcs"], ["lifecycle_index"], []):
+        got = load_trackstats(rows, variables=[], fragments=False, track_variables=names)
+        assert set(got.data_vars) == set(names)
+        for n in names:
+            xr.testing.assert_identical(got[n], full[n].drop_vars("tracks"))        # the track index is only there if asked for
+        xr.testing.assert_identical(got, load_trackstats(path, variables=[], fragments=False, track_variables=names))
+    # with [tracks, times] variables of a subset of tracks
+    sub = load_trackstats(rows, tracks=[5, 2], variables=["area"], fragments=False, track_variables=[])
+    assert set(sub.data_vars) == {"area"}
+    np.testing.assert_array_equal(sub["area"].values, load_trackstats(rows, tracks=[5, 2], variables=["area"])["area"].values)
+    with pytest.raises(ValueError, match="not per-track variables"):
+        load_trackstats(rows, variables=[], track_variables=["area"])
+
+    # which columns of which tables are read: the entries index columns (track, k) and the fragments are never read for the
+    # dense layout, the tracks table only with the asked columns
+    calls = []
+    real = rowstats.pq.read_table
+
+    def spy(where, columns=None, **kwargs):
+        calls.append((os.path.basename(where), None if columns is None else list(columns)))
+        return real(where, columns=columns, **kwargs)
+    monkeypatch.setattr(rowstats.pq, "read_table", spy)
+    load_trackstats(rows, variables=[], fragments=False, track_variables=["is_mcs"])
+    assert calls == [("tracks.parquet", ["track_duration", "is_mcs"])]
+    calls.clear()
+    load_trackstats(rows, variables=["area"], fragments=False, track_variables=[])
+    assert calls == [("tracks.parquet", ["track_duration"]), ("entries.parquet", ["area"])]
+    calls.clear()
+    load_trackstats(rows)
+    entries = [c for n, c in calls if n == "entries.parquet"]
+    assert ["track"] not in entries and ["k"] not in entries and ("fragments.parquet", None) in calls
+
+
 def test_stats_exists_finds_either_format(tmp_path):
     from pyflextrkr.rowstats import stats_exists
     path = _write(tmp_path, _dense())

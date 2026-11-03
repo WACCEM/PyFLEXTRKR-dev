@@ -4,9 +4,10 @@ Identify MCS from radar-based track statistics (feature_type='radar_feature').
 Unlike identifymcs.py (Tb-based: keeps ONLY MCS-qualifying tracks, discards
 everything else) this module follows link_mergesplit_tracks.py's philosophy:
 keep EVERY tracked feature except short merge/split fragments, and attach a
-4-way classification (MCS / multi-cell / isolated-cell / non-convective) to
-every surviving track. The MCS definition itself is major axis + 45-dBZ area +
-duration. This is the first pass: the shape and extreme statistics are those of
+4-way classification (MCS / multi-cell / single-cell / stratiform) to
+every surviving track. The MCS definition itself is a size criterion (the sum of the
+circular-equivalent diameters of the convective cells in the feature, or the feature
+major axis, see mcs_length_method) + 45-dBZ area + duration. This is the first pass: the shape and extreme statistics are those of
 each track's own feature. regionprops_driver.py is the second pass that
 recomputes them on the merged mask (own feature + folded merge/split fragments)
 and stages the lifecycle (mcs_lifecycle.py).
@@ -26,11 +27,23 @@ from pyflextrkr.ft_utilities import load_sparse_trackstats
 from pyflextrkr.smooth_trajectory import smooth_trajectory
 from pyflextrkr.mcs_lifecycle import _steps_from_hours
 
-# Feature class codes
+# Feature class codes. MCS is decided first; the other three are mutually exclusive and cover every feature:
+# stratiform = no convective cell, single cell = one cell (with or without stratiform), multi cell = two or more cells.
 CLASS_MCS = 1
 CLASS_MULTICELL = 2
-CLASS_ISOLATED_CELL = 3
-CLASS_NON_CONVECTIVE = 4
+CLASS_SINGLE_CELL = 3
+CLASS_STRATIFORM = 4
+# Names used before the definitions were revised (same codes)
+CLASS_ISOLATED_CELL = CLASS_SINGLE_CELL
+CLASS_NON_CONVECTIVE = CLASS_STRATIFORM
+
+# MCS size criterion: the track statistics variable that the test reads, by mcs_length_method
+LENGTH_METHOD_MAJORAXIS = "majoraxis"
+LENGTH_METHOD_CONV_DIAMETER_SUM = "conv_diameter_sum"
+MCS_LENGTH_VARNAMES = {
+    LENGTH_METHOD_MAJORAXIS: "majoraxis",
+    LENGTH_METHOD_CONV_DIAMETER_SUM: "conv_diameter_sum",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -61,11 +74,39 @@ def group_contiguous_indices(idx, max_gap_steps):
 # MCS criteria test
 # ---------------------------------------------------------------------------
 
+def _mcs_periods(meets_criteria, basetime, time_resolution, params):
+    """
+    Run test shared by the MCS tests: group the time steps that meet the criteria, bridging gaps up to
+    mcs_gap_hour, and keep the groups that last at least mcs_duration_thresh.
+
+    Args:
+        meets_criteria: 1D np.array(bool), True where this track's feature meets the size and 45-dBZ criteria.
+        basetime: 1D np.array, Epoch seconds, same length.
+        time_resolution: float [hour]
+        params: dict with mcs_duration_thresh, mcs_gap_hour.
+
+    Returns:
+        mcs_status: 1D np.array(int16), 1 where this time is part of a qualifying MCS period, 0 otherwise.
+        is_mcs: bool, True if any qualifying period's duration meets mcs_duration_thresh.
+    """
+    mcs_status = np.zeros(len(meets_criteria), dtype=np.int16)
+    idx = np.where(meets_criteria)[0]
+    gap_steps = _steps_from_hours(params['mcs_gap_hour'], time_resolution)
+
+    is_mcs = False
+    for group in group_contiguous_indices(idx, gap_steps):
+        duration = (basetime[group[-1]] - basetime[group[0]]) / 3600.0 + time_resolution
+        if duration >= params['mcs_duration_thresh']:
+            mcs_status[group] = 1
+            is_mcs = True
+    return mcs_status, is_mcs
+
+
 def identify_mcs_periods(majoraxis, dbz45_area, basetime, time_resolution, params):
     """
-    Per-track MCS test: majoraxis >= mcs_majoraxis_thresh and
-    dbz45_area > mcs_dbz45_area_thresh, sustained for at least
-    mcs_duration_thresh, bridging gaps up to mcs_gap_hour.
+    Per-track MCS test with the feature major axis (convective + stratiform): majoraxis >= mcs_majoraxis_thresh and
+    dbz45_area > mcs_dbz45_area_thresh, sustained for at least mcs_duration_thresh, bridging gaps up to mcs_gap_hour.
+    The original test, kept as the backup of identify_mcs_periods_conv_diameter (mcs_length_method: majoraxis).
 
     Args:
         majoraxis, dbz45_area: 1D np.array, this track's own time series
@@ -83,25 +124,84 @@ def identify_mcs_periods(majoraxis, dbz45_area, basetime, time_resolution, param
             mcs_duration_thresh.
     """
     n = len(majoraxis)
-    mcs_status = np.zeros(n, dtype=np.int16)
     if n == 0:
-        return mcs_status, False
+        return np.zeros(0, dtype=np.int16), False
 
     meets_criteria = (
         np.nan_to_num(majoraxis, nan=-1.0) >= params['mcs_majoraxis_thresh']
     ) & (
         np.nan_to_num(dbz45_area, nan=-1.0) > params['mcs_dbz45_area_thresh']
     )
-    idx = np.where(meets_criteria)[0]
-    gap_steps = _steps_from_hours(params['mcs_gap_hour'], time_resolution)
+    return _mcs_periods(meets_criteria, basetime, time_resolution, params)
 
-    is_mcs = False
-    for group in group_contiguous_indices(idx, gap_steps):
-        duration = (basetime[group[-1]] - basetime[group[0]]) / 3600.0 + time_resolution
-        if duration >= params['mcs_duration_thresh']:
-            mcs_status[group] = 1
-            is_mcs = True
-    return mcs_status, is_mcs
+
+def identify_mcs_periods_conv_diameter(conv_diameter_sum, dbz45_area, basetime, time_resolution, params):
+    """
+    Per-track MCS test with the convective cells: conv_diameter_sum >= mcs_length_thresh and
+    dbz45_area > mcs_dbz45_area_thresh, sustained for at least mcs_duration_thresh, bridging gaps up to mcs_gap_hour.
+    conv_diameter_sum is the sum over the convective cells of a feature of their circular-equivalent
+    diameters 2*sqrt(A_i/pi) [km] (trackstats_func.py).
+
+    Args:
+        conv_diameter_sum, dbz45_area: 1D np.array, this track's own time series
+            (already trimmed to its own track_duration; NaN treated as not meeting the criteria).
+        basetime: 1D np.array, Epoch seconds, same length.
+        time_resolution: float [hour]
+        params: dict with mcs_length_thresh, mcs_dbz45_area_thresh, mcs_duration_thresh, mcs_gap_hour.
+
+    Returns:
+        mcs_status: 1D np.array(int16), 1 where this time is part of a qualifying MCS period, 0 otherwise.
+        is_mcs: bool, True if any qualifying period's duration meets mcs_duration_thresh.
+    """
+    n = len(conv_diameter_sum)
+    if n == 0:
+        return np.zeros(0, dtype=np.int16), False
+
+    meets_criteria = (
+        np.nan_to_num(conv_diameter_sum, nan=-1.0) >= params['mcs_length_thresh']
+    ) & (
+        np.nan_to_num(dbz45_area, nan=-1.0) > params['mcs_dbz45_area_thresh']
+    )
+    return _mcs_periods(meets_criteria, basetime, time_resolution, params)
+
+
+def mcs_length_varname(params):
+    """
+    Name of the track statistics variable that the MCS size test reads.
+
+    Args:
+        params: dict, from mcs_params_from_config (mcs_length_method; absent = 'majoraxis').
+
+    Returns:
+        string: 'conv_diameter_sum' or 'majoraxis'.
+
+    Raises:
+        ValueError: unknown mcs_length_method.
+    """
+    method = params.get('mcs_length_method', LENGTH_METHOD_MAJORAXIS)
+    if method not in MCS_LENGTH_VARNAMES:
+        raise ValueError(f"mcs_length_method '{method}' is not one of {sorted(MCS_LENGTH_VARNAMES)}")
+    return MCS_LENGTH_VARNAMES[method]
+
+
+def identify_mcs_periods_by_method(length, dbz45_area, basetime, time_resolution, params):
+    """
+    Per-track MCS test selected by params['mcs_length_method']: 'conv_diameter_sum' (identify_mcs_periods_conv_diameter,
+    threshold mcs_length_thresh) or 'majoraxis' (identify_mcs_periods, the original test; threshold mcs_length_thresh if
+    set, else mcs_majoraxis_thresh).
+
+    Args:
+        length: 1D np.array, this track's own series of the variable mcs_length_varname(params) names.
+        dbz45_area, basetime, time_resolution, params: as in identify_mcs_periods.
+
+    Returns:
+        mcs_status, is_mcs: as in identify_mcs_periods.
+    """
+    if mcs_length_varname(params) == "conv_diameter_sum":
+        return identify_mcs_periods_conv_diameter(length, dbz45_area, basetime, time_resolution, params)
+    if 'mcs_length_thresh' in params:
+        params = dict(params, mcs_majoraxis_thresh=params['mcs_length_thresh'])
+    return identify_mcs_periods(length, dbz45_area, basetime, time_resolution, params)
 
 
 # ---------------------------------------------------------------------------
@@ -380,15 +480,17 @@ def attach_fragments(
 
 
 # ---------------------------------------------------------------------------
-# Feature classification (MCS / multi-cell / isolated-cell / non-convective)
+# Feature classification (MCS / multi-cell / single-cell / stratiform)
 # ---------------------------------------------------------------------------
 
 def classify_feature_class(mcs_status, ncells, fillval=-9999):
     """
     Per-time categorical class: 1=MCS, 2=multi-cell (ncells>=2),
-    3=isolated-cell (ncells==1), 4=non-convective (ncells==0). MCS status
-    takes precedence over cell count (a feature meeting MCS criteria is
-    labeled MCS even if it also has multiple cells).
+    3=single-cell (ncells==1, with or without stratiform), 4=stratiform
+    (ncells==0, no convective cell). MCS status takes precedence over cell
+    count (a feature meeting MCS criteria is labeled MCS even if it also has
+    multiple cells). The four classes are mutually exclusive and cover every
+    time step with a valid ncells.
 
     Args:
         mcs_status: 1D np.array(int), 1 where this time meets MCS criteria.
@@ -402,8 +504,8 @@ def classify_feature_class(mcs_status, ncells, fillval=-9999):
     n = len(ncells)
     feature_class = np.full(n, fillval, dtype=np.int16)
     valid = ncells != fillval
-    feature_class[valid & (ncells == 0)] = CLASS_NON_CONVECTIVE
-    feature_class[valid & (ncells == 1)] = CLASS_ISOLATED_CELL
+    feature_class[valid & (ncells == 0)] = CLASS_STRATIFORM
+    feature_class[valid & (ncells == 1)] = CLASS_SINGLE_CELL
     feature_class[valid & (ncells >= 2)] = CLASS_MULTICELL
     feature_class[valid & (mcs_status == 1)] = CLASS_MCS
     return feature_class
@@ -412,9 +514,11 @@ def classify_feature_class(mcs_status, ncells, fillval=-9999):
 def classify_track_class(feature_class, fillval=-9999):
     """
     Per-track summary class: the most-organized class observed at any time
-    (MCS > multi-cell > isolated-cell > non-convective; the class codes are
+    (MCS > multi-cell > single-cell > stratiform; the class codes are
     numbered in this "more organized = smaller code" order, so the minimum
-    valid code is the most-organized class observed).
+    valid code is the most-organized class observed). A non-MCS track is
+    therefore stratiform when no step has a convective cell, single-cell when
+    no step has two or more, multi-cell when any step has two or more.
     """
     valid = feature_class[feature_class != fillval]
     if len(valid) == 0:
@@ -431,8 +535,19 @@ def mcs_params_from_config(config):
     MCS criteria and lifecycle staging parameters from the config, with their defaults (shared by
     identifymcs_radar and regionprops_driver).
     """
+    # MCS size criterion: mcs_length_method 'majoraxis' (feature major axis, the original test; the default) or
+    # 'conv_diameter_sum' (sum of the circular-equivalent diameters of the convective cells). mcs_length_thresh [km] is the
+    # threshold of either; when it is absent the old key mcs_majoraxis_thresh (default 100) is used, so configs written before
+    # mcs_length_method existed give the same MCS.
+    length_method = config.get("mcs_length_method", LENGTH_METHOD_MAJORAXIS)
+    if length_method not in MCS_LENGTH_VARNAMES:
+        raise ValueError(f"mcs_length_method '{length_method}' is not one of {sorted(MCS_LENGTH_VARNAMES)}")
+    length_thresh = config.get("mcs_length_thresh", config.get("mcs_majoraxis_thresh", 100))
     return {
-        'mcs_majoraxis_thresh': config.get("mcs_majoraxis_thresh", 100),
+        'mcs_length_method': length_method,
+        'mcs_length_thresh': length_thresh,
+        'mcs_majoraxis_thresh': length_thresh if length_method == LENGTH_METHOD_MAJORAXIS
+        else config.get("mcs_majoraxis_thresh", 100),
         'mcs_dbz45_area_thresh': config.get("mcs_dbz45_area_thresh", 0),
         'mcs_duration_thresh': config.get("mcs_duration_thresh", 4),
         'mcs_gap_hour': config.get("mcs_gap_hour", 0.25),
@@ -452,8 +567,8 @@ def mcs_params_from_config(config):
 def identifymcs_radar(config):
     """
     Identify MCS from radar-based track statistics and classify every
-    surviving (non-fragment) track as MCS / multi-cell / isolated-cell /
-    non-convective, and fold the merge/split fragments into the track they belong to.
+    surviving (non-fragment) track as MCS / multi-cell / single-cell /
+    stratiform, and fold the merge/split fragments into the track they belong to.
     First pass of the radar_feature MCS statistics; regionprops_driver.py is the second pass.
 
     Args:
@@ -534,7 +649,15 @@ def identifymcs_radar(config):
     start_split_tracknumber = ds_1d["start_split_tracknumber"].values.astype(float)
     track_lifetime_hr = track_duration * time_resolution
 
-    majoraxis_2d = sparse_dict["majoraxis"].toarray()
+    length_varname = mcs_length_varname(params)
+    if length_varname not in sparse_dict:
+        logger.critical(
+            f"ERROR: mcs_length_method '{params['mcs_length_method']}' needs the variable '{length_varname}', which is not in "
+            f"the trackstats file. Rerun run_trackstats, or set mcs_length_method: majoraxis. Available: {list(sparse_dict.keys())}"
+        )
+        logger.critical("Tracking will now exit.")
+        sys.exit()
+    length_2d = sparse_dict[length_varname].toarray()
     dbz45_2d = sparse_dict[mcs_dbz45_area_varname].toarray()
     basetime_2d = sparse_dict["base_time"].toarray()
     ncells_2d = sparse_dict["ncells"].toarray()
@@ -557,13 +680,13 @@ def identifymcs_radar(config):
         if ilength <= 0:
             continue
 
-        t_majoraxis = majoraxis_2d[nt, 0:ilength]
+        t_length = length_2d[nt, 0:ilength]
         t_dbz45 = dbz45_2d[nt, 0:ilength]
         t_basetime = basetime_2d[nt, 0:ilength]
         t_ncells = ncells_2d[nt, 0:ilength]
 
-        mcs_status, track_is_mcs = identify_mcs_periods(
-            t_majoraxis, t_dbz45, t_basetime, time_resolution, params,
+        mcs_status, track_is_mcs = identify_mcs_periods_by_method(
+            t_length, t_dbz45, t_basetime, time_resolution, params,
         )
         mcs_status_2d[nt, 0:ilength] = mcs_status
         is_mcs[nt] = track_is_mcs
@@ -576,7 +699,7 @@ def identifymcs_radar(config):
     logger.info(f"Number of radar-defined MCS: {n_mcs}")
     if n_mcs == 0:
         logger.warning(
-            "No MCS identified (per mcs_majoraxis_thresh/mcs_dbz45_area_thresh/"
+            "No MCS identified (per mcs_length_method/mcs_length_thresh/mcs_dbz45_area_thresh/"
             "mcs_duration_thresh). Continuing - all non-fragment tracks are "
             "still kept and classified."
         )
@@ -733,10 +856,10 @@ def identifymcs_radar(config):
         "is_mcs": {"long_name": "Flag indicating if this track meets the radar MCS criteria at any time",
                    "units": "unitless", "_FillValue": fillval},
         "track_class": {"long_name": "Most-organized feature class observed on this track: "
-                         "1=MCS, 2=multi-cell, 3=isolated-cell, 4=non-convective",
+                         "1=MCS, 2=multi-cell, 3=single-cell, 4=stratiform",
                          "units": "unitless", "_FillValue": fillval},
         "feature_class": {"long_name": "Per-time feature class: 1=MCS, 2=multi-cell, "
-                           "3=isolated-cell, 4=non-convective", "units": "unitless", "_FillValue": fillval},
+                           "3=single-cell, 4=stratiform", "units": "unitless", "_FillValue": fillval},
         "mcs_status": {"long_name": "Flag indicating the status of MCS based on radar criteria. 1=Yes, 0=No",
                         "units": "unitless", "_FillValue": fillval},
         "merge_cloudnumber": {"long_name": "Cloud numbers that merge into this track",
@@ -778,7 +901,10 @@ def identifymcs_radar(config):
     dsout = xr.merge([dsout, ds_vars], compat="override", combine_attrs="no_conflicts")
 
     dsout.attrs["Title"] = "Final track statistics with radar-based MCS identification and classification"
-    dsout.attrs["mcs_majoraxis_thresh_km"] = params['mcs_majoraxis_thresh']
+    dsout.attrs["mcs_length_method"] = params['mcs_length_method']
+    dsout.attrs["mcs_length_thresh_km"] = params['mcs_length_thresh']
+    if params['mcs_length_method'] == LENGTH_METHOD_MAJORAXIS:
+        dsout.attrs["mcs_majoraxis_thresh_km"] = params['mcs_majoraxis_thresh']
     dsout.attrs["mcs_dbz45_area_thresh_km2"] = params['mcs_dbz45_area_thresh']
     dsout.attrs["mcs_duration_thresh_hour"] = params['mcs_duration_thresh']
     dsout.attrs["Created_on"] = time.ctime(time.time())

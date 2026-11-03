@@ -1,7 +1,7 @@
 """
 Tests for the second pass of the radar_feature MCS statistics (regionprops_func.py, regionprops_driver.py):
 the shape and extreme statistics of every track recomputed on its merged mask (own feature + folded merge/split
-fragments), the convective length of groups of nearby convective cells (conv_feature_number), and the lifecycle staging.
+fragments), the convective length of groups of nearby convective cells (cell_cluster_number), and the lifecycle staging.
 
 Synthetic cloudid files are written with netcdf_io.write_radar_featureid, the writer of idfeature_radar3d, and the
 expected values are derived from the pixel coordinates with numpy, so this needs no data and runs on CI.
@@ -23,7 +23,7 @@ from pyflextrkr.netcdf_io import write_radar_featureid
 from pyflextrkr.steiner_func import dilate_label_conv_mask
 from pyflextrkr.trackstats_func import calc_stats_singlefile
 from pyflextrkr.regionprops_func import (
-    regionprops_singlefile, recomputed_variable_names, conv_dilate_overwrite_km, redilate_conv_feature_number,
+    regionprops_singlefile, recomputed_variable_names, conv_dilate_overwrite_km, redilate_cell_clusters,
 )
 from pyflextrkr.regionprops_driver import compute_regionprops
 
@@ -38,7 +38,8 @@ def _rect(rows, cols):
 
 
 def build_arrays(radius_km=0.0):
-    """Arrays of the synthetic cloudid file."""
+    """Arrays of the synthetic cloudid file. cell_cluster_number: the groups of the convective pixels grown by radius_km
+    (the stand-in of the inflated cells of idfeature_radar3d: 0 = only the pixels themselves)."""
     a = {name: np.zeros((NY, NX), dtype=np.int32) for name in ("feature_number", "convsf", "cell_number")}
     a["dbz"] = np.full((NY, NX), np.nan, dtype=np.float32)
     for t in (10, 20, 30, 40, 50):
@@ -63,18 +64,18 @@ def build_arrays(radius_km=0.0):
     convective((10, 14), (30, 34), 52.0, 3, {10: 12000., 20: 9000., 30: 7000., 40: 6000., 50: 5000.})
     feature(3, (25, 29), (5, 14), 20.0)
     convective((25, 29), (5, 9), 48.0, 4, {10: 7000., 20: 6000., 30: 5000., 40: 3000.})
-    a["conv_feature_number"] = dilate_label_conv_mask(a["convsf"] == 4, radius_km * 1000.0, DX, DX)
+    a["cell_cluster_number"] = dilate_label_conv_mask(a["convsf"] == 4, radius_km * 1000.0, DX, DX)
     return a
 
 
-def write_cloudid(path, a, radius_km=0.0, with_conv_feature_number=True, basetime=BASETIME0):
+def write_cloudid(path, a, radius_km=0.0, with_cell_cluster_number=True, basetime=BASETIME0):
     nfeatures = int(a["feature_number"].max())
     x = np.arange(NX, dtype=np.float64) * DX
     y = np.arange(NY, dtype=np.float64) * DX
     lon2d, lat2d = np.meshgrid(-100.0 + x / 111000.0, 35.0 + y / 111000.0)
     dbz = xr.DataArray(a["dbz"], dims=['lat', 'lon'])
     stamp = path.rsplit("cloudid_", 1)[1][:-3]
-    kwargs = {"conv_feature_number": a["conv_feature_number"]} if with_conv_feature_number else {}
+    kwargs = {"cell_cluster_number": a["cell_cluster_number"]} if with_cell_cluster_number else {}
     write_radar_featureid(
         path, np.array([basetime]), stamp[:8], stamp[9:15],
         xr.DataArray(lon2d, dims=['lat', 'lon']), xr.DataArray(lat2d, dims=['lat', 'lon']), x, y,
@@ -85,7 +86,7 @@ def write_cloudid(path, a, radius_km=0.0, with_conv_feature_number=True, basetim
         "synthetic.nc",
         {'feature_varname': 'feature_number', 'nfeature_varname': 'nfeatures', 'featuresize_varname': 'npix_feature',
          'conv_dilate_radius_km': radius_km},
-        feature_params={'conv_dilate_radius_km': radius_km},
+        feature_params={'radii_expand_km': np.array([radius_km])},
         **kwargs,
     )
     return path
@@ -145,7 +146,9 @@ class TestWorkerAgainstTrackstats:
             np.ones(3, dtype=np.int32), np.zeros(3, dtype=np.int32), np.zeros(3, dtype=np.int32),
             np.zeros(3, dtype=np.int32), config,
         )
-        for name in recomputed_variable_names(DBZ_THRESHS):
+        names = recomputed_variable_names(DBZ_THRESHS, with_conv_diameter_sum=True)
+        assert "conv_diameter_sum" in names and "conv_diameter_sum" not in recomputed_variable_names(DBZ_THRESHS)
+        for name in names:
             np.testing.assert_allclose(out[name], ts[name], rtol=1e-5, equal_nan=True, err_msg=name)
         np.testing.assert_allclose(out["merged_area"], ts["area"], rtol=1e-6)
 
@@ -208,11 +211,45 @@ class TestWorkerMergedMask:
         for name in recomputed_variable_names(DBZ_THRESHS) + ["merged_area"]:
             np.testing.assert_allclose(merged_via_split[name], merged_via_merge[name], equal_nan=True)
 
+    def test_conv_diameter_sum_of_the_merged_mask(self, cloudid_r0):
+        """Cells 1 and 2 are in feature 1, cell 3 in the fragment: each cell is 25 px = 225 km2, 2*sqrt(225/pi) = 16.93 km."""
+        cloudid, a = cloudid_r0
+        one_cell = 2.0 * np.sqrt(25 * 9.0 / np.pi)
+        own, _ = run_worker(cloudid, a, [(1, [], [])])
+        merged, _ = run_worker(cloudid, a, [(1, [2], [])])
+        assert own["conv_diameter_sum"][0] == pytest.approx(2 * one_cell, rel=1e-5)
+        assert merged["conv_diameter_sum"][0] == pytest.approx(3 * one_cell, rel=1e-5)
+
+    def test_a_cell_in_the_track_and_in_its_fragment_counts_once(self, cloudid_r0):
+        """One cell label that lies in the own feature and in the folded fragment is one cell of the merged mask."""
+        cloudid, a = cloudid_r0
+        a2 = {k: v.copy() for k, v in a.items()}
+        a2["cell_number"][a2["cell_number"] == 3] = 2                       # cell 2 now also covers the fragment's core
+        path = write_cloudid(os.path.join(os.path.dirname(cloudid), "cloudid_20250502_191000.nc"), a2, 0.0,
+                             basetime=BASETIME0 + 600)
+        merged, _ = run_worker(path, a2, [(1, [2], [])])
+        one_cell = 2.0 * np.sqrt(25 * 9.0 / np.pi)
+        two_cells_area = 2.0 * np.sqrt(2 * 25 * 9.0 / np.pi)                  # cell 2 = 50 px
+        assert merged["conv_diameter_sum"][0] == pytest.approx(one_cell + two_cells_area, rel=1e-5)
+        # without the fragment, the own feature holds its own 25 px of cell 2 only
+        own, _ = run_worker(path, a2, [(1, [], [])])
+        assert own["conv_diameter_sum"][0] == pytest.approx(2 * one_cell, rel=1e-5)
+
+    def test_conv_diameter_sum_without_cell_number_is_nan(self, tmp_path):
+        """A cloudid file without cell_number: the worker still runs and leaves the new variable NaN."""
+        a = build_arrays(0.0)
+        path = write_cloudid(str(tmp_path / "cloudid_20250502_190000.nc"), a, 0.0)
+        with xr.open_dataset(path, decode_times=False, mask_and_scale=False) as ds:
+            ds.drop_vars("cell_number").load().to_netcdf(str(tmp_path / "cloudid_20250502_190500.nc"))
+        out, _ = run_worker(str(tmp_path / "cloudid_20250502_190500.nc"), a, [(1, [], [])])
+        assert np.isnan(out["conv_diameter_sum"][0])
+        assert out["merged_area"][0] == pytest.approx(100 * 9.0)
+
     def test_a_track_without_convective_pixels(self, cloudid_r0):
         cloudid, a = cloudid_r0
         a2 = {k: v.copy() for k, v in a.items()}
         a2["convsf"][a2["convsf"] == 4] = 3
-        a2["conv_feature_number"][:] = 0
+        a2["cell_cluster_number"][:] = 0
         path = write_cloudid(os.path.join(os.path.dirname(cloudid), "cloudid_20250502_190500.nc"), a2, 0.0,
                              basetime=BASETIME0 + 300)
         out, _ = run_worker(path, a2, [(1, [], [])])
@@ -298,7 +335,7 @@ class TestConvectiveLengthOfDilatedGroups:
     def _expected(a, mask_numbers, radius_km):
         """Major axis [km] of each group (dilated region of connected convective cells inside the mask)."""
         mask = np.isin(a["feature_number"], mask_numbers)
-        conv_groups = a["conv_feature_number"]
+        conv_groups = a["cell_cluster_number"]
         best = 0.0
         for g in np.unique(conv_groups[mask & (a["convsf"] == 4)]):
             rows, cols = np.nonzero(mask & (conv_groups == g))
@@ -337,10 +374,10 @@ class TestConvectiveLengthOfDilatedGroups:
             assert out["conv_majoraxis"][1] == pytest.approx(length(np.arange(5, 15)), rel=1e-4)
 
     def test_a_group_shared_by_two_tracks_is_split_by_their_masks(self, tmp_path, radius_km):
-        """At 20 km the dilated regions of A and B touch (same conv_feature_number); each track keeps its own part."""
+        """At 20 km the dilated regions of A and B touch (same cell_cluster_number); each track keeps its own part."""
         a = build_arrays(radius_km)
         if radius_km == 20.0:
-            assert a["conv_feature_number"][12, 7] == a["conv_feature_number"][27, 7] > 0
+            assert a["cell_cluster_number"][12, 7] == a["cell_cluster_number"][27, 7] > 0
         cloudid = write_cloudid(str(tmp_path / "cloudid_20250502_190000.nc"), a, radius_km)
         out, _ = run_worker(cloudid, a, [(1, [2], []), (3, [], [])])
         a_only, _ = run_worker(cloudid, a, [(1, [2], [])])
@@ -359,17 +396,18 @@ def _stamp(t):
     return f"20250502_{19 + (5 * t) // 60:02d}{(5 * t) % 60:02d}00"
 
 
-def build_run(tmp_path, radius_km=20.0, nfiles=NSTEPS, with_conv_feature_number=True):
+def build_run(tmp_path, radius_km=20.0, nfiles=NSTEPS, with_cell_cluster_number=True, with_conv_diameter_sum=False):
     """Cloudid files of NSTEPS steps and a hand-made first-pass stats file of 3 tracks:
        0 = merge fragment (feature 2 -> into track 1) is dropped from the stats, 1 = track A (feature 1, with feature 2
-       folded in), 2 = track B (feature 3)."""
+       folded in), 2 = track B (feature 3). with_conv_diameter_sum: the first-pass file also has conv_diameter_sum (files
+       from before that variable existed do not)."""
     tracking = tmp_path / "tracking"
     stats = tmp_path / "stats"
     tracking.mkdir()
     stats.mkdir()
     a = build_arrays(radius_km)
     for t in range(nfiles):
-        write_cloudid(str(tracking / f"cloudid_{_stamp(t)}.nc"), a, radius_km, with_conv_feature_number,
+        write_cloudid(str(tracking / f"cloudid_{_stamp(t)}.nc"), a, radius_km, with_cell_cluster_number,
                       basetime=BASETIME0 + 300.0 * t)
     ntracks, ntimes, nmerge = 2, NSTEPS + 2, 3
     shape = (ntracks, ntimes)
@@ -387,7 +425,7 @@ def build_run(tmp_path, radius_km=20.0, nfiles=NSTEPS, with_conv_feature_number=
     total_conv[0, :NSTEPS], total_conv[1, :NSTEPS] = 75 * 9.0, 25 * 9.0
     total_strat = nan2d()
     total_strat[0, :NSTEPS], total_strat[1, :NSTEPS] = 75 * 9.0, 25 * 9.0
-    first = {name: nan2d() for name in recomputed_variable_names(DBZ_THRESHS)}
+    first = {name: nan2d() for name in recomputed_variable_names(DBZ_THRESHS, with_conv_diameter_sum)}
     first["majoraxis"][:, :NSTEPS] = 120.0                    # first-pass values: replaced by the second pass
     first["area_45dbz"][:, :NSTEPS] = 1.0
     lon0 = np.linspace(-100.0, -99.8, NSTEPS)
@@ -435,6 +473,24 @@ def open_out(config):
 
 class TestDriver:
 
+    def test_conv_diameter_sum_is_recomputed_on_the_merged_mask(self, tmp_path):
+        """Track A: cells 1, 2 (own feature) and 3 (fragment); track B: cell 4; each cell is 25 px = 225 km2."""
+        config, _ = build_run(tmp_path, radius_km=20.0, with_conv_diameter_sum=True)
+        config.update(mcs_length_method="conv_diameter_sum", mcs_length_thresh=40)
+        compute_regionprops(config)
+        ds = open_out(config)
+        one_cell = 2.0 * np.sqrt(25 * 9.0 / np.pi)
+        np.testing.assert_allclose(ds["conv_diameter_sum"].values[0, :NSTEPS], 3 * one_cell, rtol=1e-5)
+        np.testing.assert_allclose(ds["conv_diameter_sum"].values[1, :NSTEPS], one_cell, rtol=1e-5)
+        assert np.all(np.isnan(ds["conv_diameter_sum"].values[:, NSTEPS:]))
+        assert "merged mask" in ds["conv_diameter_sum"].attrs["comments"]
+
+    def test_a_first_pass_file_without_conv_diameter_sum_still_works(self, tmp_path):
+        """Files from before the variable existed: no cell_number is needed, and the output has no conv_diameter_sum."""
+        config, _ = build_run(tmp_path, radius_km=20.0)
+        compute_regionprops(config)
+        assert "conv_diameter_sum" not in open_out(config)
+
     def test_recomputes_on_the_merged_mask_and_keeps_the_rest(self, tmp_path):
         config, a = build_run(tmp_path, radius_km=20.0)
         out = compute_regionprops(config)
@@ -458,8 +514,8 @@ class TestDriver:
         assert ds["conv_majoraxis"].values[0, 0] > 60.0                      # 20 km: one long convective group
         # attributes say where the values come from
         assert "merged mask" in ds["majoraxis"].attrs["comments"]
-        assert "20 km" in ds["conv_majoraxis"].attrs["comments"]
-        assert ds.attrs["conv_dilate_radius_km"] == 20.0
+        assert "radii_expand = [20] km" in ds["conv_majoraxis"].attrs["comments"]
+        np.testing.assert_array_equal(ds.attrs["radii_expand_km"], [20.0])
         assert ds.attrs["n_pairs_not_computed"] == 0 and ds.attrs["n_pairs_area_mismatch"] == 0
 
     def test_lifecycle_is_staged_from_the_totals_and_the_merged_conv_majoraxis(self, tmp_path):
@@ -547,16 +603,27 @@ class TestDriver:
         with pytest.raises(SystemExit):
             compute_regionprops(config)
 
-    def test_cloudid_without_conv_feature_number_exits_with_a_message(self, tmp_path, caplog):
-        config, _ = build_run(tmp_path, with_conv_feature_number=False)
+    def test_cloudid_without_cell_cluster_number_exits_with_a_message(self, tmp_path, caplog):
+        config, _ = build_run(tmp_path, with_cell_cluster_number=False)
         with pytest.raises(SystemExit):
             compute_regionprops(config)
-        assert "conv_feature_number" in caplog.text
-        assert "conv_dilate_overwrite_radius_km" in caplog.text            # the message names the other way out
+        assert "cell_cluster_number" in caplog.text
+        assert "radii_expand" in caplog.text                                # the message names the idfeature option
+
+    def test_attributes_record_how_the_groups_were_made(self, tmp_path):
+        config, _ = build_run(tmp_path, radius_km=5.0)
+        compute_regionprops(config)
+        ds = open_out(config)
+        np.testing.assert_array_equal(ds.attrs["radii_expand_km"], [5.0])
+        assert "conv_dilate_overwrite_radius_km" not in ds.attrs
+        assert "conv_dilate_radius_km" not in ds.attrs
+        comments = ds["conv_majoraxis"].attrs["comments"]
+        assert "cell_cluster_number" in comments and "radii_expand = [5] km" in comments
+        assert "dilated further" not in comments
 
 
 # ---------------------------------------------------------------------------
-# conv_dilate_overwrite_radius_km: regroup the convective pixels at another radius
+# conv_dilate_overwrite_radius_km: dilate the cell clusters further and label them again
 # ---------------------------------------------------------------------------
 
 OVERWRITE_TRACKS = [(1, [2], []), (3, [], [])]
@@ -589,47 +656,63 @@ class TestOverwriteOption:
 
     def test_nine_km_is_three_pixels(self):
         """C1 and C2 are 6 px (18 km) apart: their 9 km discs (3 px) just meet, a smaller radius leaves them apart."""
-        convsf = build_arrays(0.0)["convsf"]
+        clusters = build_arrays(0.0)["cell_cluster_number"]
         grid = {"dx": DX, "dy": DX}
-        joined = redilate_conv_feature_number(convsf, 9.0, grid)
-        apart = redilate_conv_feature_number(convsf, 8.9, grid)
+        joined = redilate_cell_clusters(clusters, 9.0, grid)
+        apart = redilate_cell_clusters(clusters, 8.9, grid)
         assert joined[12, 7] == joined[12, 17] > 0               # C1 and C2: one group
         assert apart[12, 7] != apart[12, 17]
         assert joined[12, 32] != joined[12, 17]                  # C3 is 33 km from C2: not joined
-        np.testing.assert_array_equal(joined, build_arrays(9.0)["conv_feature_number"])
+        np.testing.assert_array_equal(joined, build_arrays(9.0)["cell_cluster_number"])
+
+    def test_the_clusters_are_dilated_not_the_convective_class(self):
+        """Only the pixels of cell_cluster_number > 0 are grouped: a convective pixel outside the clusters is not."""
+        a = build_arrays(0.0)
+        clusters = np.where(np.isin(a["feature_number"], [1, 2]), a["cell_cluster_number"], 0)        # no cluster in feature 3
+        groups = redilate_cell_clusters(clusters, 9.0, {"dx": DX, "dy": DX})
+        assert a["convsf"][27, 7] == 4 and groups[27, 7] == 0
+        assert groups[12, 7] > 0
 
 
 @pytest.mark.parametrize("overwrite_km", [0.0, 9.0, 10.0, 20.0])
 class TestOverwriteInTheWorker:
-    """Groups recomputed from convsf give the statistics of groups that idfeature made at that radius."""
+    """Clusters dilated further give the statistics of the clusters that idfeature would have made that large."""
 
     @staticmethod
-    def _reference(tmp_path, radius_km):
-        """The worker on a cloudid file whose groups were made at radius_km."""
+    def _reference(tmp_path, a, radius_km):
+        """The worker on a cloudid file that holds the clusters of a, dilated by radius_km and labeled again."""
         (tmp_path / "reference").mkdir()
-        a = build_arrays(radius_km)
-        cloudid = write_cloudid(str(tmp_path / "reference" / "cloudid_20250502_190000.nc"), a, radius_km)
-        return run_worker(cloudid, a, OVERWRITE_TRACKS)[0]
+        a2 = {k: v.copy() for k, v in a.items()}
+        a2["cell_cluster_number"] = dilate_label_conv_mask(a["cell_cluster_number"] > 0, radius_km * 1000.0, DX, DX)
+        cloudid = write_cloudid(str(tmp_path / "reference" / "cloudid_20250502_190000.nc"), a2, radius_km)
+        return run_worker(cloudid, a2, OVERWRITE_TRACKS)[0]
 
-    def test_replaces_the_groups_of_the_file_and_leaves_the_file_alone(self, tmp_path, overwrite_km):
-        a = build_arrays(5.0)                                     # the file has 5 km groups
+    def test_replaces_the_clusters_of_the_file_and_leaves_the_file_alone(self, tmp_path, overwrite_km):
+        a = build_arrays(5.0)                                     # the file has clusters of the cells grown by 5 km
         cloudid = write_cloudid(str(tmp_path / "cloudid_20250502_190000.nc"), a, 5.0)
         stat = (os.stat(cloudid).st_size, os.stat(cloudid).st_mtime_ns)
         out, _ = run_worker(cloudid, a, OVERWRITE_TRACKS, overwrite_config(overwrite_km))
-        reference = self._reference(tmp_path, overwrite_km)
+        reference = self._reference(tmp_path, a, overwrite_km)
         for name in reference:
             np.testing.assert_array_equal(out[name], reference[name], err_msg=name)
-        own, _ = run_worker(cloudid, a, OVERWRITE_TRACKS)         # without the option: the 5 km groups
-        assert out["conv_majoraxis"][0] != own["conv_majoraxis"][0]
+        own, _ = run_worker(cloudid, a, OVERWRITE_TRACKS)         # without the option: the clusters of the file
+        if overwrite_km == 0.0:
+            np.testing.assert_array_equal(out["conv_majoraxis"], own["conv_majoraxis"])      # the same clusters, labeled again
+        else:
+            assert out["conv_majoraxis"][0] != own["conv_majoraxis"][0]
         assert (os.stat(cloudid).st_size, os.stat(cloudid).st_mtime_ns) == stat
         with xr.open_dataset(cloudid, decode_times=False, mask_and_scale=False) as ds:
-            np.testing.assert_array_equal(ds["conv_feature_number"].values.squeeze(), a["conv_feature_number"])
+            np.testing.assert_array_equal(ds["cell_cluster_number"].values.squeeze(), a["cell_cluster_number"])
 
-    def test_a_cloudid_file_without_conv_feature_number_works(self, tmp_path, overwrite_km):
-        a = build_arrays(5.0)
-        cloudid = write_cloudid(str(tmp_path / "cloudid_20250502_190000.nc"), a, 5.0, with_conv_feature_number=False)
+    def test_clusters_of_the_cells_themselves_equal_the_groups_made_at_that_radius(self, tmp_path, overwrite_km):
+        """Clusters without a skirt (radii_expand: the cells only) dilated by R are the groups of the convective pixels at R."""
+        a = build_arrays(0.0)
+        cloudid = write_cloudid(str(tmp_path / "cloudid_20250502_190000.nc"), a, 0.0)
         out, _ = run_worker(cloudid, a, OVERWRITE_TRACKS, overwrite_config(overwrite_km))
-        reference = self._reference(tmp_path, overwrite_km)
+        (tmp_path / "reference").mkdir()
+        a9 = build_arrays(overwrite_km)
+        reference = run_worker(write_cloudid(str(tmp_path / "reference" / "cloudid_20250502_190000.nc"), a9, overwrite_km),
+                               a9, OVERWRITE_TRACKS)[0]
         for name in reference:
             np.testing.assert_array_equal(out[name], reference[name], err_msg=name)
 
@@ -637,35 +720,33 @@ class TestOverwriteInTheWorker:
 class TestOverwriteInTheDriver:
 
     @staticmethod
-    def _run(tmp_path, name, file_radius_km, overwrite_km=None, with_conv_feature_number=True):
+    def _run(tmp_path, name, file_radius_km, overwrite_km=None):
         (tmp_path / name).mkdir()
-        config, _ = build_run(tmp_path / name, radius_km=file_radius_km, with_conv_feature_number=with_conv_feature_number)
+        config, _ = build_run(tmp_path / name, radius_km=file_radius_km)
         config.update(dx=DX, dy=DX, conv_dilate_overwrite_radius_km=overwrite_km)
         compute_regionprops(config)
         return open_out(config)
 
     def test_equals_a_run_on_files_made_at_that_radius(self, tmp_path):
         reference = self._run(tmp_path, "reference", 9.0)
-        plain = self._run(tmp_path, "plain", 5.0)
+        plain = self._run(tmp_path, "plain", 0.0)
         assert not np.array_equal(plain["conv_majoraxis"].values, reference["conv_majoraxis"].values, equal_nan=True)
-        for name, with_groups in (("with_groups", True), ("without_groups", False)):
-            ds = self._run(tmp_path, name, 5.0, overwrite_km=9.0, with_conv_feature_number=with_groups)
-            assert set(ds.data_vars) == set(reference.data_vars)
-            for var in reference.data_vars:
-                np.testing.assert_array_equal(ds[var].values, reference[var].values, err_msg=f"{name}: {var}")
+        ds = self._run(tmp_path, "overwritten", 0.0, overwrite_km=9.0)
+        assert set(ds.data_vars) == set(reference.data_vars)
+        for var in reference.data_vars:
+            np.testing.assert_array_equal(ds[var].values, reference[var].values, err_msg=var)
 
     def test_attributes_and_log_record_the_radius_used(self, tmp_path, caplog):
         caplog.set_level(logging.INFO)
         ds = self._run(tmp_path, "overwritten", 5.0, overwrite_km=9.0)
-        assert ds.attrs["conv_dilate_radius_km"] == 9.0
-        assert ds.attrs["conv_dilate_radius_km_idfeature"] == 5.0
-        assert "9 km" in ds["conv_majoraxis"].attrs["comments"]
-        assert "recomputed" in ds["conv_majoraxis"].attrs["comments"]
-        assert "recomputed from convsf at 9 km" in caplog.text and "cloudid files have 5 km" in caplog.text
+        assert ds.attrs["conv_dilate_overwrite_radius_km"] == 9.0
+        np.testing.assert_array_equal(ds.attrs["radii_expand_km"], [5.0])
+        comments = ds["conv_majoraxis"].attrs["comments"]
+        assert "dilated further by a disc of radius 9 km" in comments and "radii_expand = [5] km" in comments
+        assert "dilated further by 9 km" in caplog.text
         plain = self._run(tmp_path, "plain", 5.0)
-        assert plain.attrs["conv_dilate_radius_km"] == 5.0
-        assert "conv_dilate_radius_km_idfeature" not in plain.attrs
-        assert "recomputed" not in plain["conv_majoraxis"].attrs["comments"]
+        assert "conv_dilate_overwrite_radius_km" not in plain.attrs
+        assert "dilated further" not in plain["conv_majoraxis"].attrs["comments"]
 
     def test_an_invalid_radius_exits_with_a_message(self, tmp_path, caplog):
         config, _ = build_run(tmp_path)
@@ -673,6 +754,13 @@ class TestOverwriteInTheDriver:
         with pytest.raises(SystemExit):
             compute_regionprops(config)
         assert "conv_dilate_overwrite_radius_km" in caplog.text
+
+    def test_a_cloudid_without_clusters_exits_even_with_the_option(self, tmp_path, caplog):
+        config, _ = build_run(tmp_path, with_cell_cluster_number=False)
+        config.update(dx=DX, dy=DX, conv_dilate_overwrite_radius_km=9.0)
+        with pytest.raises(SystemExit):
+            compute_regionprops(config)
+        assert "cell_cluster_number" in caplog.text
 
 
 # ---------------------------------------------------------------------------

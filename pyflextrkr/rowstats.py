@@ -328,20 +328,24 @@ def rows_to_dense(tables, tracks=None, width=None):
     if width is None:
         width = meta["dims"][kdim] if tracks is None else int(dur.max()) if len(dur) else 0
 
-    # Position of every selected entry in the flat columns and in the dense array
-    total = int(dur.sum())
-    row = np.repeat(np.arange(len(sel)), dur)
-    k = np.arange(total) - np.repeat(np.cumsum(dur) - dur, dur)
-    flat_index = np.repeat(offsets, dur) + k
-    if total and k.max() >= width:
+    if len(dur) and int(dur.max()) > width:
         raise ValueError(f"width {width} is smaller than the longest selected track")
+    # Position of every selected entry in the flat columns and in the dense array (only needed for [tracks, times] variables)
+    if meta["vars_2d"]:
+        total = int(dur.sum())
+        row = np.repeat(np.arange(len(sel)), dur)
+        k = np.arange(total) - np.repeat(np.cumsum(dur) - dur, dur)
+        flat_index = np.repeat(offsets, dur) + k
 
+    # The per-track variables that were loaded (all of them unless RowStats.open was given track_variables)
     data_vars = {}
     for n in meta["vars_1d"]:
-        data_vars[n] = ([tdim], tables.tracks[n][sel], meta["attrs"].get(n, {}))
+        if n in tables.tracks:
+            data_vars[n] = ([tdim], tables.tracks[n][sel], meta["attrs"].get(n, {}))
     for n, ncol in meta["vars_tracks2d"].items():
-        arr = np.stack([tables.tracks[f"{n}__{j}"][sel] for j in range(ncol)], axis=1)
-        data_vars[n] = (meta["dims_of"][n], arr, meta["attrs"].get(n, {}))
+        if f"{n}__0" in tables.tracks:
+            arr = np.stack([tables.tracks[f"{n}__{j}"][sel] for j in range(ncol)], axis=1)
+            data_vars[n] = (meta["dims_of"][n], arr, meta["attrs"].get(n, {}))
     for n in meta["vars_2d"]:
         out = np.full((len(sel), width), _fill_value(meta, n), dtype=meta["dtypes"][n])
         out[row, k] = tables.entries[n][flat_index]
@@ -529,20 +533,37 @@ class RowStats:
         self._fragments = None
 
     @classmethod
-    def open(cls, folder):
+    def open(cls, folder, track_variables=None):
         """
         Open a folder written by write_rows.
 
         Args:
             folder: string
                 Folder with meta.json and the Parquet files.
+            track_variables: list of strings (default: None = all)
+                Per-track variables ([tracks]: meta["vars_1d"], and the [tracks, n] variables of meta["vars_tracks2d"]) whose
+                columns are read from the tracks table; the column of the track durations is always read (it gives the offsets
+                of the tracks in the entries table). The other columns of the tracks table are not read.
 
         Returns:
             rs: RowStats
+
+        Raises:
+            ValueError: a name in track_variables is not a per-track variable of the folder.
         """
         with open(os.path.join(folder, META_FILE)) as f:
             meta = json.load(f)
-        table = pq.read_table(os.path.join(folder, "tracks.parquet"))
+        columns = None
+        if track_variables is not None:
+            unknown = [n for n in track_variables if n not in meta["vars_1d"] and n not in meta["vars_tracks2d"]]
+            if unknown:
+                raise ValueError(f"{folder}: {unknown} are not per-track variables (available: "
+                                 f"{list(meta['vars_1d']) + list(meta['vars_tracks2d'])})")
+            columns = [meta["duration_var"]]
+            for n in track_variables:
+                columns += [f"{n}__{j}" for j in range(meta["vars_tracks2d"][n])] if n in meta["vars_tracks2d"] else [n]
+            columns = list(dict.fromkeys(columns))
+        table = pq.read_table(os.path.join(folder, "tracks.parquet"), columns=columns)
         tracks = {n: table.column(n).to_numpy() for n in table.column_names}
         return cls(folder, meta, tracks)
 
@@ -575,27 +596,33 @@ class RowStats:
             return RaggedArray(self._entries[name], self.offsets, _fill_value(self.meta, name))
         raise KeyError(name)
 
-    def tables(self, variables=None):
+    def tables(self, variables=None, index_columns=True, fragments=True):
         """
         Load the tables (all columns, or only those of the given variables) as RowTables.
 
         Args:
             variables: list of strings (default: None = all)
-                Variables of the entries table to load; 1-D variables and fragments are always loaded.
+                Variables of the entries table to load; the per-track variables that RowStats.open read are always loaded.
+            index_columns: bool (default: True)
+                Also read the entries columns track and k (the track and the time index of every entry). False for a caller
+                that only needs the values of the variables (rows_to_dense builds the layout from the durations).
+            fragments: bool (default: True)
+                Read the fragments table (the merge / split variables). False: it is not read, the fragments of the tables are
+                empty and meta has no [tracks, times, slots] variable.
 
         Returns:
             tables: RowTables
         """
         names = self.meta["vars_2d"] if variables is None else [v for v in variables if v in self.meta["vars_2d"]]
-        entries = {"track": self._column("entries", "track"), "k": self._column("entries", "k")}
+        entries = {"track": self._column("entries", "track"), "k": self._column("entries", "k")} if index_columns else {}
         for n in names:
             entries[n] = self._column("entries", n)
-        fragments = {}
-        if self.meta["vars_3d"]:
+        frag = {}
+        if fragments and self.meta["vars_3d"]:
             table = pq.read_table(os.path.join(self.folder, "fragments.parquet"))
-            fragments = {c: table.column(c).to_numpy() for c in table.column_names}
-        meta = dict(self.meta, vars_2d=names)
-        return RowTables(self.tracks, entries, fragments, meta)
+            frag = {c: table.column(c).to_numpy() for c in table.column_names}
+        meta = dict(self.meta, vars_2d=names) if fragments else dict(self.meta, vars_2d=names, vars_3d=[])
+        return RowTables(self.tracks, entries, frag, meta)
 
     def to_pandas(self, table="entries", tracks=None, variables=None):
         """
@@ -1029,7 +1056,7 @@ def table_differences(a, b, ignore_global_attrs=("Created_on",)):
 
 
 def load_trackstats(path, tracks=None, variables=None, width=None, mask_and_scale=True, decode_times=True, tracks_dim="tracks",
-                    times_dim="times", slots_dim="mergers", fragments=True):
+                    times_dim="times", slots_dim="mergers", fragments=True, track_variables=None):
     """
     Dense xarray Dataset of a track statistics file in either format: the helper for code that was written for the dense files.
 
@@ -1045,7 +1072,8 @@ def load_trackstats(path, tracks=None, variables=None, width=None, mask_and_scal
             Track indices (0-based) to load, in the given order. For a row folder only these tracks are built, and the times
             dimension is as long as their longest track (pass width to choose another length).
         variables: list of strings (default: None = all)
-            [tracks, times] variables to load; the 1-D variables and the merge / split variables are always loaded.
+            [tracks, times] variables to load; the per-track variables (see track_variables) and the merge / split variables
+            are always loaded.
         width: int (default: None)
             Length of the times dimension of a subset of tracks from a row folder (rows_to_dense).
         mask_and_scale: bool (default: True)
@@ -1058,7 +1086,13 @@ def load_trackstats(path, tracks=None, variables=None, width=None, mask_and_scal
         fragments: bool (default: True)
             False: leave out the [tracks, times, slots] merge / split fragment variables (other three-dimensional variables, e.g.
             [tracks, times, nmaxpf], stay). With variables=[] the result then has only the per-track variables, the cheap first
-            look at a file (a row folder never builds a dense array for them).
+            look at a file (a row folder never builds a dense array for them, and does not read the fragments table).
+        track_variables: list of strings (default: None = all)
+            The per-track variables ([tracks], and [tracks, n] ones that are not [tracks, times]) in the result. A row folder
+            reads only their columns of the tracks table, so a consumer of a few per-track variables of millions of tracks
+            (the track maps use track_class, track_duration, start_basetime, end_basetime) does not load the others. [] = none.
+            The tracks coordinate (the track index of the dense file) is in the result only if "tracks" is listed. ValueError for
+            a name that the row folder does not have; a dense file just drops the other variables.
 
     Returns:
         ds: xarray.Dataset
@@ -1067,12 +1101,18 @@ def load_trackstats(path, tracks=None, variables=None, width=None, mask_and_scal
     if folder is None and not os.path.exists(path) and path.endswith(".nc") and os.path.isdir(path[:-3] + ".rows"):
         folder = path[:-3] + ".rows"
     if folder is not None:
-        tables = RowStats.open(folder).tables(variables)
-        if not fragments:
-            tables = RowTables(tables.tracks, tables.entries, {}, dict(tables.meta, vars_3d=[]))
+        tables = RowStats.open(folder, track_variables).tables(variables, index_columns=False, fragments=fragments)
         ds = rows_to_dense(tables, tracks=tracks, width=width)
+        if track_variables is not None:         # the duration column was read for the offsets and is not a result unless asked for
+            ds = ds.drop_vars([v for v in ds.data_vars if tracks_dim in ds[v].dims and times_dim not in ds[v].dims
+                               and v not in track_variables])
         return xr.decode_cf(ds, mask_and_scale=mask_and_scale, decode_times=decode_times)
     ds = xr.open_dataset(path, mask_and_scale=mask_and_scale, decode_times=decode_times)
+    if track_variables is not None:
+        ds = ds.drop_vars([v for v in ds.data_vars if tracks_dim in ds[v].dims and times_dim not in ds[v].dims
+                           and v not in track_variables])
+        if tracks_dim in ds.coords and tracks_dim not in track_variables:        # as the row folder: no track index unless asked for
+            ds = ds.drop_vars(tracks_dim)
     if variables is not None:
         ds = ds.drop_vars([v for v in ds.data_vars if ds[v].dims == (tracks_dim, times_dim) and v not in variables])
     if not fragments:

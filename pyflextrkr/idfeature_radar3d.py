@@ -1,15 +1,47 @@
 import logging
 import numpy as np
 import xarray as xr
+from scipy import ndimage
 from pyflextrkr import netcdf_io as net
 from pyflextrkr.idcells_reflectivity import get_composite_reflectivity_generic, subset_domain
 from pyflextrkr.label_and_grow_features import label_and_grow_features
 from pyflextrkr.combine_features import combine_features_with_share_boundary
+from pyflextrkr.ftfunctions import sort_renumber
 from pyflextrkr.steiner_func import (
     make_dilation_step_func, mod_steiner_classification, label_cells_fast, dilate_label_conv_mask,
+    expand_conv_core, expand_conv_core_fast, expand_conv_core_edt,
 )
 from pyflextrkr.echotop_func import echotop_height, echotop_height_fast
 from pyflextrkr.ft_utilities import get_pixel_area
+
+
+def label_cell_clusters(cell_number_inflated):
+    """
+    Cell clusters: the connected groups of the inflated convective cells.
+
+    The 8-connected grid points of the binary cell_number_inflated (> 0) are labeled, then sorted by size
+    (ftfunctions.sort_renumber: the largest cluster is 1, none is removed).
+
+    Args:
+        cell_number_inflated: np.ndarray(int), 2D
+            Inflated convective cell mask (expand_conv_core: the cells grown by radii_expand, numbered by size; 0 = no cell).
+
+    Returns:
+        cell_cluster_number: np.ndarray(int32), 2D
+            Cluster number of every grid point, sorted by size (largest = 1; 0 = not in a cluster).
+    """
+    labels, nlabels = ndimage.label(np.asarray(cell_number_inflated) > 0, structure=np.ones((3, 3), dtype=int))
+    if nlabels == 0:
+        return np.zeros(labels.shape, dtype=np.int32)
+    cell_cluster_number, _ = sort_renumber(labels, 0)
+    return cell_cluster_number.astype(np.int32)
+
+
+# Methods of the expansion of the cells (idcells_reflectivity.py: expand_method)
+EXPAND_FUNCTIONS = {'orig': expand_conv_core, 'fast': expand_conv_core_fast, 'edt': expand_conv_core_edt}
+
+# Default radii [km] of the expansion of the cells: those of the cell tracking
+DEFAULT_RADII_EXPAND = [1, 2, 3, 4, 5, 6, 7]
 
 
 def idfeature_radar3d(
@@ -107,15 +139,30 @@ def idfeature_radar3d(
     return_diag = config.get("return_diag", False)
     convolve_method = config.get("convolve_method", "fft")
     dilate_method = config.get("dilate_method", "orig")
-    # cell_number is a labeled, size-sorted convective cell ID array derived
-    # from a Steiner diagnostic mask (see Design decision 1 in the project plan):
-    # 'score_orig' (pre small-core-area filter) or 'score_dilate' (post min_cellarea
-    # filter + convective-radius dilation).
-    cell_number_source = config.get("cell_number_source", "score_orig")
+    # cell_number is a labeled, size-sorted convective cell ID array derived from a Steiner diagnostic mask:
+    # 'score_dilate' (default: the cores grown by the convective-radius dilation, then the cells under min_cellarea removed,
+    # the cells of the cell tracking) or 'score_orig' (the bare cores before the dilation, mostly 1-2 pixels at 3 km)
+    cell_number_source = config.get("cell_number_source", "score_dilate")
+    if cell_number_source not in ('score_dilate', 'score_orig'):
+        raise ValueError(f"cell_number_source '{cell_number_source}' is not 'score_dilate' or 'score_orig'")
     cell_min_npix = config.get("cell_min_npix", 0)
     # conv_feature_number groups the Steiner convective pixels that are closer than 2 x this radius [km]
     # into one feature (0 = only pixels that touch, 8-connected)
     conv_dilate_radius_km = config.get("conv_dilate_radius_km", 0)
+    # Inflated cells (as in the cell tracking, idcells_reflectivity.py): the Steiner dilated cells (score_dilate) grown outward
+    # by these radii [km], sequentially, written as cell_number_inflated; cell_cluster_number labels their connected groups
+    # (the groups of the lifecycle statistics: regionprops, mapfeature). Default: the radii of the cell tracking, [1 ... 7] km;
+    # null = off, neither variable is written. expand_method: 'orig' (the cell-tracking default, one full-grid
+    # dilation per cell and radius, slow), 'fast' (default, bit-identical to 'orig', one grey dilation per radius) or 'edt'
+    # (nearest-cell assignment within the largest radius, differs from 'orig' only at tie pixels)
+    radii_expand = config.get("radii_expand", DEFAULT_RADII_EXPAND)
+    expand_method = config.get("expand_method", "fast")
+    if radii_expand is not None:
+        radii_expand = np.array(radii_expand, dtype=float)
+        if radii_expand.ndim != 1 or len(radii_expand) == 0 or np.any(radii_expand <= 0):
+            raise ValueError(f"radii_expand must be a list of positive radii [km] or null, got {config['radii_expand']}")
+        if expand_method not in EXPAND_FUNCTIONS:
+            raise ValueError(f"expand_method '{expand_method}' is not one of {sorted(EXPAND_FUNCTIONS)}")
 
     # Echo-top height parameters
     echotop_gap = config["echotop_gap"]
@@ -288,6 +335,15 @@ def idfeature_radar3d(
             good=mask_goodvalues,
         )
 
+        # Inflated cells (the cell tracking mask: score_dilate cells expanded by radii_expand) and their clusters
+        inflated_kwargs = {}
+        if radii_expand is not None:
+            cell_number_inflated, _ = EXPAND_FUNCTIONS[expand_method](
+                score_dilate, radii_expand, dx, dy, min_corenpix=0)
+            inflated_kwargs['cell_number_inflated'] = cell_number_inflated.astype(np.int32)
+            # Cell clusters: 8-connected grid points of the binary cell_number_inflated, labeled and sorted by size
+            inflated_kwargs['cell_cluster_number'] = label_cell_clusters(cell_number_inflated)
+
         diag_kwargs = {}
         if return_diag:
             diag_kwargs['refl_bkg'] = steiner_result['refl_bkg']
@@ -328,6 +384,10 @@ def idfeature_radar3d(
             'cell_number_source': cell_number_source,
             'conv_dilate_radius_km': conv_dilate_radius_km,
         }
+        # Recorded only when the option is on (the attributes of the files without it do not change)
+        if radii_expand is not None:
+            feature_params['radii_expand_km'] = radii_expand
+            feature_params['expand_method'] = expand_method
         # Recorded only when the option is on (the attributes of the files without it do not change)
         if combine_features:
             feature_params['combine_features_share_boundary'] = 1
@@ -421,6 +481,7 @@ def idfeature_radar3d(
             steiner_params=steiner_params,
             ds_pass=ds_pass,
             conv_feature_number=conv_feature_number,
+            **inflated_kwargs,
             **diag_kwargs,
         )
         logger.info(f"{cloudid_outfile}")

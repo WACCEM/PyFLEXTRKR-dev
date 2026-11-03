@@ -5,8 +5,8 @@ identifymcs_radar folds the merge/split fragments into the track they belong to,
 its own feature plus the fragment features: the "merged mask" that mapfeature paints as cloudtracknumber. The shape and
 extreme statistics of trackstats_func.py describe the track's own feature only. This worker recomputes them on the merged
 mask, with the same definitions as trackstats_func.py, plus a convective length that groups nearby convective cells
-(conv_feature_number, see idfeature_radar3d.py). The groups are those idfeature wrote, or, with
-conv_dilate_overwrite_radius_km set, groups recomputed here at another dilation radius.
+(cell_cluster_number, see idfeature_radar3d.py: the connected groups of the inflated cells). The groups are those idfeature
+wrote, or, with conv_dilate_overwrite_radius_km set, the clusters dilated further by that radius and labeled again.
 """
 import logging
 import warnings
@@ -23,15 +23,15 @@ ECHOTOP_THRESHS = (10, 20, 30, 40, 50)
 
 def conv_dilate_overwrite_km(config):
     """
-    The conv_dilate_overwrite_radius_km option: the dilation radius [km] at which conv_feature_number is recomputed from
-    the convective pixels of the cloudid files instead of read from them.
+    The conv_dilate_overwrite_radius_km option: the radius [km] by which the cell clusters (cell_cluster_number) of the
+    cloudid files are dilated further and labeled again, to connect adjacent clusters, instead of using them as they are.
 
     Args:
         config: dictionary
             Dictionary containing config parameters.
 
     Returns:
-        radius_km: float, or None if the key is missing or null (use the groups idfeature_radar3d wrote).
+        radius_km: float, or None if the key is missing or null (use the clusters idfeature_radar3d wrote).
 
     Raises:
         ValueError: the radius is not a non-negative number, or dx/dy (grid spacing [m], the sampling of the dilation)
@@ -71,30 +71,108 @@ def track_classes_from_config(config):
     raise ValueError(f"regionprops_track_classes must be a non-empty list of track_class values or null, got {classes!r}.")
 
 
-def redilate_conv_feature_number(convsf, radius_km, config):
+def redilate_cell_clusters(cell_cluster_number, radius_km, config):
     """
-    conv_feature_number at another dilation radius: the Steiner convective pixels dilated by a disc of radius_km and
-    labeled, the call idfeature_radar3d makes. Its valid-data gate (mask_goodvalues, the range mask of the radar) is not
-    stored in the cloudid files and is not applied here.
+    The cell clusters at a larger distance: the binary cell_cluster_number (> 0) dilated by a disc of radius_km and labeled
+    (8-connected, sorted by size), so clusters that are less than 2 x radius_km apart become one group. Its valid-data gate
+    (mask_goodvalues, the range mask of the radar) is not stored in the cloudid files and is not applied here.
 
     Args:
-        convsf: 2D np.array, Steiner classification of the cloudid file (4 = convective).
-        radius_km: float, dilation radius [km] (0 = only pixels that touch are grouped).
+        cell_cluster_number: 2D np.array, cell clusters of the cloudid file (0 = not in a cluster).
+        radius_km: float, dilation radius [km] (0 = only clusters that touch are joined, the same labeling as the file's).
         config: dictionary with dx and dy [m].
 
     Returns:
-        2D np.array(int32), group number at every pixel, sorted by size (largest = 1), 0 = none.
+        2D np.array(int32), group number at every pixel of the dilated mask, sorted by size (largest = 1), 0 = none.
     """
-    return dilate_label_conv_mask(convsf == 4, radius_km * 1000.0, config["dx"], config["dy"])
+    return dilate_label_conv_mask(cell_cluster_number > 0, radius_km * 1000.0, config["dx"], config["dy"])
 
 
-def recomputed_variable_names(dbz_area_threshs):
-    """Names of the track statistics that are recomputed on the merged mask (same names as in trackstats_func.py)."""
+def cluster_radii_from_cloudid(ds_cloudid):
+    """
+    radii_expand [km] that a cloudid file was made with.
+
+    Args:
+        ds_cloudid: xarray.Dataset
+            An open cloudid file.
+
+    Returns:
+        radii_expand_km: np.array, or None if the file does not record it (the global attribute, else the attribute of
+            cell_number_inflated).
+    """
+    radii = ds_cloudid.attrs.get("radii_expand_km", None)
+    if radii is None and "cell_number_inflated" in ds_cloudid:
+        radii = ds_cloudid["cell_number_inflated"].attrs.get("radii_expand_km", None)
+    return None if radii is None else np.atleast_1d(np.asarray(radii, dtype=float))
+
+
+def cluster_groups_text(radii_expand_km, overwrite_km):
+    """
+    The words that say what the convective groups of conv_majoraxis are, for the comments of the variable.
+
+    Args:
+        radii_expand_km: array-like, or None
+            radii_expand [km] the cloudid files were made with (the attribute of the files; None if unknown).
+        overwrite_km: float, or None
+            conv_dilate_overwrite_radius_km (None = off).
+
+    Returns:
+        text: string
+    """
+    text = "cell_cluster_number (the 8-connected groups of the inflated convective cells"
+    if radii_expand_km is not None:
+        radii = ", ".join(f"{float(r):g}" for r in np.atleast_1d(radii_expand_km))
+        text += f": the cells grown by radii_expand = [{radii}] km"
+    text += ")"
+    if overwrite_km is not None:
+        text += (f", dilated further by a disc of radius {float(overwrite_km):g} km and labeled again "
+                 f"(conv_dilate_overwrite_radius_km, run by run_regionprops, not read from the cloudid files)")
+    return text
+
+
+def cluster_global_attrs(radii_expand_km, overwrite_km):
+    """
+    The global attributes that record how the convective groups were made.
+
+    Args:
+        radii_expand_km: array-like, or None
+            radii_expand [km] of the cloudid files (None = unknown, no attribute).
+        overwrite_km: float, or None
+            conv_dilate_overwrite_radius_km (None = off, no attribute).
+
+    Returns:
+        attrs: dictionary with radii_expand_km (float array) and conv_dilate_overwrite_radius_km (float), the ones that are set.
+    """
+    attrs = {}
+    if radii_expand_km is not None:
+        attrs["radii_expand_km"] = np.atleast_1d(np.asarray(radii_expand_km, dtype=float))
+    if overwrite_km is not None:
+        attrs["conv_dilate_overwrite_radius_km"] = float(overwrite_km)
+    return attrs
+
+
+def recomputed_variable_names(dbz_area_threshs, with_conv_diameter_sum=False):
+    """
+    Names of the track statistics that are recomputed on the merged mask (same names as in trackstats_func.py).
+
+    Args:
+        dbz_area_threshs: list
+            dBZ thresholds of the area_<T>dbz / conv_area_<T>dbz variables.
+        with_conv_diameter_sum: bool (default: False)
+            Add conv_diameter_sum, the sum of the circular-equivalent diameters of the convective cells (needs cell_number in
+            the cloudid files). False for first-pass files from before that variable existed; regionprops_singlefile returns it
+            in either case.
+
+    Returns:
+        names: list of strings
+    """
     names = [
         "meanlat", "meanlon", "mean_x", "mean_y",
         "lat_weightedcentroid", "lon_weightedcentroid", "x_weightedcentroid", "y_weightedcentroid",
         "max_dbz", "majoraxis", "minoraxis", "aspectratio", "orientation", "eccentricity", "conv_majoraxis",
     ]
+    if with_conv_diameter_sum:
+        names.append("conv_diameter_sum")
     names += [f"maxETH_{t}dbz" for t in ECHOTOP_THRESHS]
     for t in dbz_area_threshs:
         names += [f"area_{t}dbz", f"conv_area_{t}dbz"]
@@ -145,7 +223,8 @@ def regionprops_singlefile(
     overwrite_km = conv_dilate_overwrite_km(config)
 
     n = len(file_cloudnumber)
-    out = {name: np.full(n, np.nan, dtype=np.float32) for name in recomputed_variable_names(dbz_area_threshs)}
+    out = {name: np.full(n, np.nan, dtype=np.float32)
+           for name in recomputed_variable_names(dbz_area_threshs, with_conv_diameter_sum=True)}
     out["merged_area"] = np.full(n, np.nan, dtype=np.float32)
     diag = {"n_conflict": 0, "n_out_of_range": 0}
     if n == 0:
@@ -156,8 +235,8 @@ def regionprops_singlefile(
             feature_number = ds[feature_varname].squeeze().values.astype(np.int64)
             convsf = ds["convsf"].squeeze().values
             dbz = ds[ref_varname].squeeze().values
-            if overwrite_km is None:
-                conv_feature_number = ds["conv_feature_number"].squeeze().values.astype(np.int64)
+            cell_cluster_number = ds["cell_cluster_number"].squeeze().values.astype(np.int64)
+            cell_number = ds["cell_number"].squeeze().values.astype(np.int64) if "cell_number" in ds else None
             echotops = {t: ds[f"echotop{t}"].squeeze().values / 1000. for t in ECHOTOP_THRESHS}
             latitude = ds["latitude"].values
             longitude = ds["longitude"].values
@@ -168,8 +247,8 @@ def regionprops_singlefile(
         return None
 
     if overwrite_km is not None:
-        # groups at the overwrite radius, from the convective pixels of this file (the cloudid file is not modified)
-        conv_feature_number = redilate_conv_feature_number(convsf, overwrite_km, config).astype(np.int64)
+        # clusters joined at the overwrite radius, from the clusters of this file (the cloudid file is not modified)
+        cell_cluster_number = redilate_cell_clusters(cell_cluster_number, overwrite_km, config).astype(np.int64)
 
     ny, nx = feature_number.shape
     pixel_area = get_pixel_area(config)
@@ -206,16 +285,16 @@ def regionprops_singlefile(
         merged_label = np.where(label_selected[merged_label], merged_label, np.int32(0))
 
     #########################################################################
-    # Convective length: the pixels of the merged mask that belong to one convective feature
-    # (conv_feature_number: convective pixels dilated by a disc and labeled; read from the file, or recomputed at
+    # Convective length: the pixels of the merged mask that belong to one cell cluster (cell_cluster_number: the
+    # connected groups of the inflated convective cells; read from the file, or joined further at
     # conv_dilate_overwrite_radius_km) form a group; the group's
     # major axis is measured on that region inside the mask, and conv_majoraxis is the longest group of a track.
-    # Groups without a convective pixel of the track do not count.
+    # Groups without a convective pixel (Steiner class 4) of the track do not count.
     conv_major_by_label = np.zeros(n + 1)
-    in_mask = (merged_label > 0) & (conv_feature_number > 0)
+    in_mask = (merged_label > 0) & (cell_cluster_number > 0)
     if in_mask.any():
-        stride = int(conv_feature_number.max()) + 1
-        keys = merged_label[in_mask].astype(np.int64) * stride + conv_feature_number[in_mask]
+        stride = int(cell_cluster_number.max()) + 1
+        keys = merged_label[in_mask].astype(np.int64) * stride + cell_cluster_number[in_mask]
         unique_keys, inverse = np.unique(keys, return_inverse=True)
         inverse = inverse.reshape(-1)
         has_conv = np.zeros(len(unique_keys), dtype=bool)
@@ -227,6 +306,25 @@ def regionprops_singlefile(
         for gp in regionprops(group_map):
             parent = group_parent[gp.label - 1]
             conv_major_by_label[parent] = max(conv_major_by_label[parent], gp.axis_major_length * mean_pixelength)
+
+    #########################################################################
+    # Sum of the circular-equivalent diameters 2*sqrt(A_i/pi) of the convective cells (cell_number labels) in the merged mask
+    # (conv_diameter_sum of trackstats_func.py): the area of each (track, cell) pair from one bincount. A cell that lies in the
+    # track's own feature and in a folded fragment is one cell of the merged mask.
+    diameter_by_label = np.zeros(n + 1)
+    if cell_number is not None:
+        in_cell = (merged_label > 0) & (cell_number > 0)
+        if in_cell.any():
+            cell_stride = int(cell_number.max()) + 1
+            cell_keys = merged_label[in_cell].astype(np.int64) * cell_stride + cell_number[in_cell]
+            unique_cell_keys, cell_inverse = np.unique(cell_keys, return_inverse=True)
+            cell_inverse = cell_inverse.reshape(-1)
+            if area_method == "latlon":
+                cell_area = np.bincount(cell_inverse, weights=np.nan_to_num(pixel_area[in_cell]), minlength=len(unique_cell_keys))
+            else:
+                cell_area = np.bincount(cell_inverse, minlength=len(unique_cell_keys)) * pixel_radius ** 2
+            cell_track = (unique_cell_keys // cell_stride).astype(np.int64)
+            diameter_by_label = np.bincount(cell_track, weights=2.0 * np.sqrt(cell_area / np.pi), minlength=n + 1)
 
     #########################################################################
     # Statistics of the merged mask (definitions of trackstats_func.py, radar_feature)
@@ -284,6 +382,8 @@ def regionprops_singlefile(
                     out[f"maxETH_{t}dbz"][j] = np.nanmax(echotops[t][rows[is_conv], cols[is_conv]])
 
         out["conv_majoraxis"][j] = conv_major_by_label[rp.label]
+        if cell_number is not None:
+            out["conv_diameter_sum"][j] = diameter_by_label[rp.label]
 
         # Shape statistics and reflectivity-weighted centroid
         out["eccentricity"][j] = rp.eccentricity

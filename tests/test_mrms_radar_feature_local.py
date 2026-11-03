@@ -149,7 +149,7 @@ class TestMrmsRadarFeatureVsCellTracking:
         the reference's core_steiner_orig (score_orig before labeling).
         """
         ds_out, config = radar_feature_output
-        if config.get("cell_number_source", "score_orig") != "score_orig":
+        if config.get("cell_number_source", "score_dilate") != "score_orig":
             pytest.skip("cell_number_source is not score_orig in this config")
         cell_number = ds_out["cell_number"].values.squeeze()
         core_steiner_orig_ref = reference_cellid["core_steiner_orig"].values.squeeze()

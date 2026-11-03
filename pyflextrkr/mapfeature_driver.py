@@ -81,7 +81,7 @@ def mapfeature_driver(
     trackstats_comments = ds["track_status"].comments
 
     # Optional per-cloud feature classification (e.g. identifymcs_radar.py's
-    # feature_class: 1=MCS, 2=multi-cell, 3=isolated-cell, 4=non-convective),
+    # feature_class: 1=MCS, 2=multi-cell, 3=single-cell, 4=stratiform),
     # painted into pixel files as its own map when present.
     mapfeature_class_varname = config.get("mapfeature_class_varname", None)
     if mapfeature_class_varname is not None and mapfeature_class_varname in stats_varnames:

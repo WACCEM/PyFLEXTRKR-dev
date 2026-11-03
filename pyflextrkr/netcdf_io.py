@@ -510,7 +510,7 @@ def write_radar_featureid(
     applied to column-maximum reflectivity, plus the Steiner convective/
     stratiform classification and a labeled convective cell-count map
     (cell_number) used downstream to classify each feature as MCS, multi-cell,
-    isolated-cell, or non-convective.
+    single-cell, or stratiform.
 
     Args:
         cloudid_outfile: str
@@ -571,6 +571,12 @@ def write_radar_featureid(
                 Labeled convective feature number 2D array: the Steiner convective pixels dilated
                 by config['conv_dilate_radius_km'] and grouped into 8-connected regions, sorted by
                 size (largest = 1; 0 = not part of any region).
+            cell_number_inflated: np.ndarray(int)
+                Inflated convective cell mask 2D array: the Steiner dilated cells (score_dilate) grown outward
+                by the radii config['radii_expand'] (idcells_reflectivity.py), numbered by size (largest = 1; 0 = no cell).
+            cell_cluster_number: np.ndarray(int)
+                Cell cluster number 2D array: the 8-connected grid points of the binary cell_number_inflated (> 0),
+                labeled and sorted by size (largest = 1; 0 = not in a cluster).
             ds_pass: xarray.Dataset
                 Additional dataset to pass through to output.
 
@@ -611,6 +617,10 @@ def write_radar_featureid(
     # Optional convective feature labels (dilated convective mask)
     if kwargs.get('conv_feature_number') is not None:
         var_dict['conv_feature_number'] = (dim3d, np.expand_dims(kwargs['conv_feature_number'], axis=0))
+    # Optional inflated cells and their clusters (config radii_expand)
+    for inflated_name in ('cell_number_inflated', 'cell_cluster_number'):
+        if kwargs.get(inflated_name) is not None:
+            var_dict[inflated_name] = (dim3d, np.expand_dims(kwargs[inflated_name], axis=0))
 
     # Output coordinates
     coord_dict = {
@@ -694,10 +704,12 @@ def write_radar_featureid(
     ds_out['convsf'].attrs['long_name'] = 'Steiner Convective/Stratiform classification'
     ds_out['convsf'].attrs['units'] = 'unitless'
     ds_out['convsf'].attrs['comment'] = 'NAN:0, NO_SURF_ECHO:1, WEAK_ECHO:2, STRATIFORM:3, CONVECTIVE:4'
+    ds_out['convsf'].attrs['_FillValue'] = 0
     ds_out['conv_core'].attrs['long_name'] = \
         'Convective core mask after reflectivity threshold and peakedness steps ' + \
         '(1 = convective, 0 = not convective)'
     ds_out['conv_core'].attrs['units'] = 'unitless'
+    ds_out['conv_core'].attrs['_FillValue'] = 0
     ds_out['cell_number'].attrs['long_name'] = \
         'Labeled convective cell number, sorted by size (largest=1; derived from Steiner score)'
     ds_out['cell_number'].attrs['units'] = 'unitless'
@@ -709,6 +721,22 @@ def write_radar_featureid(
         ds_out['conv_feature_number'].attrs['units'] = 'unitless'
         ds_out['conv_feature_number'].attrs['_FillValue'] = 0
         ds_out['conv_feature_number'].attrs['dilation_radius_km'] = float(config.get("conv_dilate_radius_km", 0))
+    if 'cell_number_inflated' in ds_out:
+        ds_out['cell_number_inflated'].attrs['long_name'] = \
+            'Inflated convective cell number: the Steiner dilated cells grown outward by radii_expand, sorted by size (largest=1)'
+        ds_out['cell_number_inflated'].attrs['comment'] = \
+            'The mask of the cell tracking (expand_conv_core of score_dilate); cell numbers are those of the cells before the expansion'
+        ds_out['cell_number_inflated'].attrs['units'] = 'unitless'
+        ds_out['cell_number_inflated'].attrs['_FillValue'] = 0
+        ds_out['cell_number_inflated'].attrs['radii_expand_km'] = np.asarray(config.get("radii_expand"), dtype=float)
+        ds_out['cell_number_inflated'].attrs['expand_method'] = str(config.get("expand_method", "fast"))
+    if 'cell_cluster_number' in ds_out:
+        ds_out['cell_cluster_number'].attrs['long_name'] = \
+            'Cell cluster number: the 8-connected grid points of the binary cell_number_inflated (> 0), labeled and sorted by size (largest=1)'
+        ds_out['cell_cluster_number'].attrs['comment'] = \
+            'Connected groups of the inflated convective cells, labeled with 8-connectivity and sorted by size (ftfunctions.sort_renumber); 0 = not in a cluster'
+        ds_out['cell_cluster_number'].attrs['units'] = 'unitless'
+        ds_out['cell_cluster_number'].attrs['_FillValue'] = 0
     ds_out['feature_pixel_type'].attrs['long_name'] = \
         'Per-pixel feature classification: 1=core, 2=secondary, 3=tertiary, 4=other, 5=clear'
     ds_out['feature_pixel_type'].attrs['units'] = 'unitless'

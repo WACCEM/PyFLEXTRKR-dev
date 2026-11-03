@@ -133,9 +133,8 @@ def _build_synthetic_cloudid(tmp_path):
     return cloudid_outfile, os.path.basename(cloudid_outfile)
 
 
-@pytest.fixture(scope='module')
-def stats_result(tmp_path_factory):
-    tmpdir = tmp_path_factory.mktemp('trackstats_radar_feature')
+def _run_stats(tmpdir, **extra_config):
+    """Run calc_stats_singlefile on the synthetic cloudid file; extra_config overrides/extends the config."""
     cloudid_outfile, cloudid_fname = _build_synthetic_cloudid(tmpdir)
 
     nfeatures = 3
@@ -159,11 +158,29 @@ def stats_result(tmp_path_factory):
         'ref_varname': 'dbz_comp',
         'trackstats_dbz_area_threshs': [45, 50],
     }
+    config.update(extra_config)
 
     out_dict, out_dict_attrs = calc_stats_singlefile(
         tracknumbers, cloudidfile, trackstatus, trackmerge, tracksplit, trackreset, config,
     )
     return out_dict, out_dict_attrs
+
+
+@pytest.fixture(scope='module')
+def stats_result(tmp_path_factory):
+    return _run_stats(tmp_path_factory.mktemp('trackstats_radar_feature'))
+
+
+# Pixel area of the lat-lon case: grows with the row so that every cell has a different, hand-computable area
+GRID_AREA = (9.0 * (1.0 + 0.02 * np.arange(NY)))[:, None] * np.ones((1, NX))
+
+
+@pytest.fixture(scope='module')
+def stats_result_latlon(tmp_path_factory):
+    tmpdir = tmp_path_factory.mktemp('trackstats_radar_feature_latlon')
+    grid_area_file = os.path.join(str(tmpdir), "grid_area.nc")
+    xr.Dataset({"grid_area": (("lat", "lon"), GRID_AREA)}).to_netcdf(grid_area_file)
+    return _run_stats(tmpdir, area_method='latlon', grid_area_file=grid_area_file)
 
 
 class TestTrackstatsRadarFeature:
@@ -174,7 +191,7 @@ class TestTrackstatsRadarFeature:
             "mean_x", "mean_y", "lat_weightedcentroid", "lon_weightedcentroid",
             "x_weightedcentroid", "y_weightedcentroid", "max_dbz",
             "majoraxis", "minoraxis", "aspectratio", "orientation", "eccentricity",
-            "conv_majoraxis", "conv_area", "strat_area", "ncells",
+            "conv_majoraxis", "conv_area", "strat_area", "ncells", "conv_diameter_sum",
             "maxETH_10dbz", "maxETH_20dbz", "maxETH_30dbz", "maxETH_40dbz", "maxETH_50dbz",
             "area_45dbz", "area_50dbz", "conv_area_45dbz", "conv_area_50dbz",
             "area", "meanlat", "meanlon",
@@ -293,3 +310,43 @@ class TestTrackstatsRadarFeature:
     def test_ncells_is_int_dtype_in_output(self, stats_result):
         out_dict, _ = stats_result
         assert np.issubdtype(out_dict["ncells"].dtype, np.integer)
+
+
+class TestConvDiameterSum:
+    """conv_diameter_sum: the sum over the convective cells of a feature of 2*sqrt(A_i/pi) [km]."""
+
+    # Each cell is a 3 x 5 block of 3 km pixels: 15 * 9 = 135 km^2
+    CELL_AREA = 15 * (DX / 1000.0) ** 2
+
+    def test_feature1_is_the_sum_of_the_cell_diameters(self, stats_result):
+        out_dict, _ = stats_result
+        expected = 2 * 2.0 * np.sqrt(self.CELL_AREA / np.pi)
+        assert out_dict["conv_diameter_sum"][0] == pytest.approx(expected, rel=1e-5)
+
+    def test_not_the_diameter_of_the_total_convective_area(self, stats_result):
+        """sum(2*sqrt(A_i/pi)) is not 2*sqrt(sum(A_i)/pi): conv_area cannot replace the new variable."""
+        out_dict, _ = stats_result
+        one_circle = 2.0 * np.sqrt(out_dict["conv_area"][0] / np.pi)
+        assert out_dict["conv_diameter_sum"][0] > one_circle * 1.3
+        assert out_dict["conv_diameter_sum"][0] / one_circle == pytest.approx(np.sqrt(2.0), rel=1e-5)
+
+    def test_features_without_a_cell_are_zero(self, stats_result):
+        out_dict, _ = stats_result
+        assert out_dict["conv_diameter_sum"][1] == 0
+        assert out_dict["conv_diameter_sum"][2] == 0
+
+    def test_float_dtype_and_attributes(self, stats_result):
+        out_dict, out_dict_attrs = stats_result
+        assert np.issubdtype(out_dict["conv_diameter_sum"].dtype, np.floating)
+        assert out_dict_attrs["conv_diameter_sum"]["units"] == "km"
+        assert "circular-equivalent" in out_dict_attrs["conv_diameter_sum"]["long_name"]
+
+    def test_latlon_areas(self, stats_result_latlon):
+        """With area_method latlon each cell's area is the sum of its own pixels' areas."""
+        out_dict, _ = stats_result_latlon
+        area1 = GRID_AREA[CELL1_ROWS, CELL1_COLS].sum()
+        area2 = GRID_AREA[CELL2_ROWS, CELL2_COLS].sum()
+        expected = 2.0 * np.sqrt(area1 / np.pi) + 2.0 * np.sqrt(area2 / np.pi)
+        assert out_dict["conv_diameter_sum"][0] == pytest.approx(expected, rel=1e-5)
+        assert out_dict["ncells"][0] == 2
+        assert out_dict["conv_diameter_sum"][1] == 0

@@ -153,7 +153,6 @@ def _minimal_config(tracking_outpath, dx=DX, return_diag=True):
         'return_diag': return_diag,
         'convolve_method': 'ndimage',
         'dilate_method': 'orig',
-        'cell_number_source': 'score_orig',
         'cell_min_npix': 0,
     }
 
@@ -407,6 +406,152 @@ class TestIdfeatureRadar3dConvFeatureNumber:
         assert np.all(cfn[dist <= 12e3] > 0)          # and everything within the radius is in
         assert ds['conv_feature_number'].attrs['dilation_radius_km'] == 12.0
         assert ds.attrs['conv_dilate_radius_km'] == 12.0
+
+
+class TestIdfeatureRadar3dInflatedCells:
+    """radii_expand: cell_number_inflated (the cell tracking mask) and cell_cluster_number (its 8-connected groups)."""
+
+    RADII = [1, 2, 3, 4, 5, 6, 7]
+
+    @staticmethod
+    def _run(tmp_path, **options):
+        tracking_outpath = str(tmp_path) + "/"
+        fpath = os.path.join(tracking_outpath, 'input.nc')
+        _make_synthetic_dataset(is_3d=True).to_netcdf(fpath)
+        config = _minimal_config(tracking_outpath)
+        config.update(options)
+        outfile = idfeature_radar3d(fpath, config)
+        return xr.open_dataset(outfile, decode_times=False, mask_and_scale=False)
+
+    def test_on_by_default_with_the_radii_of_the_cell_tracking(self, tmp_path):
+        ds = self._run(tmp_path)
+        assert 'cell_number_inflated' in ds and 'cell_cluster_number' in ds
+        assert list(ds.attrs['radii_expand_km']) == [float(r) for r in self.RADII]
+        assert ds.attrs['expand_method'] == 'fast'
+        (tmp_path / 'explicit').mkdir()
+        explicit = self._run(tmp_path / 'explicit', radii_expand=self.RADII, expand_method='fast')
+        assert np.array_equal(ds['cell_number_inflated'].values, explicit['cell_number_inflated'].values)
+        assert np.array_equal(ds['cell_cluster_number'].values, explicit['cell_cluster_number'].values)
+
+    def test_null_turns_it_off(self, tmp_path):
+        ds = self._run(tmp_path, radii_expand=None)
+        assert 'cell_number_inflated' not in ds and 'cell_cluster_number' not in ds
+        assert 'radii_expand_km' not in ds.attrs and 'expand_method' not in ds.attrs
+
+    def test_cell_number_is_made_of_score_dilate_by_default(self, tmp_path):
+        """The default cell_number_source is score_dilate (the cells of the cell tracking), score_orig is the bare cores."""
+        (tmp_path / 'default').mkdir()
+        (tmp_path / 'dilate').mkdir()
+        (tmp_path / 'orig').mkdir()
+        default = self._run(tmp_path / 'default')
+        dilate = self._run(tmp_path / 'dilate', cell_number_source='score_dilate')
+        orig = self._run(tmp_path / 'orig', cell_number_source='score_orig')
+        assert default.attrs['cell_number_source'] == 'score_dilate'
+        assert np.array_equal(default['cell_number'].values, dilate['cell_number'].values)
+        assert orig.attrs['cell_number_source'] == 'score_orig'
+        # the inflated cells grow from score_dilate whatever the source of cell_number is
+        assert np.array_equal(default['cell_number_inflated'].values, orig['cell_number_inflated'].values)
+
+    def test_an_unknown_cell_number_source_is_an_error(self, tmp_path):
+        with pytest.raises(ValueError, match='cell_number_source'):
+            self._run(tmp_path, cell_number_source='score')
+
+    def test_fill_values_of_the_masks(self, tmp_path):
+        """convsf and conv_core carry _FillValue 0 like cell_number (0 = no class / no core / no cell)."""
+        ds = self._run(tmp_path)
+        for name in ('convsf', 'conv_core', 'cell_number', 'cell_number_inflated', 'cell_cluster_number'):
+            assert ds[name].attrs['_FillValue'] == 0, name
+
+    def test_inflated_cells_are_expand_conv_core_of_the_dilated_cells(self, tmp_path):
+        from pyflextrkr.steiner_func import expand_conv_core
+        ds = self._run(tmp_path)
+        cells = ds['cell_number'].values.squeeze()
+        inflated = ds['cell_number_inflated'].values.squeeze()
+        assert ds['cell_number_inflated'].dims == ('time', 'lat', 'lon')
+        assert (cells > 0).any()
+        # the same labeled cells grown by the cell tracking function (score_dilate is what cell_number is made of here)
+        expected, _ = expand_conv_core(cells > 0, np.array(self.RADII, dtype=float), DX, DX, min_corenpix=0)
+        assert np.array_equal(inflated, expected)
+        # every cell pixel keeps its number and the mask is larger
+        assert np.array_equal(inflated[cells > 0], cells[cells > 0])
+        assert (inflated > 0).sum() > (cells > 0).sum()
+        # at 3 km the radii of 1-7 km are at most 2 grid points
+        dist = ndimage.distance_transform_edt(cells == 0, sampling=(DX, DX))
+        assert dist[inflated > 0].max() <= 7e3 + 1e-6
+
+    def test_the_input_is_always_score_dilate(self, tmp_path):
+        """cell_number_source changes cell_number only, not the inflated cells (the cell tracking input is score_dilate)."""
+        (tmp_path / 'a').mkdir()
+        (tmp_path / 'b').mkdir()
+        a = self._run(tmp_path / 'a', radii_expand=self.RADII, cell_number_source='score_orig')
+        b = self._run(tmp_path / 'b', radii_expand=self.RADII, cell_number_source='score_dilate')
+        assert np.array_equal(a['cell_number_inflated'].values, b['cell_number_inflated'].values)
+        assert np.array_equal(a['cell_cluster_number'].values, b['cell_cluster_number'].values)
+
+    def test_cell_clusters_are_the_8_connected_groups_sorted_by_size(self, tmp_path):
+        ds = self._run(tmp_path, radii_expand=self.RADII)
+        inflated = ds['cell_number_inflated'].values.squeeze()
+        clusters = ds['cell_cluster_number'].values.squeeze()
+        assert ds['cell_cluster_number'].dims == ('time', 'lat', 'lon')
+        expected, n = ndimage.label(inflated > 0, structure=np.ones((3, 3)))
+        assert n > 0 and clusters.max() == n
+        assert np.array_equal(clusters > 0, inflated > 0)
+        # the same partition as the plain labeling, only the numbers differ
+        assert len(set(zip(clusters[clusters > 0].tolist(), expected[clusters > 0].tolist()))) == n
+        sizes = np.bincount(clusters.ravel())[1:]
+        assert np.all(np.diff(sizes) <= 0)                        # the largest cluster is 1
+        # a cluster holds whole cells (a cell is connected and never split between clusters)
+        for cell in np.unique(inflated[inflated > 0]):
+            assert len(np.unique(clusters[inflated == cell])) == 1
+
+    def test_attributes_describe_the_variables(self, tmp_path):
+        ds = self._run(tmp_path, radii_expand=self.RADII, expand_method='orig')
+        assert list(ds.attrs['radii_expand_km']) == [float(r) for r in self.RADII]
+        assert ds.attrs['expand_method'] == 'orig'
+        assert list(ds['cell_number_inflated'].attrs['radii_expand_km']) == [float(r) for r in self.RADII]
+        assert '8-connected' in ds['cell_cluster_number'].attrs['long_name']
+        assert 'binary cell_number_inflated' in ds['cell_cluster_number'].attrs['long_name']
+        assert ds['cell_cluster_number'].attrs['_FillValue'] == 0
+
+    def test_methods_give_the_same_cells(self, tmp_path):
+        outs = {}
+        for method in ('orig', 'fast', 'edt'):
+            (tmp_path / method).mkdir()
+            outs[method] = self._run(tmp_path / method, radii_expand=self.RADII, expand_method=method)['cell_number_inflated'].values
+        assert np.array_equal(outs['orig'], outs['fast'])                  # bit-identical
+        assert np.array_equal(outs['orig'] > 0, outs['edt'] > 0)           # the same footprint (the numbers differ only at ties)
+
+    @pytest.mark.parametrize('options', [
+        {'radii_expand': []}, {'radii_expand': [0, 1]}, {'radii_expand': [[1, 2]]},
+        {'radii_expand': [1, 2, 3, 4, 5, 6, 7], 'expand_method': 'voronoi'},
+    ])
+    def test_wrong_options_are_errors(self, tmp_path, options):
+        with pytest.raises(ValueError):
+            self._run(tmp_path, **options)
+
+
+class TestLabelCellClusters:
+    """label_cell_clusters: binary > 0, 8-connected, sorted by size with sort_renumber."""
+
+    def test_diagonal_neighbours_are_one_cluster_and_the_largest_is_1(self):
+        from pyflextrkr.idfeature_radar3d import label_cell_clusters
+        mask = np.zeros((10, 10), dtype=int)
+        mask[1:3, 1:3] = 7            # 4 pixels
+        mask[3, 3] = 9                # touches the first block only diagonally: one cluster of 5 pixels
+        mask[6:9, 6:9] = 2            # 9 pixels: the largest, so cluster 1
+        mask[0, 9] = 3                # one pixel, alone
+        out = label_cell_clusters(mask)
+        assert out.dtype == np.int32
+        assert out.max() == 3
+        assert np.all(out[6:9, 6:9] == 1)
+        assert np.all(out[1:3, 1:3] == 2) and out[3, 3] == 2
+        assert out[0, 9] == 3
+        assert np.array_equal(out > 0, mask > 0)
+
+    def test_no_cells_give_zeros(self):
+        from pyflextrkr.idfeature_radar3d import label_cell_clusters
+        out = label_cell_clusters(np.zeros((5, 6), dtype=int))
+        assert out.shape == (5, 6) and out.dtype == np.int32 and not out.any()
 
 
 class TestIdfeatureRadar3dCombineFeatures:

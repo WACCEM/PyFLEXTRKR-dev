@@ -21,11 +21,12 @@ import dask
 import numpy as np
 
 from pyflextrkr.ft_utilities import match_pairs_to_files, subset_files_timerange
-from pyflextrkr.identifymcs_radar import identify_mcs_periods, mcs_params_from_config
+from pyflextrkr.identifymcs_radar import identify_mcs_periods_by_method, mcs_length_varname, mcs_params_from_config
 from pyflextrkr.mcs_lifecycle import classify_lifecycle
-from pyflextrkr.regionprops_driver import MAX_BAD_FRACTION, REQUIRED_CLOUDID_VARS
+from pyflextrkr.regionprops_driver import MAX_BAD_FRACTION, MISSING_CLUSTER_HINT, REQUIRED_CLOUDID_VARS
 from pyflextrkr.regionprops_func import (
-    conv_dilate_overwrite_km, recomputed_variable_names, regionprops_singlefile, track_classes_from_config,
+    cluster_global_attrs, cluster_groups_text, cluster_radii_from_cloudid, conv_dilate_overwrite_km,
+    recomputed_variable_names, regionprops_singlefile, track_classes_from_config,
 )
 from pyflextrkr.rowstats import FRAGMENT_KINDS, TableBuilder, read_tables, write_rows
 from pyflextrkr.smooth_trajectory import smooth_trajectory
@@ -140,30 +141,28 @@ def compute_regionprops_rows(config):
     if nfiles == 0:
         logger.critical(f"No cloudid files found in {tracking_outpath}. Tracking will now exit.")
         sys.exit()
-    required = [v for v in REQUIRED_CLOUDID_VARS if overwrite_km is None or v != "conv_feature_number"]
+    required = list(REQUIRED_CLOUDID_VARS)
+    # conv_diameter_sum (sum of the circular-equivalent diameters of the convective cells) is recomputed on the merged mask when
+    # the first-pass tables have it (first-pass tables from before that variable existed do not, and then need no cell_number)
+    with_conv_diameter_sum = "conv_diameter_sum" in entries
+    if with_conv_diameter_sum:
+        required = required + ["cell_number"]
     with xr.open_dataset(cloudidfiles[0], decode_times=False, mask_and_scale=False) as dsp:
         missing = [v for v in required + [config.get("feature_varname", "feature_number")] if v not in dsp]
-        idfeature_radius_km = dsp.attrs.get("conv_dilate_radius_km", config.get("conv_dilate_radius_km", None))
+        radii_expand_km = cluster_radii_from_cloudid(dsp)
     if missing:
-        hint = (" conv_feature_number is written by the version of idfeature_radar3d that has the conv_dilate_radius_km "
-                "option: run run_idfeature with it, or set conv_dilate_overwrite_radius_km to recompute it here."
-                if "conv_feature_number" in missing else "")
+        hint = MISSING_CLUSTER_HINT if "cell_cluster_number" in missing else ""
         logger.critical(f"Cloudid file {cloudidfiles[0]} has no {missing}.{hint} Tracking will now exit.")
         sys.exit()
-    if overwrite_km is None:
-        conv_dilate_radius_km = idfeature_radius_km
-    else:
-        conv_dilate_radius_km = overwrite_km
-        idfeature_text = "no recorded radius" if idfeature_radius_km is None else f"{float(idfeature_radius_km):g} km"
-        logger.info(f"conv_feature_number recomputed from convsf at {overwrite_km:g} km (conv_dilate_overwrite_radius_km); "
-                    f"the cloudid files have {idfeature_text}")
+    if overwrite_km is not None:
+        logger.info(f"cell_cluster_number dilated further by {overwrite_km:g} km and labeled again (conv_dilate_overwrite_radius_km)")
         if config.get("rangemask_varname", None) is not None:
-            logger.warning("rangemask_varname is set: idfeature limits the dilation to the valid-data mask, the "
-                           "recomputed conv_feature_number does not (the mask is not stored in the cloudid files).")
+            logger.warning("rangemask_varname is set: the further dilation of the clusters does not use the valid-data mask "
+                           "(it is not stored in the cloudid files).")
 
     #########################################################################
     # Statistics of the merged mask, one cloudid file at a time
-    names = recomputed_variable_names(dbz_area_threshs)
+    names = recomputed_variable_names(dbz_area_threshs, with_conv_diameter_sum)
     # The flat entries of each cloudid file (all entries are in one row of a [1, nentries] array: the index in it is the entry)
     pair_index = match_pairs_to_files(basetime[None, :], cloudidfiles_basetime, match_pixel_dt_thresh)
     nslots = meta["dims"][sdim]
@@ -243,7 +242,7 @@ def compute_regionprops_rows(config):
     #########################################################################
     # Assign the recomputed variables (over the first-pass ones)
     builder = TableBuilder.from_tables(tables)
-    radius_text = ("" if conv_dilate_radius_km is None else f" by a disc of radius {float(conv_dilate_radius_km):g} km")
+    groups_text = cluster_groups_text(radii_expand_km, overwrite_km)
     for name in names:
         attrs = dict(meta["attrs"][name])
         attrs["comments"] = "Computed on the merged mask: the track's own feature plus the merge/split fragments folded into it"
@@ -254,13 +253,10 @@ def compute_regionprops_rows(config):
         if name == "conv_majoraxis":
             attrs["long_name"] = "Major axis length of the longest convective feature in the merged mask"
             attrs["comments"] = (
-                "Convective pixels (Steiner class 4) are grouped by conv_feature_number (dilated" + radius_text +
-                " and labeled); the major axis of a group is measured on the region inside the merged mask. "
+                "Convective pixels (Steiner class 4) are grouped by " + groups_text +
+                "; the major axis of a group is measured on the region inside the merged mask. "
                 "0 if the mask has no convective pixel."
             )
-            if overwrite_km is not None:
-                attrs["comments"] += (" The groups were recomputed by run_regionprops (conv_dilate_overwrite_radius_km), "
-                                      "not read from the cloudid files.")
             if track_classes is not None:
                 attrs["comments"] += subset_note
         # a track with no data holds NaN; with a subset of tracks the others keep their first-pass fill value
@@ -293,19 +289,20 @@ def compute_regionprops_rows(config):
     logger.info(f"Smoothed trajectory: {old_nan} NaN positions in the first pass, {new_nan} with the merged-mask centroid.")
 
     #########################################################################
-    # MCS criteria with the recomputed major axis and 45-dBZ area (the MCS flags themselves stay as decided
-    # by the first pass)
+    # MCS criteria with the recomputed size variable (major axis or conv_diameter_sum, see mcs_length_method) and 45-dBZ area
+    # (the MCS flags themselves stay as decided by the first pass)
+    length_varname = mcs_length_varname(params)
     area45_varname = config.get("mcs_dbz45_area_varname", "area_45dbz")
-    majoraxis, area45 = current("majoraxis"), current(area45_varname)
+    length, area45 = current(length_varname), current(area45_varname)
     is_mcs = tracks["is_mcs"].astype(bool)
     track_lifetime_hr = track_duration * time_resolution
     lost = gained = 0
     for nt in np.where((track_lifetime_hr >= params["mcs_duration_thresh"]) & select_track)[0]:
         sl = slice(offsets[nt], offsets[nt + 1])
-        _, now_mcs = identify_mcs_periods(majoraxis[sl], area45[sl], basetime[sl], time_resolution, params)
+        _, now_mcs = identify_mcs_periods_by_method(length[sl], area45[sl], basetime[sl], time_resolution, params)
         lost += int(is_mcs[nt] and not now_mcs)
         gained += int((not is_mcs[nt]) and now_mcs)
-    logger.info(f"With the merged-mask major axis and {area45_varname}: {lost} of the {int(is_mcs.sum())} MCS would "
+    logger.info(f"With the merged-mask {length_varname} and {area45_varname}: {lost} of the {int(is_mcs.sum())} MCS would "
                 f"no longer meet the MCS criteria and {gained} other tracks would (flags not changed).")
 
     #########################################################################
@@ -360,10 +357,7 @@ def compute_regionprops_rows(config):
                       "and lifecycle staging")
     attrs["mcs_lifecycle_thresh_hour"] = mcs_lifecycle_thresh
     attrs["mcs_lifecycle_smooth_hour"] = params["mcs_lifecycle_smooth_hour"]
-    if conv_dilate_radius_km is not None:
-        attrs["conv_dilate_radius_km"] = float(conv_dilate_radius_km)
-    if overwrite_km is not None and idfeature_radius_km is not None:
-        attrs["conv_dilate_radius_km_idfeature"] = float(idfeature_radius_km)
+    attrs.update(cluster_global_attrs(radii_expand_km, overwrite_km))
     if track_classes is not None:
         attrs["regionprops_track_classes"] = np.array(track_classes, dtype=np.int32)
     attrs["n_pairs_not_computed"] = n_missing
