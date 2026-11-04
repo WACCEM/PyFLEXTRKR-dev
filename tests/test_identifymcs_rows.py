@@ -251,9 +251,9 @@ def test_rows_step_equals_dense_step_on_random_tracks(tmp_path, seed):
 
 @pytest.mark.parametrize("seed", range(6))
 def test_rows_step_equals_dense_step_with_the_conv_diameter_sum_test(tmp_path, seed):
-    """mcs_length_method conv_diameter_sum: the same tracks are MCS in both modes, and not those of the major-axis test."""
+    """mcs_size_method conv_diameter_sum: the same tracks are MCS in both modes, and not those of the major-axis test."""
     stats_path = random_sparse_file(tmp_path, seed)
-    overrides = dict(mcs_length_method="conv_diameter_sum", mcs_length_thresh=100, nmaxlinks=1 + seed % 4)
+    overrides = dict(mcs_size_method="conv_diameter_sum", mcs_size_thresh=100, nmaxlinks=1 + seed % 4)
     dense, rows = run_both(stats_path, **overrides)
     assert table_differences(dense, rows) == []
     major_axis_rows = read_tables(identifymcs_radar_rows(dict(_make_driver_config(stats_path))))

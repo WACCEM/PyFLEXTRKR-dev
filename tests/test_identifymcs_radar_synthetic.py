@@ -17,7 +17,7 @@ from pyflextrkr.identifymcs_radar import (
     identify_mcs_periods,
     identify_mcs_periods_conv_diameter,
     identify_mcs_periods_by_method,
-    mcs_length_varname,
+    mcs_size_varname,
     mcs_params_from_config,
     find_mergesplit_parents,
     resolve_fragment_roots,
@@ -39,7 +39,7 @@ MCS_PARAMS = {
 }
 
 # The same criteria with the convective-cell size test
-MCS_PARAMS_DIAMETER = dict(MCS_PARAMS, mcs_length_method='conv_diameter_sum', mcs_length_thresh=100.0)
+MCS_PARAMS_DIAMETER = dict(MCS_PARAMS, mcs_size_method='conv_diameter_sum', mcs_size_thresh=100.0)
 
 
 # ---------------------------------------------------------------------------
@@ -175,47 +175,71 @@ class TestIdentifyMcsPeriodsConvDiameter:
         assert a[1] == b[1]
 
 
-class TestMcsLengthMethod:
-    def test_defaults_give_the_original_test(self):
-        """A config from before mcs_length_method existed: the major axis with mcs_majoraxis_thresh."""
+class TestMcsSizeMethod:
+    def test_no_size_key_gives_the_diameter_sum(self):
+        """The default definition: the sum of the circular-equivalent diameters of the convective cells, 100 km."""
+        params = mcs_params_from_config({})
+        assert params['mcs_size_method'] == 'conv_diameter_sum'
+        assert params['mcs_size_thresh'] == 100
+        assert mcs_size_varname(params) == 'conv_diameter_sum'
+
+    def test_legacy_key_without_method_keeps_the_major_axis(self):
+        """A config from before mcs_size_method existed (mcs_majoraxis_thresh only): the major axis, as it always gave."""
         params = mcs_params_from_config({'mcs_majoraxis_thresh': 80})
-        assert params['mcs_length_method'] == 'majoraxis'
-        assert params['mcs_length_thresh'] == 80
+        assert params['mcs_size_method'] == 'majoraxis'
+        assert params['mcs_size_thresh'] == 80
         assert params['mcs_majoraxis_thresh'] == 80
-        assert mcs_length_varname(params) == 'majoraxis'
-        assert mcs_params_from_config({})['mcs_length_thresh'] == 100
+        assert mcs_size_varname(params) == 'majoraxis'
+        # an explicit method wins over the legacy key
+        assert mcs_params_from_config({'mcs_size_method': 'conv_diameter_sum', 'mcs_majoraxis_thresh': 80})['mcs_size_method'] == 'conv_diameter_sum'
+
+    def test_the_first_names_of_the_keys_stop_with_a_message(self):
+        """mcs_length_method / mcs_length_thresh were renamed: a config that still has them must not be ignored silently."""
+        with pytest.raises(ValueError, match="mcs_length_method.*mcs_size_method"):
+            mcs_params_from_config({'mcs_length_method': 'majoraxis'})
+        with pytest.raises(ValueError, match="mcs_length_thresh.*mcs_size_thresh"):
+            mcs_params_from_config({'mcs_length_thresh': 100})
+
+    def test_log_line_says_which_test_runs_and_why(self):
+        from pyflextrkr.identifymcs_radar import mcs_size_test_text
+        text = mcs_size_test_text({}, mcs_params_from_config({}))
+        assert 'conv_diameter_sum >= 100 km' in text and 'the default' in text
+        legacy = {'mcs_majoraxis_thresh': 100}
+        assert 'major axis' in mcs_size_test_text(legacy, mcs_params_from_config(legacy))
+        explicit = {'mcs_size_method': 'majoraxis', 'mcs_size_thresh': 90}
+        assert mcs_size_test_text(explicit, mcs_params_from_config(explicit)) == 'MCS size test: majoraxis >= 90 km'
 
     def test_conv_diameter_sum_config(self):
-        params = mcs_params_from_config({'mcs_length_method': 'conv_diameter_sum', 'mcs_length_thresh': 120})
-        assert params['mcs_length_thresh'] == 120
-        assert mcs_length_varname(params) == 'conv_diameter_sum'
+        params = mcs_params_from_config({'mcs_size_method': 'conv_diameter_sum', 'mcs_size_thresh': 120})
+        assert params['mcs_size_thresh'] == 120
+        assert mcs_size_varname(params) == 'conv_diameter_sum'
         # the old key is not the threshold of the new method
-        assert mcs_params_from_config({'mcs_length_method': 'conv_diameter_sum', 'mcs_majoraxis_thresh': 50})['mcs_length_thresh'] == 50
+        assert mcs_params_from_config({'mcs_size_method': 'conv_diameter_sum', 'mcs_majoraxis_thresh': 50})['mcs_size_thresh'] == 50
 
-    def test_mcs_length_thresh_wins_for_majoraxis_too(self):
-        params = mcs_params_from_config({'mcs_length_thresh': 90, 'mcs_majoraxis_thresh': 100})
-        assert params['mcs_length_thresh'] == params['mcs_majoraxis_thresh'] == 90
+    def test_mcs_size_thresh_wins_for_majoraxis_too(self):
+        params = mcs_params_from_config({'mcs_size_thresh': 90, 'mcs_majoraxis_thresh': 100})
+        assert params['mcs_size_thresh'] == params['mcs_majoraxis_thresh'] == 90
 
     def test_unknown_method_raises(self):
         with pytest.raises(ValueError):
-            mcs_params_from_config({'mcs_length_method': 'diameter'})
+            mcs_params_from_config({'mcs_size_method': 'diameter'})
         with pytest.raises(ValueError):
-            mcs_length_varname({'mcs_length_method': 'diameter'})
+            mcs_size_varname({'mcs_size_method': 'diameter'})
 
     def test_dispatch(self):
         """A stratiform shield with small cores: 150 km major axis, 40 km of cell diameters."""
         n = 60
         length_major, length_diam = np.full(n, 150.0), np.full(n, 40.0)
         dbz45, basetime = np.full(n, 5.0), np.arange(n) * DT * 3600.0
-        major = mcs_params_from_config({})
-        diam = mcs_params_from_config({'mcs_length_method': 'conv_diameter_sum', 'mcs_length_thresh': 100})
+        major = mcs_params_from_config({'mcs_size_method': 'majoraxis'})
+        diam = mcs_params_from_config({'mcs_size_method': 'conv_diameter_sum', 'mcs_size_thresh': 100})
         assert identify_mcs_periods_by_method(length_major, dbz45, basetime, DT, major)[1]
         assert not identify_mcs_periods_by_method(length_diam, dbz45, basetime, DT, diam)[1]
-        assert identify_mcs_periods_by_method(length_diam, dbz45, basetime, DT, dict(diam, mcs_length_thresh=30))[1]
-        # params dicts written before mcs_length_method existed (like MCS_PARAMS) keep working
+        assert identify_mcs_periods_by_method(length_diam, dbz45, basetime, DT, dict(diam, mcs_size_thresh=30))[1]
+        # params dicts written before mcs_size_method existed (like MCS_PARAMS) keep working
         assert identify_mcs_periods_by_method(length_major, dbz45, basetime, DT, MCS_PARAMS)[1]
-        # the major-axis method honours mcs_length_thresh
-        assert not identify_mcs_periods_by_method(length_major, dbz45, basetime, DT, dict(major, mcs_length_thresh=200))[1]
+        # the major-axis method honours mcs_size_thresh
+        assert not identify_mcs_periods_by_method(length_major, dbz45, basetime, DT, dict(major, mcs_size_thresh=200))[1]
 
 
 # ---------------------------------------------------------------------------
@@ -904,36 +928,46 @@ class TestIdentifymcsRadarEndToEnd:
 
 
 class TestIdentifymcsRadarConvDiameter:
-    """The driver with mcs_length_method conv_diameter_sum (the sparse file's long track has 150 km major axis, 40 km of cells)."""
+    """The driver with mcs_size_method conv_diameter_sum (the sparse file's long track has 150 km major axis, 40 km of cells)."""
 
-    def test_major_axis_method_is_the_default_and_unchanged(self, tmp_path):
+    def test_a_config_with_the_legacy_key_keeps_the_major_axis_test(self, tmp_path):
         stats_path = _build_sparse_trackstats_file(tmp_path)
         config = _make_driver_config(stats_path)
         ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
         mcs = int(np.where(ds["track_duration"].values == 70)[0][0])
         assert ds["is_mcs"].values[mcs] == 1
-        assert ds.attrs["mcs_length_method"] == "majoraxis"
-        assert ds.attrs["mcs_length_thresh_km"] == 100
+        assert ds.attrs["mcs_size_method"] == "majoraxis"
+        assert ds.attrs["mcs_size_thresh_km"] == 100
         assert ds.attrs["mcs_majoraxis_thresh_km"] == 100
+
+    def test_a_config_without_a_size_key_runs_the_diameter_sum_test(self, tmp_path):
+        """The default definition: no mcs_size_method and no legacy key, the same file as the small-cells test."""
+        stats_path = _build_sparse_trackstats_file(tmp_path)
+        config = _make_driver_config(stats_path)
+        del config["mcs_majoraxis_thresh"]
+        ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
+        assert ds.attrs["mcs_size_method"] == "conv_diameter_sum"
+        assert ds.attrs["mcs_size_thresh_km"] == 100
+        assert np.all(ds["is_mcs"].values == 0)                 # 150 km major axis but 40 km of cell diameters
 
     def test_small_cells_in_a_long_feature_are_not_mcs(self, tmp_path):
         stats_path = _build_sparse_trackstats_file(tmp_path)
         config = _make_driver_config(stats_path)
-        config.update(mcs_length_method="conv_diameter_sum", mcs_length_thresh=100)
+        config.update(mcs_size_method="conv_diameter_sum", mcs_size_thresh=100)
         ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
         mcs = int(np.where(ds["track_duration"].values == 70)[0][0])
         assert np.all(ds["is_mcs"].values == 0)
         # three cells at every step: multi-cell; the one-cell track: single cell
         assert ds["track_class"].values[mcs] == CLASS_MULTICELL
         assert ds["track_class"].values[int(np.where(ds["track_duration"].values == 10)[0][0])] == CLASS_SINGLE_CELL
-        assert ds.attrs["mcs_length_method"] == "conv_diameter_sum"
-        assert ds.attrs["mcs_length_thresh_km"] == 100
+        assert ds.attrs["mcs_size_method"] == "conv_diameter_sum"
+        assert ds.attrs["mcs_size_thresh_km"] == 100
         assert "mcs_majoraxis_thresh_km" not in ds.attrs
 
     def test_lower_threshold_gives_the_mcs(self, tmp_path):
         stats_path = _build_sparse_trackstats_file(tmp_path)
         config = _make_driver_config(stats_path)
-        config.update(mcs_length_method="conv_diameter_sum", mcs_length_thresh=30)
+        config.update(mcs_size_method="conv_diameter_sum", mcs_size_thresh=30)
         ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
         mcs = int(np.where(ds["track_duration"].values == 70)[0][0])
         assert ds["is_mcs"].values[mcs] == 1
@@ -947,9 +981,9 @@ class TestIdentifymcsRadarConvDiameter:
         ds.close()
         ds.drop_vars("conv_diameter_sum").to_netcdf(sparse_file)
         config = _make_driver_config(stats_path)
-        config["mcs_length_method"] = "conv_diameter_sum"
+        config["mcs_size_method"] = "conv_diameter_sum"
         with pytest.raises(SystemExit):
             identifymcs_radar(config)
         # the major-axis method does not need the variable
-        config["mcs_length_method"] = "majoraxis"
+        config["mcs_size_method"] = "majoraxis"
         assert os.path.isfile(identifymcs_radar(config))

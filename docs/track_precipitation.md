@@ -8,9 +8,9 @@ The Parquet tables are written and read with `pyarrow` (a requirement of the pac
 
 | step | function | output |
 |---|---|---|
-| 1 | `trackpcp_driver.compute_track_precip` | a **new copy of the track statistics file** with the new variables appended (dense `tracks x times`, NaN where there is no record), and the same rows as a Parquet table |
+| 1 | `trackpcp_driver.compute_track_precip` | the same rows as a Parquet table; if the statistics of the run are a dense netCDF file also a **new copy of that file** with the new variables appended (dense `tracks x times`, NaN where there is no record); with `stats_format: rows` (a row folder only) the Parquet table is the output |
 | 2 | `trackpcp_driver.compute_track_pixel_accum` | `trackpcp_pixels_START_END.parquet` (one row per track and pixel: accumulated depth, rate in mm/day, largest hourly depth, number of windows), `trackpcp_metrics_START_END.parquet` (one row per track), `trackpcp_grid.nc` |
-| 3 | `trackpcp_driver.compute_class_maps` | `trackpcp_classmaps_START_END.nc`: `precip`, `cloud_count`, `precip_count` (and the convective / stratiform split) per class on the grid, `total_precip` |
+| 3 | `trackpcp_driver.compute_class_maps` | `trackpcp_classmaps_START_END.nc` (or `trackpcp_classmaps_YYYYMM.nc` per calendar month): `precip`, `cloud_count`, `precip_count` (and the convective / stratiform split) per class on the grid, `total_precip` |
 
 ```bash
 python runscripts/run_trackpcp.py tracking_config.yml config/config_mrms_trackpcp_example.yml --steps 1 2 3 [--year 2025 --month 5]
@@ -19,6 +19,34 @@ python Analysis/calc_monthly_rainmap_by_class.py tracking_config.yml config/conf
 
 `tracking_config.yml` supplies the paths and dates of the tracking run; the second YAML holds the `trackpcp_*` keys (override the first).
 `run_parallel` / `nprocesses` as in the tracking run scripts (0 serial, 1 LocalCluster, 2 existing scheduler).
+
+### As a step of the tracking run
+
+`run_trackpcp: True` in the config of `runscripts/run_mcs_radar3d.py` runs the three steps after `speed` (`trackpcp_driver.trackpcp_driver`), with the `trackpcp_*` keys of the same config
+and the Dask client of the run; the default is `False`, a run without the flag is unchanged. It takes part in the output checks and in `skip_completed_steps` like the other steps
+(`step_outputs.py`: the files that the steps asked for must exist and not be empty). Keys of the step:
+
+| key | default | meaning |
+|---|---|---|
+| `trackpcp_steps` | `[1, 2, 3]` | the steps to run, e.g. `[3]` for the class maps only |
+| `trackpcp_classmaps_by` | `period` | step 3: `period` = one `trackpcp_classmaps_START_END.nc` for the tracking period; `month` = one `trackpcp_classmaps_YYYYMM.nc` for every calendar month the period touches (the tracks are read once; the part of the month inside the period is used) |
+| `trackpcp_outdir` | the stats folder (`stats_outpath`) | where the outputs go, so a run keeps its own maps |
+
+Two days of the radar_feature MCS tracking (19,849 tracks, row-format statistics, QPE from the combined files): the step takes 0.54 min on one node with 32 workers and writes 5 files.
+
+### The data source
+
+`trackpcp_data_path` / `_filebase` / `_time_format` / `_varname` describe the files as for the tracking inputs. Two options for inputs that are not one file per record in one folder
+(`trackvar_io.NetCDFFileSource`, both default null = as before, and not combined with `trackpcp_data_time_varname`):
+
+- `trackpcp_data_subdir_format` (strftime, e.g. `'%Y%m%d'`): one folder per day below the path; only the folders of the period are listed;
+- `trackpcp_data_every_sec` (e.g. `3600`): only the files whose time is a multiple of it are records (the sharp-hour files of a 5-minute series).
+
+The MRMS case: the hourly QPE is the variable `QPE1h` of the sharp-hour files of the combined 5-minute input (`MRMS_HRRR_YYYYMMDD_hhmmss.nc` in day folders; the other 11 files of an hour do
+not have it), so no extra QPE copy is needed (`config/config_mrms_trackpcp_example.yml`). **The combined files store QPE1h as int16 with a scale of 0.1 mm**: a value of 0.95 to 0.999 mm
+in the one-file-per-hour product (float) is 1.0 here and passes `trackpcp_pcp_thresh: 1`. May 2025, new run, against the float files: the amounts agree (sum of `precip` 0.04 %, of
+`total_precip` 0.05 %; mean difference -0.00004 mm, largest 0.05 mm in the 3 hours compared), the counts at the 1 mm/h threshold are 3.6 % higher with the combined files
+(`precip_count`; 3.4 % in the pixels around the threshold of one hour); `cloud_count` is identical. Use the same source for runs that are compared.
 
 ## How data records and tracks are matched
 
@@ -77,7 +105,7 @@ of the window) is accumulated in `precip_uncovered` instead of being counted as 
 14-15 % of the August and September precipitation of the domain, 3-4 % in the other months).
 
 Classes (values and names) are read from the class variable of the statistics file (`trackpcp_class_varname`, default `track_class`; its `long_name` lists `value=name`).
-`trackpcp_classes` selects values; without a class variable all tracked features form one class. `precip_count` counts windows with the class present and a value of at
+`trackpcp_classes` selects values; without a class variable all tracked features form one class. A month (`--year --month` of `Analysis/calc_monthly_rainmap_by_class.py`, or `trackpcp_classmaps_by: month`) is cut to the tracking period of the config: two days of May give 48 windows, a month outside the period is an error. `precip_count` counts windows with the class present and a value of at
 least `trackpcp_pcp_thresh` (default 1 mm/h); frequency = count / `ntimes`.
 
 ## Parallel processing

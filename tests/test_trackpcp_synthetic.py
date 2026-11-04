@@ -353,3 +353,199 @@ def test_nearest_mode_with_5min_data(synthetic):
     # every step of every track has a value
     assert np.isfinite(ds["total_rain"].values[0, :NSTEP]).all()
     ds.close()
+
+
+def write_combined_tree(root, rain, nhour=NHOUR, name="combined"):
+    """
+    A 5-minute data set in one folder per day, like the combined MRMS input: a file every 5 minutes, only the sharp-hour files
+    carry the hourly variable QPE1h (the record at T covers (T - 1 h, T]), the others another variable.
+
+    Args:
+        root: Path
+            Folder to make the tree in.
+        rain: np.ndarray [nhour, ny, nx]
+            Hourly precipitation, hour h is the record valid at T0 + (h + 1) h.
+        nhour: int (default: NHOUR)
+            Number of hourly records.
+        name: string (default: 'combined')
+            Name of the folder of the tree.
+
+    Returns:
+        path: string, the folder (with a trailing slash)
+    """
+    path = root / name
+    for step in range(12 * nhour + 1):
+        t = T0 + 300 * step
+        day = path / time_string(t, "%Y%m%d")
+        day.mkdir(parents=True, exist_ok=True)
+        if step % 12 == 0:                                        # every sharp-hour file has the variable (the first: the hour before)
+            data = {"QPE1h": (("time", "y", "x"), rain[step // 12 - 1][None] if step > 0 else np.zeros((1, NY, NX), dtype=np.float32))}
+        else:
+            data = {"CompositeReflectivity": (("time", "y", "x"), np.zeros((1, NY, NX), dtype=np.float32))}
+        xr.Dataset(data, coords={"time": [0]}).to_netcdf(day / f"MRMS_HRRR_{time_string(t, '%Y%m%d_%H%M%S')}.nc")
+    return str(path) + "/"
+
+
+def test_file_source_in_day_folders_with_the_sharp_hour_files_only(tmp_path):
+    from pyflextrkr.trackvar_io import NetCDFFileSource, open_data_source
+    rain = np.arange(6, dtype=np.float32)[:, None, None] * np.ones((6, NY, NX), dtype=np.float32)
+    t_start = T0 + 22 * 3600                                   # the tree crosses midnight: 2025-05-01 22:00 ... 2025-05-02 04:00
+    shifted = np.array(rain)
+    path = tmp_path / "tree"
+    for step in range(12 * 6 + 1):
+        t = t_start + 300 * step
+        day = path / time_string(t, "%Y%m%d")
+        day.mkdir(parents=True, exist_ok=True)
+        var = {"QPE1h": (("time", "y", "x"), (shifted[step // 12 - 1] if step > 0 else -np.ones((NY, NX), dtype=np.float32))[None])} \
+            if step % 12 == 0 else {"Other": (("time", "y", "x"), np.zeros((1, NY, NX), dtype=np.float32))}
+        xr.Dataset(var, coords={"time": [0]}).to_netcdf(day / f"MRMS_HRRR_{time_string(t, '%Y%m%d_%H%M%S')}.nc")
+    kwargs = dict(time_format="yyyymodd_hhmmss", varname="QPE1h", subdir_format="%Y%m%d", every_sec=3600)
+    src = NetCDFFileSource(str(path) + "/", "MRMS_HRRR_", start_basetime=t_start, end_basetime=t_start + 6 * 3600, **kwargs)
+    # the records are the sharp hours of both days (not the 5-minute files): 22:00 of the first day to 04:00 of the second
+    expected = [t_start + 3600 * h for h in range(7)]
+    np.testing.assert_array_equal(src.times, expected)
+    assert src.nrecords == 7 and src.grid_shape == (NY, NX)
+    for i in range(7):
+        assert os.path.basename(src.filename(i)).startswith("MRMS_HRRR_") and float(src.read(i)[0, 0]) == float(i - 1)
+    # a time range inside one day lists only the records of the range
+    part = NetCDFFileSource(str(path) + "/", "MRMS_HRRR_", start_basetime=t_start + 3600 * 3, end_basetime=t_start + 3600 * 4, **kwargs)
+    np.testing.assert_array_equal(part.times, expected[3:5])
+    # the same source from the config keys
+    config = {"trackpcp_data_path": str(path), "trackpcp_data_filebase": "MRMS_HRRR_", "trackpcp_data_time_format": "yyyymodd_hhmmss",
+              "trackpcp_data_varname": "QPE1h", "trackpcp_data_subdir_format": "%Y%m%d", "trackpcp_data_every_sec": 3600}
+    cfg_src = open_data_source(config, t_start, t_start + 6 * 3600)
+    np.testing.assert_array_equal(cfg_src.times, expected)
+    # without the options every file is a record (the default is unchanged): a flat folder is read as before
+    with pytest.raises(Exception):
+        NetCDFFileSource(str(path) + "/", "MRMS_HRRR_", start_basetime=t_start, end_basetime=t_start + 7200, time_format="yyyymodd_hhmmss",
+                         varname="QPE1h").read(0)
+    # wrong combinations stop with a message
+    with pytest.raises(ValueError, match="time from the file name"):
+        NetCDFFileSource(str(path) + "/", "MRMS_HRRR_", time_varname="time", subdir_format="%Y%m%d")
+    with pytest.raises(ValueError, match="positive"):
+        NetCDFFileSource(str(path) + "/", "MRMS_HRRR_", every_sec=0)
+
+
+def test_class_maps_from_combined_files_equal_the_flat_source(synthetic):
+    """The same hourly precipitation as one file per record and as the sharp-hour files of 5-minute files in day folders."""
+    config = dict(synthetic["config"])
+    config["trackpcp_pcp_thresh"] = 5.0
+    flat = xr.open_dataset(D.compute_class_maps(config, outfile=str(synthetic["root"] / "out" / "flat_maps.nc")))
+    combined = dict(config)
+    combined.update({"trackpcp_data_path": write_combined_tree(synthetic["root"], synthetic["rain"]), "trackpcp_data_filebase": "MRMS_HRRR_",
+                     "trackpcp_data_time_format": "yyyymodd_hhmmss", "trackpcp_data_varname": "QPE1h",
+                     "trackpcp_data_subdir_format": "%Y%m%d", "trackpcp_data_every_sec": 3600})
+    got = xr.open_dataset(D.compute_class_maps(combined, outfile=str(synthetic["root"] / "out" / "combined_maps.nc")))
+    for name in ("precip", "cloud_count", "precip_count", "precip_conv", "precip_strat", "total_precip", "total_precip_count", "ntimes"):
+        np.testing.assert_array_equal(flat[name].values, got[name].values, err_msg=name)
+    assert int(got["ntimes"]) == NHOUR
+    flat.close()
+    got.close()
+    # one calendar month of the run: the data source is made for that month and the maps are the same
+    month = D.compute_class_maps(combined, year=2025, month=5, outfile=str(synthetic["root"] / "out" / "month_maps.nc"))
+    with xr.open_dataset(month) as m, xr.open_dataset(str(synthetic["root"] / "out" / "flat_maps.nc")) as ref:
+        assert int(m["ntimes"]) == NHOUR
+        np.testing.assert_array_equal(m["precip"].values, ref["precip"].values)
+
+
+def test_a_month_is_cut_to_the_tracking_period_and_a_month_outside_it_is_an_error(synthetic):
+    """A run of a few hours has the windows of those hours in its month maps, a month that it does not touch stops with a message."""
+    config = dict(synthetic["config"])
+    config["trackpcp_pcp_thresh"] = 5.0
+    out = synthetic["root"] / "out"
+    full = D.compute_class_maps(config, year=2025, month=5, outfile=str(out / "cut_full.nc"))
+    short = dict(config)
+    short["end_basetime"] = T0 + 2 * 3600                              # the first two hours of the three of the run
+    part = D.compute_class_maps(short, year=2025, month=5, outfile=str(out / "cut_short.nc"))
+    with xr.open_dataset(full) as a, xr.open_dataset(part) as b:
+        assert int(a["ntimes"]) == NHOUR and int(b["ntimes"]) == NHOUR - 1
+        assert float(b["total_precip"].sum()) < float(a["total_precip"].sum())
+    with pytest.raises(ValueError, match="outside the tracking period"):
+        D.compute_class_maps(config, year=2025, month=6, outfile=str(out / "cut_june.nc"))
+
+
+def test_step_1_with_row_statistics_makes_the_parquet_table_only(synthetic):
+    """stats_format: rows has no dense netCDF to copy: step 1 writes the Parquet table, the same rows as with the dense file."""
+    from pyflextrkr.rowstats import dense_to_rows, write_rows
+    from pyflextrkr.step_outputs import check_step_outputs
+    config = dict(synthetic["config"])
+    config.update({"trackpcp_outdir": str(synthetic["root"] / "dense_out"), "trackpcp_steps": [1]})
+    dense_file = D.stats_file_name(config, D.settings(config))
+    parquet = lambda c: D.track_precip_file(c, D.settings(c))[:-3] + ".parquet"
+    D.trackpcp_driver(config)
+    reference = pd.read_parquet(parquet(config))
+    # the same statistics as a row folder only (a row table has the entries of a track one after the other: the times are left-packed)
+    raw = xr.open_dataset(dense_file, mask_and_scale=False, decode_times=False).load()
+    packed = np.full(raw["base_time"].shape, np.nan)
+    for k, row in enumerate(raw["base_time"].values):
+        packed[k, :np.isfinite(row).sum()] = row[np.isfinite(row)]
+    raw["base_time"] = (("tracks", "times"), packed)
+    rows = dict(config)
+    rows["stats_outpath"] = str(synthetic["root"] / "rows_stats") + "/"
+    rows["trackpcp_outdir"] = str(synthetic["root"] / "rows_out")
+    write_rows(dense_to_rows(raw), D.stats_file_name(rows, D.settings(rows))[:-3] + ".rows")
+    assert not os.path.isfile(D.stats_file_name(rows, D.settings(rows)))
+    files = D.trackpcp_driver(rows)
+    assert files == [parquet(rows)] and os.listdir(rows["trackpcp_outdir"]) == [os.path.basename(parquet(rows))]
+    ok, message = check_step_outputs("trackpcp", rows)
+    assert ok and message == "1 files"
+    # the records are the same, the time index is the position in the left-packed row
+    got = pd.read_parquet(files[0])
+    assert len(got) == len(reference) and (got["track_number"].values == reference["track_number"].values).all()
+    pd.testing.assert_frame_equal(got.drop(columns="time_index"), reference.drop(columns="time_index"))
+
+
+def test_months_of_period_steps_and_settings():
+    t = lambda *a: calendar.timegm(datetime.datetime(*a).timetuple())
+    # the end of the period is not part of it: a year from January 1st to January 1st is 12 months
+    assert D.months_of_period({"start_basetime": t(2025, 1, 1), "end_basetime": t(2026, 1, 1)}) == [(2025, m) for m in range(1, 13)]
+    assert D.months_of_period({"start_basetime": t(2025, 11, 20, 6), "end_basetime": t(2026, 2, 1)}) == [(2025, 11), (2025, 12), (2026, 1)]
+    assert D.months_of_period({"start_basetime": t(2025, 5, 1), "end_basetime": t(2025, 5, 1, 3)}) == [(2025, 5)]
+    assert D.trackpcp_step_list({}) == [1, 2, 3] and D.trackpcp_step_list({"trackpcp_steps": [3, 1, 3]}) == [1, 3]
+    for bad in ([4], [0, 1], ["x"]):
+        with pytest.raises((ValueError, TypeError)):
+            D.trackpcp_step_list({"trackpcp_steps": bad})
+    assert D.classmaps_by({}) == "period" and D.classmaps_by({"trackpcp_classmaps_by": "month"}) == "month"
+    with pytest.raises(ValueError, match="period"):
+        D.classmaps_by({"trackpcp_classmaps_by": "year"})
+
+
+def test_the_pipeline_step_makes_its_outputs_by_month_and_the_check_sees_them(synthetic, monkeypatch):
+    from pyflextrkr.step_outputs import check_step_outputs
+    config = dict(synthetic["config"])
+    config.update({"trackpcp_outdir": str(synthetic["root"] / "step_out"), "trackpcp_out_filebase": "step_", "trackpcp_steps": [1, 2, 3],
+                   "trackpcp_classmaps_by": "month", "trackpcp_pcp_thresh": 5.0})
+    ok, message = check_step_outputs("trackpcp", config)
+    assert not ok and "missing" in message                                       # nothing made yet
+    files = D.trackpcp_driver(config)
+    names = [os.path.basename(f) for f in files]
+    assert names == ["step_20250501.0000_20250501.0300.nc", "step_20250501.0000_20250501.0300.parquet",
+                     "trackpcp_pixels_20250501.0000_20250501.0300.parquet", "trackpcp_metrics_20250501.0000_20250501.0300.parquet",
+                     "trackpcp_grid.nc", "trackpcp_classmaps_202505.nc"]
+    ok, message = check_step_outputs("trackpcp", config)
+    assert ok and message == "6 files"
+    # the month file is the file of the period (the whole run is inside May)
+    period = xr.open_dataset(D.compute_class_maps(config, outfile=str(synthetic["root"] / "step_out" / "period.nc")))
+    month = xr.open_dataset(files[-1])
+    for name in ("precip", "cloud_count", "precip_count", "total_precip", "ntimes"):
+        np.testing.assert_array_equal(period[name].values, month[name].values, err_msg=name)
+    period.close()
+    month.close()
+    os.remove(files[2])
+    ok, message = check_step_outputs("trackpcp", config)
+    assert not ok and "1 of 6" in message and "trackpcp_pixels_" in message
+    # step 3 alone, one file for the whole period (the default)
+    only3 = dict(config)
+    only3.update({"trackpcp_steps": [3], "trackpcp_classmaps_by": "period", "trackpcp_outdir": str(synthetic["root"] / "step_out3")})
+    assert [os.path.basename(f) for f in D.trackpcp_driver(only3)] == ["trackpcp_classmaps_20250501.0000_20250501.0300.nc"]
+    assert check_step_outputs("trackpcp", only3) == (True, "1 files")
+    # the statistics of the tracks are read once for all the months of a run
+    calls = []
+    real = D.open_tracks
+    monkeypatch.setattr(D, "open_tracks", lambda cfg, S: (calls.append(1), real(cfg, S))[1])
+    monkeypatch.setattr(D, "months_of_period", lambda cfg: [(2025, 5), (2025, 5), (2025, 5)])
+    D.compute_class_maps_monthly(only3)
+    assert len(calls) == 1
+    # a typo in the settings stops before any step runs
+    with pytest.raises(ValueError):
+        D.trackpcp_driver(dict(config, trackpcp_classmaps_by="week"))

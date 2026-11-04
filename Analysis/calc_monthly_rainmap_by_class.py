@@ -40,7 +40,7 @@ def main():
     ap.add_argument("--outfile", default=None)
     args = ap.parse_args()
 
-    config = load_config(args.tracking_config)
+    config = load_config(args.tracking_config, make_dirs=False)      # the tracking is only read: no folder is made in its root
     with open(args.trackpcp_config) as f:
         config.update(yaml.full_load(f))
     nworkers = args.workers if args.workers is not None else (config.get("nprocesses", 4) if config.get("run_parallel", 0) else 0)

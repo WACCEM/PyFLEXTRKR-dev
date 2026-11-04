@@ -24,7 +24,7 @@ import time
 import numpy as np
 
 from pyflextrkr.identifymcs_radar import (
-    classify_feature_class, classify_track_class, find_mergesplit_parents, identify_mcs_periods_by_method, mcs_length_varname,
+    classify_feature_class, classify_track_class, find_mergesplit_parents, identify_mcs_periods_by_method, mcs_size_test_text, mcs_size_varname,
     mcs_params_from_config, resolve_fragment_roots,
 )
 from pyflextrkr.rowstats import FRAGMENT_KINDS, TableBuilder, gather_index, load_sparse_entries, write_rows
@@ -225,6 +225,7 @@ def identifymcs_radar_rows(config):
     finalstats_min_area = config.get("finalstats_min_area", 0)
     finalstats_min_duration = config.get("finalstats_min_duration", None)
     params = mcs_params_from_config(config)
+    logger.info(mcs_size_test_text(config, params))
     mcs_merge_duration = config.get("mcs_merge_duration", 1.0)
     mcs_split_duration = config.get("mcs_split_duration", 1.0)
     statistics_file = f"{stats_path}{config['trackstats_sparse_filebase']}{startdate}_{enddate}.nc"
@@ -249,14 +250,14 @@ def identifymcs_radar_rows(config):
     end_merge_tracknumber = ds_1d["end_merge_tracknumber"].values.astype(float)
     start_split_tracknumber = ds_1d["start_split_tracknumber"].values.astype(float)
     track_lifetime_hr = track_duration * time_resolution
-    length_varname = mcs_length_varname(params)
-    if length_varname not in flat:
-        logger.critical(f"ERROR: mcs_length_method '{params['mcs_length_method']}' needs the variable '{length_varname}', which is "
-                        f"not in the trackstats file. Rerun run_trackstats, or set mcs_length_method: majoraxis. "
+    size_varname = mcs_size_varname(params)
+    if size_varname not in flat:
+        logger.critical(f"ERROR: mcs_size_method '{params['mcs_size_method']}' needs the variable '{size_varname}', which is "
+                        f"not in the trackstats file. Rerun run_trackstats, or set mcs_size_method: majoraxis. "
                         f"Available: {list(flat.keys())}")
         logger.critical("Tracking will now exit.")
         sys.exit()
-    length, dbz45, basetime, ncells = flat[length_varname], flat[mcs_dbz45_area_varname], flat["base_time"], flat["ncells"]
+    size, dbz45, basetime, ncells = flat[size_varname], flat[mcs_dbz45_area_varname], flat["base_time"], flat["ncells"]
     conv_area, strat_area, area = flat["conv_area"], flat["strat_area"], flat["area"]
     cloudnumber, track_status = flat["cloudnumber"], flat["track_status"]
 
@@ -273,7 +274,7 @@ def identifymcs_radar_rows(config):
         if ilength <= 0:
             continue
         sl = slice(offsets[nt], offsets[nt + 1])
-        mcs_status, track_is_mcs = identify_mcs_periods_by_method(length[sl], dbz45[sl], basetime[sl], time_resolution, params)
+        mcs_status, track_is_mcs = identify_mcs_periods_by_method(size[sl], dbz45[sl], basetime[sl], time_resolution, params)
         mcs_status_flat[sl] = mcs_status
         is_mcs[nt] = track_is_mcs
         feature_class = classify_feature_class(mcs_status, ncells[sl].astype(int), fillval)
@@ -281,7 +282,7 @@ def identifymcs_radar_rows(config):
         track_class[nt] = classify_track_class(feature_class, fillval)
     logger.info(f"Number of radar-defined MCS: {int(np.sum(is_mcs))}")
     if not is_mcs.any():
-        logger.warning("No MCS identified (per mcs_length_method/mcs_length_thresh/mcs_dbz45_area_thresh/mcs_duration_thresh). "
+        logger.warning("No MCS identified (per mcs_size_method/mcs_size_thresh/mcs_dbz45_area_thresh/mcs_duration_thresh). "
                        "Continuing - all non-fragment tracks are still kept and classified.")
 
     #########################################################################
@@ -345,11 +346,11 @@ def identifymcs_radar_rows(config):
     global_attrs = dict(ds_1d.attrs)
     global_attrs.update({
         "Title": "Final track statistics with radar-based MCS identification and classification",
-        "mcs_length_method": params['mcs_length_method'], "mcs_length_thresh_km": params['mcs_length_thresh'],
+        "mcs_size_method": params['mcs_size_method'], "mcs_size_thresh_km": params['mcs_size_thresh'],
         "mcs_dbz45_area_thresh_km2": params['mcs_dbz45_area_thresh'],
         "mcs_duration_thresh_hour": params['mcs_duration_thresh'], "Created_on": time.ctime(time.time()),
     })
-    if params['mcs_length_method'] == "majoraxis":
+    if params['mcs_size_method'] == "majoraxis":
         global_attrs["mcs_majoraxis_thresh_km"] = params['mcs_majoraxis_thresh']
     builder = TableBuilder(kept_duration, width, nslots=nmaxmerge, tracks_dim=tracks_dimname, times_dim=times_dimname,
                            global_attrs=global_attrs)

@@ -32,7 +32,7 @@ from netCDF4 import Dataset
 from pyflextrkr.ft_utilities import subset_files_timerange
 from pyflextrkr.step_timing import timed_step
 
-STEPS = ("idfeature", "tracksingle", "gettracks", "trackstats", "identifymcs", "regionprops", "mapfeature", "speed")
+STEPS = ("idfeature", "tracksingle", "gettracks", "trackstats", "identifymcs", "regionprops", "mapfeature", "speed", "trackpcp")
 
 
 def track_file_name(new_basetime, filebase="track_"):
@@ -375,9 +375,19 @@ def _check_speed(config, strict):
     return n_finite > 0, f"{n_finite} finite speeds"
 
 
+def _check_trackpcp(config, strict):
+    """The files of the steps in trackpcp_steps exist (the names come from trackpcp_driver.expected_outputs)."""
+    from pyflextrkr.trackpcp_driver import expected_outputs
+    files = expected_outputs(config)
+    missing = [f for f in files if not os.path.isfile(f) or os.path.getsize(f) == 0]
+    if missing:
+        return False, f"{len(missing)} of {len(files)} files are missing or empty, e.g. {missing[0]}"
+    return True, f"{len(files)} files"
+
+
 CHECKS = {"idfeature": _check_idfeature, "tracksingle": _check_tracksingle, "gettracks": _check_gettracks,
           "trackstats": _check_trackstats, "identifymcs": _check_identifymcs, "regionprops": _check_regionprops,
-          "mapfeature": _check_mapfeature, "speed": _check_speed}
+          "mapfeature": _check_mapfeature, "speed": _check_speed, "trackpcp": _check_trackpcp}
 
 
 def check_step_outputs(step, config, strict=True):
@@ -450,7 +460,7 @@ def run_step(step, config, state, func, client=None, **kwargs):
     return result
 
 
-STEPS_AFTER_TRACKSTATS = ("identifymcs", "regionprops", "mapfeature", "speed")
+STEPS_AFTER_TRACKSTATS = ("identifymcs", "regionprops", "mapfeature", "speed", "trackpcp")
 
 
 def _note_empty(step, config, state):

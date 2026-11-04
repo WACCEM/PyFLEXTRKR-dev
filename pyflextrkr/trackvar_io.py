@@ -36,7 +36,8 @@ def _epoch_seconds(values):
 
 class NetCDFFileSource:
     def __init__(self, path, filebase, time_format="yyyymodd_hhmmss", varname="precipitation", time_varname=None,
-                 start_basetime=None, end_basetime=None, scale=1.0, offset=0.0, time_dimname="time"):
+                 start_basetime=None, end_basetime=None, scale=1.0, offset=0.0, time_dimname="time", subdir_format=None,
+                 every_sec=None):
         """
         Args:
             path, filebase: directory and the leading characters of the file names (files are filebase*).
@@ -47,7 +48,17 @@ class NetCDFFileSource:
             start_basetime, end_basetime: only files inside this range [Epoch seconds] are listed (with
                 time_varname the files are filtered by the time of the file name when it can be parsed, so give margins).
             scale, offset: value = scale * data + offset.
+            subdir_format: strftime pattern of the sub-folders of path that hold the files, e.g. '%Y%m%d' for one folder per
+                day (default None: the files are directly in path). Only the folders of the days in the time range are read.
+                Only with the time from the file name (time_varname None).
+            every_sec: only the files whose time is a multiple of this many seconds are records (default None: all files), e.g.
+                3600 for the sharp-hour files of a 5-minute data set that carry an hourly variable. Only with the time from
+                the file name (time_varname None).
         """
+        if time_varname is not None and (subdir_format is not None or every_sec is not None):
+            raise ValueError("subdir_format and every_sec need the time from the file name (time_varname None)")
+        if every_sec is not None and not every_sec > 0:
+            raise ValueError(f"every_sec must be positive, not {every_sec}")
         self.varname = varname
         self.time_varname = time_varname
         self.time_dimname = time_dimname
@@ -57,7 +68,12 @@ class NetCDFFileSource:
         if time_varname is None:
             files, basetimes, _, _ = subset_files_timerange(
                 path, filebase, -np.inf if start_basetime is None else start_basetime,
-                np.inf if end_basetime is None else end_basetime, time_format=time_format)
+                np.inf if end_basetime is None else end_basetime, time_format=time_format, subdir_format=subdir_format)
+            basetimes = np.asarray(basetimes, dtype=float)
+            if every_sec is not None:
+                keep = np.abs(basetimes - np.round(basetimes / every_sec) * every_sec) < 0.5
+                files = [f for f, k in zip(files, keep) if k]
+                basetimes = basetimes[keep]
             order = np.argsort(basetimes, kind="stable")
             self._files = [files[i] for i in order]
             self.times = np.asarray(basetimes, dtype=float)[order]
@@ -153,7 +169,9 @@ def open_data_source(config, start_basetime=None, end_basetime=None):
     """
     Build the data source of the trackpcp steps from the config keys
     trackpcp_data_path, _data_filebase, _data_time_format, _data_varname, _data_format (null = auto: a path that ends in
-    .zarr is a Zarr store), _data_time_varname, _data_scale, _data_offset.
+    .zarr is a Zarr store), _data_time_varname, _data_scale, _data_offset, and for NetCDF files named by time
+    _data_subdir_format (strftime pattern of day or month folders, null = flat folder) and _data_every_sec (only the files whose
+    time is a multiple of it, null = all files).
     """
     path = config["trackpcp_data_path"]
     fmt = config.get("trackpcp_data_format", None)
@@ -169,7 +187,8 @@ def open_data_source(config, start_basetime=None, end_basetime=None):
         return NetCDFFileSource(
             path, config.get("trackpcp_data_filebase", ""), time_format=config.get("trackpcp_data_time_format", "yyyymodd_hhmmss"),
             varname=varname, time_varname=config.get("trackpcp_data_time_varname", None),
-            start_basetime=start_basetime, end_basetime=end_basetime, scale=scale, offset=offset)
+            start_basetime=start_basetime, end_basetime=end_basetime, scale=scale, offset=offset,
+            subdir_format=config.get("trackpcp_data_subdir_format", None), every_sec=config.get("trackpcp_data_every_sec", None))
     raise ValueError(f"trackpcp_data_format must be netcdf, zarr or null, not '{fmt}'")
 
 

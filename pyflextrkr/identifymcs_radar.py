@@ -7,7 +7,7 @@ keep EVERY tracked feature except short merge/split fragments, and attach a
 4-way classification (MCS / multi-cell / single-cell / stratiform) to
 every surviving track. The MCS definition itself is a size criterion (the sum of the
 circular-equivalent diameters of the convective cells in the feature, or the feature
-major axis, see mcs_length_method) + 45-dBZ area + duration. This is the first pass: the shape and extreme statistics are those of
+major axis, see mcs_size_method) + 45-dBZ area + duration. This is the first pass: the shape and extreme statistics are those of
 each track's own feature. regionprops_driver.py is the second pass that
 recomputes them on the merged mask (own feature + folded merge/split fragments)
 and stages the lifecycle (mcs_lifecycle.py).
@@ -37,12 +37,12 @@ CLASS_STRATIFORM = 4
 CLASS_ISOLATED_CELL = CLASS_SINGLE_CELL
 CLASS_NON_CONVECTIVE = CLASS_STRATIFORM
 
-# MCS size criterion: the track statistics variable that the test reads, by mcs_length_method
-LENGTH_METHOD_MAJORAXIS = "majoraxis"
-LENGTH_METHOD_CONV_DIAMETER_SUM = "conv_diameter_sum"
-MCS_LENGTH_VARNAMES = {
-    LENGTH_METHOD_MAJORAXIS: "majoraxis",
-    LENGTH_METHOD_CONV_DIAMETER_SUM: "conv_diameter_sum",
+# MCS size criterion: the track statistics variable that the test reads, by mcs_size_method
+SIZE_METHOD_MAJORAXIS = "majoraxis"
+SIZE_METHOD_CONV_DIAMETER_SUM = "conv_diameter_sum"
+MCS_SIZE_VARNAMES = {
+    SIZE_METHOD_MAJORAXIS: "majoraxis",
+    SIZE_METHOD_CONV_DIAMETER_SUM: "conv_diameter_sum",
 }
 
 
@@ -106,7 +106,7 @@ def identify_mcs_periods(majoraxis, dbz45_area, basetime, time_resolution, param
     """
     Per-track MCS test with the feature major axis (convective + stratiform): majoraxis >= mcs_majoraxis_thresh and
     dbz45_area > mcs_dbz45_area_thresh, sustained for at least mcs_duration_thresh, bridging gaps up to mcs_gap_hour.
-    The original test, kept as the backup of identify_mcs_periods_conv_diameter (mcs_length_method: majoraxis).
+    The original test, kept as the backup of identify_mcs_periods_conv_diameter (mcs_size_method: majoraxis).
 
     Args:
         majoraxis, dbz45_area: 1D np.array, this track's own time series
@@ -137,7 +137,7 @@ def identify_mcs_periods(majoraxis, dbz45_area, basetime, time_resolution, param
 
 def identify_mcs_periods_conv_diameter(conv_diameter_sum, dbz45_area, basetime, time_resolution, params):
     """
-    Per-track MCS test with the convective cells: conv_diameter_sum >= mcs_length_thresh and
+    Per-track MCS test with the convective cells: conv_diameter_sum >= mcs_size_thresh and
     dbz45_area > mcs_dbz45_area_thresh, sustained for at least mcs_duration_thresh, bridging gaps up to mcs_gap_hour.
     conv_diameter_sum is the sum over the convective cells of a feature of their circular-equivalent
     diameters 2*sqrt(A_i/pi) [km] (trackstats_func.py).
@@ -147,7 +147,7 @@ def identify_mcs_periods_conv_diameter(conv_diameter_sum, dbz45_area, basetime, 
             (already trimmed to its own track_duration; NaN treated as not meeting the criteria).
         basetime: 1D np.array, Epoch seconds, same length.
         time_resolution: float [hour]
-        params: dict with mcs_length_thresh, mcs_dbz45_area_thresh, mcs_duration_thresh, mcs_gap_hour.
+        params: dict with mcs_size_thresh, mcs_dbz45_area_thresh, mcs_duration_thresh, mcs_gap_hour.
 
     Returns:
         mcs_status: 1D np.array(int16), 1 where this time is part of a qualifying MCS period, 0 otherwise.
@@ -158,50 +158,51 @@ def identify_mcs_periods_conv_diameter(conv_diameter_sum, dbz45_area, basetime, 
         return np.zeros(0, dtype=np.int16), False
 
     meets_criteria = (
-        np.nan_to_num(conv_diameter_sum, nan=-1.0) >= params['mcs_length_thresh']
+        np.nan_to_num(conv_diameter_sum, nan=-1.0) >= params['mcs_size_thresh']
     ) & (
         np.nan_to_num(dbz45_area, nan=-1.0) > params['mcs_dbz45_area_thresh']
     )
     return _mcs_periods(meets_criteria, basetime, time_resolution, params)
 
 
-def mcs_length_varname(params):
+def mcs_size_varname(params):
     """
     Name of the track statistics variable that the MCS size test reads.
 
     Args:
-        params: dict, from mcs_params_from_config (mcs_length_method; absent = 'majoraxis').
+        params: dict, from mcs_params_from_config (mcs_size_method). A params dict without the key is one written before the
+            key existed (only mcs_majoraxis_thresh): the major axis.
 
     Returns:
         string: 'conv_diameter_sum' or 'majoraxis'.
 
     Raises:
-        ValueError: unknown mcs_length_method.
+        ValueError: unknown mcs_size_method.
     """
-    method = params.get('mcs_length_method', LENGTH_METHOD_MAJORAXIS)
-    if method not in MCS_LENGTH_VARNAMES:
-        raise ValueError(f"mcs_length_method '{method}' is not one of {sorted(MCS_LENGTH_VARNAMES)}")
-    return MCS_LENGTH_VARNAMES[method]
+    method = params.get('mcs_size_method', SIZE_METHOD_MAJORAXIS)
+    if method not in MCS_SIZE_VARNAMES:
+        raise ValueError(f"mcs_size_method '{method}' is not one of {sorted(MCS_SIZE_VARNAMES)}")
+    return MCS_SIZE_VARNAMES[method]
 
 
-def identify_mcs_periods_by_method(length, dbz45_area, basetime, time_resolution, params):
+def identify_mcs_periods_by_method(size, dbz45_area, basetime, time_resolution, params):
     """
-    Per-track MCS test selected by params['mcs_length_method']: 'conv_diameter_sum' (identify_mcs_periods_conv_diameter,
-    threshold mcs_length_thresh) or 'majoraxis' (identify_mcs_periods, the original test; threshold mcs_length_thresh if
+    Per-track MCS test selected by params['mcs_size_method']: 'conv_diameter_sum' (identify_mcs_periods_conv_diameter,
+    threshold mcs_size_thresh) or 'majoraxis' (identify_mcs_periods, the earlier definition; threshold mcs_size_thresh if
     set, else mcs_majoraxis_thresh).
 
     Args:
-        length: 1D np.array, this track's own series of the variable mcs_length_varname(params) names.
+        size: 1D np.array, this track's own series of the variable mcs_size_varname(params) names.
         dbz45_area, basetime, time_resolution, params: as in identify_mcs_periods.
 
     Returns:
         mcs_status, is_mcs: as in identify_mcs_periods.
     """
-    if mcs_length_varname(params) == "conv_diameter_sum":
-        return identify_mcs_periods_conv_diameter(length, dbz45_area, basetime, time_resolution, params)
-    if 'mcs_length_thresh' in params:
-        params = dict(params, mcs_majoraxis_thresh=params['mcs_length_thresh'])
-    return identify_mcs_periods(length, dbz45_area, basetime, time_resolution, params)
+    if mcs_size_varname(params) == "conv_diameter_sum":
+        return identify_mcs_periods_conv_diameter(size, dbz45_area, basetime, time_resolution, params)
+    if 'mcs_size_thresh' in params:
+        params = dict(params, mcs_majoraxis_thresh=params['mcs_size_thresh'])
+    return identify_mcs_periods(size, dbz45_area, basetime, time_resolution, params)
 
 
 # ---------------------------------------------------------------------------
@@ -535,18 +536,23 @@ def mcs_params_from_config(config):
     MCS criteria and lifecycle staging parameters from the config, with their defaults (shared by
     identifymcs_radar and regionprops_driver).
     """
-    # MCS size criterion: mcs_length_method 'majoraxis' (feature major axis, the original test; the default) or
-    # 'conv_diameter_sum' (sum of the circular-equivalent diameters of the convective cells). mcs_length_thresh [km] is the
-    # threshold of either; when it is absent the old key mcs_majoraxis_thresh (default 100) is used, so configs written before
-    # mcs_length_method existed give the same MCS.
-    length_method = config.get("mcs_length_method", LENGTH_METHOD_MAJORAXIS)
-    if length_method not in MCS_LENGTH_VARNAMES:
-        raise ValueError(f"mcs_length_method '{length_method}' is not one of {sorted(MCS_LENGTH_VARNAMES)}")
-    length_thresh = config.get("mcs_length_thresh", config.get("mcs_majoraxis_thresh", 100))
+    # MCS size criterion: mcs_size_method 'conv_diameter_sum' (the default: the sum of the circular-equivalent diameters of the
+    # convective cells of the feature) or 'majoraxis' (the major axis of the whole feature, the earlier definition).
+    # mcs_size_thresh [km] is the threshold of either; when it is absent the legacy key mcs_majoraxis_thresh (default 100) is used.
+    # A config that has the legacy key mcs_majoraxis_thresh and no mcs_size_method is an earlier config: it keeps the major-axis
+    # test, so the runs of those configs are unchanged. The first names of the two keys were mcs_length_*: stop instead of ignoring them.
+    for old_key, new_key in (("mcs_length_method", "mcs_size_method"), ("mcs_length_thresh", "mcs_size_thresh")):
+        if old_key in config:
+            raise ValueError(f"The config key '{old_key}' was renamed to '{new_key}': change it in the config")
+    default_method = SIZE_METHOD_MAJORAXIS if "mcs_majoraxis_thresh" in config else SIZE_METHOD_CONV_DIAMETER_SUM
+    size_method = config.get("mcs_size_method", default_method)
+    if size_method not in MCS_SIZE_VARNAMES:
+        raise ValueError(f"mcs_size_method '{size_method}' is not one of {sorted(MCS_SIZE_VARNAMES)}")
+    size_thresh = config.get("mcs_size_thresh", config.get("mcs_majoraxis_thresh", 100))
     return {
-        'mcs_length_method': length_method,
-        'mcs_length_thresh': length_thresh,
-        'mcs_majoraxis_thresh': length_thresh if length_method == LENGTH_METHOD_MAJORAXIS
+        'mcs_size_method': size_method,
+        'mcs_size_thresh': size_thresh,
+        'mcs_majoraxis_thresh': size_thresh if size_method == SIZE_METHOD_MAJORAXIS
         else config.get("mcs_majoraxis_thresh", 100),
         'mcs_dbz45_area_thresh': config.get("mcs_dbz45_area_thresh", 0),
         'mcs_duration_thresh': config.get("mcs_duration_thresh", 4),
@@ -558,6 +564,27 @@ def mcs_params_from_config(config):
         'mcs_lifecycle_sf_area_min': config.get("mcs_lifecycle_sf_area_min", 0),
         'mcs_lifecycle_smooth_hour': config.get("mcs_lifecycle_smooth_hour", 0.5),
     }
+
+
+def mcs_size_test_text(config, params):
+    """
+    One line for the log that says which MCS size test runs.
+
+    Args:
+        config: dict
+            Loaded config.
+        params: dict
+            Output of mcs_params_from_config(config).
+
+    Returns:
+        text: string, the method and the threshold, and the reason when mcs_size_method is not in the config (the default
+            definition, or the major axis because of the legacy key mcs_majoraxis_thresh).
+    """
+    text = f"MCS size test: {params['mcs_size_method']} >= {params['mcs_size_thresh']} km"
+    if "mcs_size_method" not in config:
+        text += (" (mcs_size_method not set: earlier config with mcs_majoraxis_thresh keeps the major axis)"
+                 if "mcs_majoraxis_thresh" in config else " (mcs_size_method not set: the default)")
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +639,7 @@ def identifymcs_radar(config):
     finalstats_min_duration = config.get("finalstats_min_duration", None)
 
     params = mcs_params_from_config(config)
+    logger.info(mcs_size_test_text(config, params))
     mcs_merge_duration = config.get("mcs_merge_duration", 1.0)
     mcs_split_duration = config.get("mcs_split_duration", 1.0)
 
@@ -649,15 +677,15 @@ def identifymcs_radar(config):
     start_split_tracknumber = ds_1d["start_split_tracknumber"].values.astype(float)
     track_lifetime_hr = track_duration * time_resolution
 
-    length_varname = mcs_length_varname(params)
-    if length_varname not in sparse_dict:
+    size_varname = mcs_size_varname(params)
+    if size_varname not in sparse_dict:
         logger.critical(
-            f"ERROR: mcs_length_method '{params['mcs_length_method']}' needs the variable '{length_varname}', which is not in "
-            f"the trackstats file. Rerun run_trackstats, or set mcs_length_method: majoraxis. Available: {list(sparse_dict.keys())}"
+            f"ERROR: mcs_size_method '{params['mcs_size_method']}' needs the variable '{size_varname}', which is not in "
+            f"the trackstats file. Rerun run_trackstats, or set mcs_size_method: majoraxis. Available: {list(sparse_dict.keys())}"
         )
         logger.critical("Tracking will now exit.")
         sys.exit()
-    length_2d = sparse_dict[length_varname].toarray()
+    size_2d = sparse_dict[size_varname].toarray()
     dbz45_2d = sparse_dict[mcs_dbz45_area_varname].toarray()
     basetime_2d = sparse_dict["base_time"].toarray()
     ncells_2d = sparse_dict["ncells"].toarray()
@@ -680,13 +708,13 @@ def identifymcs_radar(config):
         if ilength <= 0:
             continue
 
-        t_length = length_2d[nt, 0:ilength]
+        t_size = size_2d[nt, 0:ilength]
         t_dbz45 = dbz45_2d[nt, 0:ilength]
         t_basetime = basetime_2d[nt, 0:ilength]
         t_ncells = ncells_2d[nt, 0:ilength]
 
         mcs_status, track_is_mcs = identify_mcs_periods_by_method(
-            t_length, t_dbz45, t_basetime, time_resolution, params,
+            t_size, t_dbz45, t_basetime, time_resolution, params,
         )
         mcs_status_2d[nt, 0:ilength] = mcs_status
         is_mcs[nt] = track_is_mcs
@@ -699,7 +727,7 @@ def identifymcs_radar(config):
     logger.info(f"Number of radar-defined MCS: {n_mcs}")
     if n_mcs == 0:
         logger.warning(
-            "No MCS identified (per mcs_length_method/mcs_length_thresh/mcs_dbz45_area_thresh/"
+            "No MCS identified (per mcs_size_method/mcs_size_thresh/mcs_dbz45_area_thresh/"
             "mcs_duration_thresh). Continuing - all non-fragment tracks are "
             "still kept and classified."
         )
@@ -901,9 +929,9 @@ def identifymcs_radar(config):
     dsout = xr.merge([dsout, ds_vars], compat="override", combine_attrs="no_conflicts")
 
     dsout.attrs["Title"] = "Final track statistics with radar-based MCS identification and classification"
-    dsout.attrs["mcs_length_method"] = params['mcs_length_method']
-    dsout.attrs["mcs_length_thresh_km"] = params['mcs_length_thresh']
-    if params['mcs_length_method'] == LENGTH_METHOD_MAJORAXIS:
+    dsout.attrs["mcs_size_method"] = params['mcs_size_method']
+    dsout.attrs["mcs_size_thresh_km"] = params['mcs_size_thresh']
+    if params['mcs_size_method'] == SIZE_METHOD_MAJORAXIS:
         dsout.attrs["mcs_majoraxis_thresh_km"] = params['mcs_majoraxis_thresh']
     dsout.attrs["mcs_dbz45_area_thresh_km2"] = params['mcs_dbz45_area_thresh']
     dsout.attrs["mcs_duration_thresh_hour"] = params['mcs_duration_thresh']

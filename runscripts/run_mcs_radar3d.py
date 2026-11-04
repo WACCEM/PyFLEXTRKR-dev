@@ -21,6 +21,9 @@ the HRRR 3-km grid. No Tb, no PF-linking, no SL3D - the MCS definition and
 convective/stratiform classification come entirely from the reflectivity
 field itself (see pyflextrkr/idfeature_radar3d.py).
 
+Steps (each with its run_<step> flag): idfeature, tracksingle, gettracks, trackstats, identifymcs, regionprops, mapfeature, speed, and the
+optional trackpcp (precipitation by feature class, off by default).
+
 Usage:
     python run_mcs_radar3d.py config.yml                  # serial or LocalCluster (run_parallel: 0 or 1)
     python run_mcs_radar3d.py config.yml scheduler_file    # Dask distributed (run_parallel: 2)
@@ -114,6 +117,13 @@ if __name__ == '__main__':
     # Step 8 - Movement speed calculation
     # (reads mcsrobust_filebase, writes mcsfinal_filebase)
     run_step('speed', config, state, speed_step, client)
+
+    # Step 9 - Optional: a gridded variable that is not part of the tracking (e.g. hourly precipitation) by tracked feature class:
+    # statistics per track, accumulation per pixel, maps per class (run_trackpcp, the trackpcp_* keys, pyflextrkr/trackpcp_driver.py;
+    # reads mcsrobust_filebase unless trackpcp_stats_filebase says otherwise, e.g. mcs_tracks_final_). The import is here so that a run without it is unchanged.
+    if config.get('run_trackpcp', False):
+        from pyflextrkr.trackpcp_driver import trackpcp_driver
+        run_step('trackpcp', config, state, trackpcp_driver, client)
 
     # Clean up resources
     if run_parallel >= 1:

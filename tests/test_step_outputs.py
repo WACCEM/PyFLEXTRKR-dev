@@ -294,3 +294,19 @@ def test_an_empty_period_needs_no_dense_trackstats_file(tmp_path):
     write_empty_trackstats_sparse(config, _stats_path(config, "trackstats_sparse_"))
     config = dict(config, trackstats_dense_netcdf=1)
     assert so.check_step_outputs("trackstats", config) == (True, so.EMPTY_NOTE)
+
+
+def test_trackpcp_is_an_optional_step_that_is_off_by_default_and_skipped_for_an_empty_period():
+    from pyflextrkr import step_outputs
+    assert step_outputs.STEPS[-1] == "trackpcp" and "trackpcp" in step_outputs.STEPS_AFTER_TRACKSTATS
+    calls = []
+    func = lambda config: calls.append(config.get("tag"))
+    # the flag is off: not run
+    assert step_outputs.run_step("trackpcp", {"tag": "a", "verify_step_outputs": False}, {"stale": False}, func) is None and calls == []
+    # on: runs once; an empty period (no tracked feature) skips it
+    step_outputs.run_step("trackpcp", {"tag": "b", "run_trackpcp": True, "verify_step_outputs": False}, {"stale": False}, func)
+    step_outputs.run_step("trackpcp", {"tag": "c", "run_trackpcp": True, "verify_step_outputs": False}, {"stale": False, "empty": True}, func)
+    assert calls == ["b"]
+    # the output check of an unknown step is still an error; the check of this one asks for the files of its steps
+    with pytest.raises(ValueError):
+        step_outputs.check_step_outputs("nothing", {})

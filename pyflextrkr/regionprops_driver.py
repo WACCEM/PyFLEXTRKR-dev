@@ -9,7 +9,7 @@ import dask
 from pyflextrkr.ft_utilities import subset_files_timerange, match_pairs_to_files
 from pyflextrkr.smooth_trajectory import smooth_trajectory
 from pyflextrkr.mcs_lifecycle import classify_lifecycle
-from pyflextrkr.identifymcs_radar import identify_mcs_periods_by_method, mcs_length_varname, mcs_params_from_config
+from pyflextrkr.identifymcs_radar import identify_mcs_periods_by_method, mcs_size_varname, mcs_params_from_config
 from pyflextrkr.regionprops_func import (
     regionprops_singlefile, recomputed_variable_names, conv_dilate_overwrite_km, track_classes_from_config,
     cluster_groups_text, cluster_global_attrs, cluster_radii_from_cloudid,
@@ -282,9 +282,9 @@ def compute_regionprops(config):
     logger.info(f"Smoothed trajectory: {old_nan} NaN positions in the first pass, {new_nan} with the merged-mask centroid.")
 
     #########################################################################
-    # MCS criteria with the recomputed size variable (major axis or conv_diameter_sum, see mcs_length_method) and 45-dBZ area
+    # MCS criteria with the recomputed size variable (major axis or conv_diameter_sum, see mcs_size_method) and 45-dBZ area
     # (the MCS flags themselves stay as decided by the first pass)
-    length_varname = mcs_length_varname(params)
+    size_varname = mcs_size_varname(params)
     area45_varname = config.get("mcs_dbz45_area_varname", "area_45dbz")
     is_mcs = ds["is_mcs"].values.astype(bool)
     track_lifetime_hr = track_duration * time_resolution
@@ -292,12 +292,12 @@ def compute_regionprops(config):
     for nt in np.where((track_lifetime_hr >= params["mcs_duration_thresh"]) & select_track)[0]:
         n = int(track_duration[nt])
         _, now_mcs = identify_mcs_periods_by_method(
-            ds[length_varname].values[nt, :n], ds[area45_varname].values[nt, :n], basetime[nt, :n],
+            ds[size_varname].values[nt, :n], ds[area45_varname].values[nt, :n], basetime[nt, :n],
             time_resolution, params,
         )
         lost += int(is_mcs[nt] and not now_mcs)
         gained += int((not is_mcs[nt]) and now_mcs)
-    logger.info(f"With the merged-mask {length_varname} and {area45_varname}: {lost} of the {int(is_mcs.sum())} MCS would "
+    logger.info(f"With the merged-mask {size_varname} and {area45_varname}: {lost} of the {int(is_mcs.sum())} MCS would "
                 f"no longer meet the MCS criteria and {gained} other tracks would (flags not changed).")
 
     #########################################################################

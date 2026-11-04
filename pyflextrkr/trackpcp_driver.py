@@ -103,6 +103,95 @@ def settings(config):
     return S
 
 
+def stats_file_name(config, S):
+    """The track statistics file of the run: the dense netCDF name (a row folder of the same name with .rows may be all there is)."""
+    return f"{config['stats_outpath']}{S['stats_filebase']}{config['startdate']}_{config['enddate']}.nc"
+
+
+def track_precip_file(config, S):
+    """
+    Step 1 output: the track statistics with the new variables (the Parquet table has the same name with .parquet). The netCDF is
+    only made if the statistics of the run exist as a dense netCDF file; with stats_format: rows (a row folder only) the Parquet
+    table, which is a row table, is the output.
+    """
+    return f"{S['outdir']}{S['out_filebase']}{config['startdate']}_{config['enddate']}.nc"
+
+
+def pixel_accum_files(config, S):
+    """Step 2 outputs: the pixel table, the metrics table (Parquet) and the grid file."""
+    tag = f"{config['startdate']}_{config['enddate']}"
+    return [f"{S['outdir']}trackpcp_pixels_{tag}.parquet", f"{S['outdir']}trackpcp_metrics_{tag}.parquet", f"{S['outdir']}trackpcp_grid.nc"]
+
+
+def classmap_file(config, S, year=None, month=None):
+    """Step 3 output: one file for the tracking period, or for one calendar month (year, month)."""
+    tag = f"{year}{int(month):02d}" if year is not None else f"{config['startdate']}_{config['enddate']}"
+    return f"{S['outdir']}trackpcp_classmaps_{tag}.nc"
+
+
+def months_of_period(config):
+    """
+    The calendar months that the tracking period [start_basetime, end_basetime) touches.
+
+    Args:
+        config: dictionary
+            Loaded config (start_basetime, end_basetime [Epoch seconds]; the end is not part of the period).
+
+    Returns:
+        months: list of (year, month), in time order
+    """
+    import datetime
+    t0 = datetime.datetime.fromtimestamp(float(config["start_basetime"]), datetime.timezone.utc)
+    t1 = datetime.datetime.fromtimestamp(float(config["end_basetime"]), datetime.timezone.utc)
+    months, (y, m) = [], (t0.year, t0.month)
+    while datetime.datetime(y, m, 1, tzinfo=datetime.timezone.utc) < t1:
+        months.append((y, m))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return months
+
+
+def trackpcp_step_list(config):
+    """The steps of the pipeline step trackpcp: trackpcp_steps (default [1, 2, 3]); ValueError for a value other than 1, 2, 3."""
+    steps = [int(v) for v in config.get("trackpcp_steps", None) or [1, 2, 3]]
+    if not steps or any(v not in (1, 2, 3) for v in steps):
+        raise ValueError(f"trackpcp_steps must be a list of 1, 2 and 3, not {config.get('trackpcp_steps')!r}")
+    return sorted(set(steps))
+
+
+def classmaps_by(config):
+    """trackpcp_classmaps_by: 'period' (default, one class-map file) or 'month' (one file per calendar month); ValueError otherwise."""
+    by = config.get("trackpcp_classmaps_by", "period")
+    if by not in ("period", "month"):
+        raise ValueError(f"trackpcp_classmaps_by must be 'period' or 'month', not {by!r}")
+    return by
+
+
+def expected_outputs(config):
+    """
+    The files that the steps of trackpcp_steps make (what the output check of the pipeline step asks for).
+
+    Args:
+        config: dictionary
+            Loaded config.
+
+    Returns:
+        files: list of strings
+    """
+    S = settings(config)
+    files = []
+    for step in trackpcp_step_list(config):
+        if step == 1:
+            nc = track_precip_file(config, S)
+            files += ([nc] if os.path.isfile(stats_file_name(config, S)) else []) + [nc[:-3] + ".parquet"]
+        elif step == 2:
+            files += pixel_accum_files(config, S)
+        elif classmaps_by(config) == "month":
+            files += [classmap_file(config, S, y, m) for y, m in months_of_period(config)]
+        else:
+            files.append(classmap_file(config, S))
+    return files
+
+
 def _pixel_files(config, S):
     files, basetimes, _, _ = subset_files_timerange(
         config["pixeltracking_outpath"], S["pixel_filebase"], config["start_basetime"], config["end_basetime"],
@@ -114,7 +203,7 @@ def _pixel_files(config, S):
 def open_tracks(config, S):
     """Track statistics file (dense netCDF or row folder), the base times and the class information."""
     logger = logging.getLogger(__name__)
-    stats_file = f"{config['stats_outpath']}{S['stats_filebase']}{config['startdate']}_{config['enddate']}.nc"
+    stats_file = stats_file_name(config, S)
     if not stats_exists(stats_file):
         logger.critical(f"{stats_file} not found. Tracking will now exit.")
         sys.exit(1)
@@ -259,9 +348,12 @@ def _check_failures(failed, ntasks, what):
         sys.exit(1)
 
 
-def _source_for(config, S):
+def _source_for(config, S, period=None):
+    """Data source of the steps: the records of the tracking period, or of period = (start, end) [Epoch seconds] if given
+    (a month of a year run does not list the data records of the whole year)."""
     margin = S["window_sec"] + (S["tolerance_sec"] or 0.0) + 1.0
-    return open_data_source(config, config["start_basetime"] - margin, config["end_basetime"] + margin)
+    start, end = (config["start_basetime"], config["end_basetime"]) if period is None else period
+    return open_data_source(config, start - margin, end + margin)
 
 
 ########################################################################################################################
@@ -339,16 +431,17 @@ def compute_track_precip(config):
 
     Each data record is stored at one tracking step of each track present in its window (the step nearest the data time
     inside the window), NaN at the other steps; pcp_nsteps and pcp_time say how many steps the record covers and when
-    it is valid. The same rows are written as a Parquet table (output file name with .parquet).
+    it is valid. The same rows are written as a Parquet table (output file name with .parquet). The netCDF file is only made if
+    the statistics of the run are a dense netCDF file; with stats_format: rows the Parquet table is the output.
 
-    Returns the output file name.
+    Returns the output file name (the netCDF name, also when only the Parquet table was written).
     """
     logger = logging.getLogger(__name__)
     S = settings(config)
     t0 = time.time()
     logger.info("Track-matched statistics: reading the tracks and planning the windows")
     T = open_tracks(config, S)
-    source = _source_for(config, S)
+    source = _source_for(config, S, S["period"])
     pixel_files, pixel_bt = _pixel_files(config, S)
     if source.nrecords == 0 or len(pixel_files) == 0:
         logger.critical(f"No data records ({source.nrecords}) or pixel files ({len(pixel_files)}) in the period. Exiting.")
@@ -429,14 +522,17 @@ def compute_track_precip(config):
     dnew.attrs["trackpcp_created_on"] = time.ctime(time.time())
 
     os.makedirs(S["outdir"], exist_ok=True)
-    outfile = f"{S['outdir']}{S['out_filebase']}{config['startdate']}_{config['enddate']}.nc"
+    outfile = track_precip_file(config, S)
     if os.path.isfile(outfile):
         os.remove(outfile)
-    logger.info(f"Writing {outfile}")
     T["ds"].close()
-    shutil.copyfile(T["stats_file"], outfile)
-    with dask.config.set(scheduler="threads"):
-        dnew.to_netcdf(path=outfile, mode="a", format="NETCDF4", encoding=encoding)
+    if os.path.isfile(T["stats_file"]):
+        logger.info(f"Writing {outfile}")
+        shutil.copyfile(T["stats_file"], outfile)
+        with dask.config.set(scheduler="threads"):
+            dnew.to_netcdf(path=outfile, mode="a", format="NETCDF4", encoding=encoding)
+    else:
+        logger.info("The statistics are a row folder (stats_format: rows): no dense netCDF is made, the records are the Parquet table")
 
     # the same records as a Parquet table
     cols = {"track_number": (itrack + 1).astype(np.int32), "time_index": itime.astype(np.int32),
@@ -475,7 +571,7 @@ def compute_track_pixel_accum(config):
     S = settings(config)
     t0 = time.time()
     T = open_tracks(config, S)
-    source = _source_for(config, S)
+    source = _source_for(config, S, S["period"])
     pixel_files, pixel_bt = _pixel_files(config, S)
     tasks, diag = plan_windows(config, S, T, source, pixel_files, pixel_bt, period=S["period"])
     static = build_static(config, S, T, source, pixel_files)
@@ -548,7 +644,7 @@ def compute_track_pixel_accum(config):
     days = pd.Series(duration_h / 24.0, index=mdf["track_number"].values)
     rate_mm_day = merged["accum"] / days.reindex(merged["trk"]).values.astype(np.float32)
     os.makedirs(S["outdir"], exist_ok=True)
-    tag = f"{config['startdate']}_{config['enddate']}"
+    pix_file, met_file, grid_file = pixel_accum_files(config, S)
     import pyarrow as pa
     import pyarrow.parquet as pq
     table = pa.table({
@@ -562,12 +658,9 @@ def compute_track_pixel_accum(config):
             b"rate_mm_day": b"accum_mm / track lifetime in days",
             b"window": f"{S['time_match']} {S['window_sec']:g} s".encode()}
     table = table.replace_schema_metadata(meta)
-    pix_file = f"{S['outdir']}trackpcp_pixels_{tag}.parquet"
     pq.write_table(table, pix_file, compression="zstd", row_group_size=1_000_000)
-    met_file = f"{S['outdir']}trackpcp_metrics_{tag}.parquet"
     mdf.to_parquet(met_file, engine="pyarrow", compression="zstd", index=False)
-    xr.Dataset({"latitude": (["y", "x"], static["lat"]), "longitude": (["y", "x"], static["lon"])}).to_netcdf(
-        f"{S['outdir']}trackpcp_grid.nc")
+    xr.Dataset({"latitude": (["y", "x"], static["lat"]), "longitude": (["y", "x"], static["lon"])}).to_netcdf(grid_file)
     logger.info(f"{pix_file}, {met_file}: {len(mdf)} tracks; {(time.time() - t0) / 60:.1f} min in total")
     return pix_file, met_file
 
@@ -583,18 +676,30 @@ def track_pixels_to_map(df, track_number, ny, nx, column="accum_mm"):
 ########################################################################################################################
 # Step 3
 ########################################################################################################################
-def compute_class_maps(config, year=None, month=None, outfile=None):
+def compute_class_maps(config, year=None, month=None, outfile=None, tracks=None):
     """
     Step 3: accumulated precipitation (mm), feature counts and precipitation counts per class on the grid, for the
     tracking period of the config (or one calendar month of it).
 
     Output NetCDF with dimension class (coordinates class_value, class_name) and y, x.
+
+    Args:
+        config: dictionary
+            Loaded config with the trackpcp_* keys.
+        year, month: int (default: None)
+            One calendar month of the tracking period (both or none).
+        outfile: string (default: None)
+            Output file (default: classmap_file, in trackpcp_outdir).
+        tracks: dictionary (default: None)
+            The opened tracks (open_tracks) of a previous call, to make several months from one reading of the statistics.
+
+    Returns:
+        outfile: string
     """
     logger = logging.getLogger(__name__)
     S = settings(config)
     t0 = time.time()
-    T = open_tracks(config, S)
-    source = _source_for(config, S)
+    T = tracks if tracks is not None else open_tracks(config, S)
     pixel_files, pixel_bt = _pixel_files(config, S)
     period = S["period"] or (float(config["start_basetime"]), float(config["end_basetime"]))
     if year is not None and month is not None:
@@ -603,7 +708,11 @@ def compute_class_maps(config, year=None, month=None, outfile=None):
         m0 = calendar.timegm(datetime.datetime(int(year), int(month), 1).timetuple())
         ny_, nm_ = (int(year) + (int(month) == 12), 1 if int(month) == 12 else int(month) + 1)
         m1 = calendar.timegm(datetime.datetime(ny_, nm_, 1).timetuple())
-        period = (m0, m1)
+        # the part of the month that is inside the period (a run of two days has two days of May, not 744 windows)
+        period = (max(float(m0), period[0]), min(float(m1), period[1]))
+        if period[0] >= period[1]:
+            raise ValueError(f"{year}-{int(month):02d} is outside the tracking period of the config ({config['startdate']} to {config['enddate']})")
+    source = _source_for(config, S, period)          # only the data records of the period (one month of a year run)
     tasks, diag = plan_windows(config, S, T, source, pixel_files, pixel_bt, include_empty=True, period=period)
     if T["class_values"] is None:
         class_values, class_names = [1], ["all"]
@@ -675,9 +784,52 @@ def compute_class_maps(config, year=None, month=None, outfile=None):
                      "created_on": time.ctime(time.time())})
     os.makedirs(S["outdir"], exist_ok=True)
     if outfile is None:
-        tag = f"{year}{int(month):02d}" if year is not None else f"{config['startdate']}_{config['enddate']}"
-        outfile = f"{S['outdir']}trackpcp_classmaps_{tag}.nc"
+        outfile = classmap_file(config, S, year, month)
     enc = {v: dict(zlib=True, complevel=4) for v in ds.data_vars if ds[v].ndim >= 2}
     ds.to_netcdf(outfile, mode="w", format="NETCDF4", encoding=enc)
     logger.info(f"{outfile}: {n} windows, {(time.time() - t0) / 60:.1f} min")
     return outfile
+
+
+def compute_class_maps_monthly(config):
+    """
+    Step 3 for every calendar month of the tracking period: one trackpcp_classmaps_<YYYYMM>.nc each, the statistics of the tracks
+    are read once (a year run has millions of tracks).
+
+    Args:
+        config: dictionary
+            Loaded config with the trackpcp_* keys.
+
+    Returns:
+        files: list of strings, the class-map files in time order
+    """
+    S = settings(config)
+    tracks = open_tracks(config, S)
+    return [compute_class_maps(config, year=y, month=m, tracks=tracks) for y, m in months_of_period(config)]
+
+
+def trackpcp_driver(config):
+    """
+    The pipeline step trackpcp (run_mcs_radar3d.py, run_trackpcp: True): the steps of trackpcp_steps (default 1, 2, 3) with the
+    keys trackpcp_* of the config, on the finished tracking. Step 3 makes one file for the period, or one per calendar month with
+    trackpcp_classmaps_by: month. Uses the Dask client of the run (config run_parallel).
+
+    Args:
+        config: dictionary
+            Loaded config.
+
+    Returns:
+        files: list of strings, the files that the steps wrote (expected_outputs)
+    """
+    steps = trackpcp_step_list(config)
+    classmaps_by(config)                              # a typo stops here, before step 1 has run for an hour
+    if 1 in steps:
+        compute_track_precip(config)
+    if 2 in steps:
+        compute_track_pixel_accum(config)
+    if 3 in steps:
+        if classmaps_by(config) == "month":
+            compute_class_maps_monthly(config)
+        else:
+            compute_class_maps(config)
+    return expected_outputs(config)

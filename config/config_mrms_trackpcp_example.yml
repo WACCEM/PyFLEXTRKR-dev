@@ -1,12 +1,20 @@
 # Track-matched precipitation (runscripts/run_trackpcp.py): hourly MRMS QPE on the tracking grid, MRMS radar_feature tracking.
 # Used together with the tracking config: python run_trackpcp.py <tracking config> this_file [--steps 1 2 3]
-# Keys here override the tracking config.
+# Keys here override the tracking config. The same keys in the tracking config itself, with run_trackpcp: True, make the optional
+# pipeline step trackpcp of run_mcs_radar3d.py (steps trackpcp_steps, class maps by trackpcp_classmaps_by).
 
 # --- the data: not part of the tracking, its own files and time axis
-trackpcp_data_path: /pscratch/sd/i/iclas2/MRMS/remap_QPE1H_hrrr/
-trackpcp_data_filebase: MRMS_QPE_01H_Pass2_00.00_
-trackpcp_data_time_format: yyyymodd-hhmmss      # time of the record from the file name (UTC); the time inside the file is not used
-trackpcp_data_varname: precip                    # mm/h, 1-h accumulation
+# Here: the variable QPE1h (mm, 1-h accumulation) of the sharp-hour files of the combined 5-minute input, one folder per day
+# (<path>/YYYYMMDD/MRMS_HRRR_YYYYMMDD_hhmmss.nc); the other 11 files of an hour do not have it, so only the files whose time is a
+# multiple of trackpcp_data_every_sec are records. The values are stored as int16 with a scale of 0.1 mm.
+trackpcp_data_path: /pscratch/sd/i/iclas2/MRMS/mrms_5min/regrid/hrrr_combined/
+trackpcp_data_filebase: MRMS_HRRR_
+trackpcp_data_time_format: yyyymodd_hhmmss      # time of the record from the file name (UTC); the time inside the file is not used
+trackpcp_data_subdir_format: '%Y%m%d'           # strftime pattern of the day folders below the path; null = the files are in the path itself
+trackpcp_data_every_sec: 3600                   # only files whose time is a multiple of this [s] are records; null = every file
+trackpcp_data_varname: QPE1h                    # mm, 1-h accumulation
+# One file per hour in a flat folder instead (the first files of this study): path .../remap_QPE1H_hrrr/, filebase
+# MRMS_QPE_01H_Pass2_00.00_, time format yyyymodd-hhmmss, varname precip, and no subdir_format / every_sec.
 trackpcp_data_format: null                       # null = auto (a path ending in .zarr is a Zarr store)
 trackpcp_data_time_varname: null                 # null: from the file name (NetCDF); Zarr: time coordinate name (default time)
 trackpcp_data_scale: 1.0
@@ -44,6 +52,10 @@ trackpcp_cluster_thresh_mm: 50
 # --- step 3: class maps
 trackpcp_pcp_thresh: 1.0                         # mm/h, precipitation occurrence
 trackpcp_coverage_varname: dbz_comp              # pixel variable that is missing where the tracking input has no data (precipitation there is stored in precip_uncovered); null = off
+
+# --- the pipeline step only (run_trackpcp: True in the tracking config)
+# trackpcp_steps: [1, 2, 3]                      # steps to run, default all three
+# trackpcp_classmaps_by: period                  # period = one class-map file; month = one trackpcp_classmaps_<YYYYMM>.nc per calendar month
 
 # --- optional sub-period (data records whose time is in it), 'YYYYMMDD.HHMM'
 # trackpcp_start: 20250513.0000

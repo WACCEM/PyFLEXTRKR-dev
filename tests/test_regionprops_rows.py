@@ -59,7 +59,7 @@ def test_rows_step_equals_dense_step(tmp_path, radius_km):
 def test_rows_step_with_conv_diameter_sum(tmp_path):
     """First-pass tables with conv_diameter_sum: the merged-mask values are the same in both modes (3 and 1 cells of 16.93 km)."""
     config, _ = build_run(tmp_path, radius_km=10.0, with_conv_diameter_sum=True)
-    config.update(mcs_length_method="conv_diameter_sum", mcs_length_thresh=40)
+    config.update(mcs_size_method="conv_diameter_sum", mcs_size_thresh=40)
     dense, rows = run_both(config)
     assert table_differences(dense, rows) == []
     one_cell = 2.0 * np.sqrt(25 * 9.0 / np.pi)

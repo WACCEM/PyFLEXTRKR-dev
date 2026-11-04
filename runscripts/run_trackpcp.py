@@ -33,7 +33,7 @@ if __name__ == '__main__':
     ap.add_argument("--scheduler", default=None, help="Dask scheduler file (run_parallel 2)")
     args = ap.parse_args()
 
-    config = load_config(args.tracking_config)
+    config = load_config(args.tracking_config, make_dirs=False)      # the tracking is only read: no folder is made in its root
     with open(args.trackpcp_config) as f:
         config.update(yaml.full_load(f))
 
