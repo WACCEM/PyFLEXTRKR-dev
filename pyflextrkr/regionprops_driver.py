@@ -8,7 +8,8 @@ import dask
 
 from pyflextrkr.ft_utilities import subset_files_timerange, match_pairs_to_files
 from pyflextrkr.smooth_trajectory import smooth_trajectory
-from pyflextrkr.mcs_lifecycle import classify_lifecycle
+from pyflextrkr.mcs_lifecycle import (upscale_growth, classify_lifecycle, effective_constants_text, lifecycle_global_attrs, lifecycle_tracks,
+                                      lifecycle_method, lifecycle_line_varname, lifecycle_variable_attrs, mature_segments, n_lifecycle_stages)
 from pyflextrkr.identifymcs_radar import identify_mcs_periods_by_method, mcs_size_varname, mcs_params_from_config
 from pyflextrkr.regionprops_func import (
     regionprops_singlefile, recomputed_variable_names, conv_dilate_overwrite_km, track_classes_from_config,
@@ -88,8 +89,8 @@ def compute_regionprops(config):
     fillval = config.get("fillval", -9999)
     fillval_f = np.nan
     dbz_area_threshs = config.get("trackstats_dbz_area_threshs", [45, 50])
-    mcs_lifecycle_thresh = config.get("mcs_lifecycle_thresh", 8)
     params = mcs_params_from_config(config)
+    mcs_lifecycle_thresh = params["mcs_lifecycle_thresh"]
     try:
         overwrite_km = conv_dilate_overwrite_km(config)
         track_classes = track_classes_from_config(config)
@@ -123,6 +124,10 @@ def compute_regionprops(config):
             logger.critical(f"regionprops_track_classes is set but {firstpass_file} has no track_class. Tracking will now exit.")
             sys.exit()
         select_track = np.isin(ds["track_class"].values, track_classes)
+    lifecycle_classes = params["mcs_lifecycle_classes"]
+    if lifecycle_classes is not None and "track_class" not in ds:
+        logger.critical(f"mcs_lifecycle_classes is set but {firstpass_file} has no track_class. Tracking will now exit.")
+        sys.exit()
     n_pairs_all = int(np.isfinite(basetime).sum())
     # the pairs this step is responsible for (guardrails, smoothing, lifecycle)
     valid_pairs = np.isfinite(basetime) & select_track[:, None]
@@ -285,7 +290,7 @@ def compute_regionprops(config):
     # MCS criteria with the recomputed size variable (major axis or conv_diameter_sum, see mcs_size_method) and 45-dBZ area
     # (the MCS flags themselves stay as decided by the first pass)
     size_varname = mcs_size_varname(params)
-    area45_varname = config.get("mcs_dbz45_area_varname", "area_45dbz")
+    area45_varname = params["mcs_dbz45_area_varname"]
     is_mcs = ds["is_mcs"].values.astype(bool)
     track_lifetime_hr = track_duration * time_resolution
     lost = gained = 0
@@ -304,60 +309,74 @@ def compute_regionprops(config):
     # Lifecycle staging
     lifecycle_stage = np.full((ntracks, ntimes), fillval, dtype=np.int16)
     lifecycle_cycle = np.full((ntracks, ntimes), fillval, dtype=np.int16)
-    lifecycle_index = np.full((ntracks, 5), fillval, dtype=np.int64)
+    nstages = n_lifecycle_stages(params)
+    lifecycle_index = np.full((ntracks, nstages), fillval, dtype=np.int64)
     lifecycle_ncycles = np.full(ntracks, fillval, dtype=np.int32)
     lifecycle_complete_flag = np.full(ntracks, fillval, dtype=np.int16)
     lifecycle_evaluated = np.zeros(ntracks, dtype=np.int16)
+    lifecycle_nmature = np.full(ntracks, fillval, dtype=np.int32)
+    lifecycle_erratic_flag = np.full(ntracks, fillval, dtype=np.int16)
+    # natural upscale growth: the bit mask and the times from the first sample to the first genesis / mature / redeveloping stage
+    lifecycle_upscale_flag = np.full(ntracks, fillval, dtype=np.int16)
+    time_to_stage = {name: np.full(ntracks, fillval_f, dtype=np.float32) for name in ("genesis", "mature", "redeveloping")}
     total_conv_area = ds["total_conv_area"].values
     total_strat_area = ds["total_strat_area"].values
-    conv_majoraxis = ds["conv_majoraxis"].values
-    for nt in np.where((track_lifetime_hr >= mcs_lifecycle_thresh) & select_track)[0]:
+    # the line series of the staging: the merged-mask conv_diameter_sum (the MCS test's variable) or conv_majoraxis
+    line_varname = lifecycle_line_varname(params)
+    if line_varname not in ds:
+        logger.critical(f"mcs_lifecycle_line_method is {line_varname} but {firstpass_file} has no {line_varname} "
+                        f"(run_trackstats of this version writes conv_diameter_sum). Tracking will now exit.")
+        sys.exit()
+    line_length = ds[line_varname].values
+    logger.info(effective_constants_text(params, time_resolution))
+    track_class_all = ds["track_class"].values if "track_class" in ds else None
+    for nt in lifecycle_tracks(track_lifetime_hr, track_class_all, params, select_track):
         n = int(track_duration[nt])
         time_hours = (basetime[nt, :n] - basetime[nt, 0]) / 3600.0
         stage, cyc, lc_idx, ncyc, complete = classify_lifecycle(
-            total_conv_area[nt, :n], conv_majoraxis[nt, :n], total_strat_area[nt, :n],
+            total_conv_area[nt, :n], line_length[nt, :n], total_strat_area[nt, :n],
             time_resolution, params, time_hours=time_hours,
         )
         lifecycle_stage[nt, :n] = stage
         lifecycle_cycle[nt, :n] = cyc
         lifecycle_index[nt, :] = lc_idx
+        lifecycle_nmature[nt] = mature_segments(stage)
+        lifecycle_erratic_flag[nt] = int(lifecycle_nmature[nt] >= 2)
+        if lifecycle_method(params) == 'single':
+            upscale, *times = upscale_growth(stage, time_hours, params['mcs_upscale_min_mature_hour'])
+            lifecycle_upscale_flag[nt] = upscale
+            for name, value in zip(time_to_stage, times):
+                time_to_stage[name][nt] = value
         lifecycle_ncycles[nt] = ncyc
         lifecycle_complete_flag[nt] = int(complete)
         lifecycle_evaluated[nt] = 1
-    logger.info(f"Lifecycle evaluated for {int(lifecycle_evaluated.sum())} tracks (lifetime >= {mcs_lifecycle_thresh} h)")
+    logger.info(f"Lifecycle evaluated for {int(lifecycle_evaluated.sum())} tracks (lifetime >= {mcs_lifecycle_thresh} h, "
+                f"track_class in {lifecycle_classes if lifecycle_classes is not None else 'any'})")
 
-    lifecycle_attrs = {
-        "lifecycle_stage": {"long_name": "MCS lifecycle stage: 1=cloud only, 2=unorganized convection, "
-                            "3=genesis, 4=mature, 5=decay", "units": "unitless", "_FillValue": fillval},
-        "lifecycle_cycle": {"long_name": "Which organized-convective-line episode (1-based) a time "
-                            "belongs to; 0 = not part of any episode", "units": "unitless", "_FillValue": fillval},
-        "lifecycle_index": {"long_name": "Time index of the first occurrence of each lifecycle stage "
-                            "(1-5); -1 = that stage was not observed", "units": "unitless", "_FillValue": fillval},
-        "lifecycle_ncycles": {"long_name": "Number of organized-convective-line episodes found",
-                              "units": "unitless", "_FillValue": fillval},
-        "lifecycle_complete_flag": {"long_name": "Flag indicating genesis, mature, and decay stages "
-                                    "were all observed", "units": "unitless", "_FillValue": fillval},
-        "lifecycle_evaluated": {"long_name": "Flag indicating lifecycle staging was evaluated for this "
-                                "track (track lifetime >= mcs_lifecycle_thresh)", "units": "unitless", "_FillValue": fillval},
-    }
-    for name, (dims, arr) in {
+    lifecycle_attrs, lifecycle_comment = lifecycle_variable_attrs(params, fillval, fillval_f)
+    lifecycle_vars = {
         "lifecycle_stage": (dims2d, lifecycle_stage),
         "lifecycle_cycle": (dims2d, lifecycle_cycle),
         "lifecycle_index": ([tracks_dimname, "lifestages"], lifecycle_index),
         "lifecycle_ncycles": ([tracks_dimname], lifecycle_ncycles),
         "lifecycle_complete_flag": ([tracks_dimname], lifecycle_complete_flag),
         "lifecycle_evaluated": ([tracks_dimname], lifecycle_evaluated),
-    }.items():
+    }
+    if lifecycle_method(params) == 'single':
+        lifecycle_vars["lifecycle_nmature"] = ([tracks_dimname], lifecycle_nmature)
+        lifecycle_vars["lifecycle_erratic_flag"] = ([tracks_dimname], lifecycle_erratic_flag)
+        lifecycle_vars["lifecycle_upscale_flag"] = ([tracks_dimname], lifecycle_upscale_flag)
+        for name, values in time_to_stage.items():
+            lifecycle_vars[f"lifecycle_time_to_{name}_hr"] = ([tracks_dimname], values)
+    for name, (dims, arr) in lifecycle_vars.items():
         attrs = dict(lifecycle_attrs[name])
-        attrs["comments"] = ("Classified from total_conv_area, total_strat_area and the merged-mask conv_majoraxis "
-                             "(mcs_lifecycle.classify_lifecycle)")
+        attrs["comments"] = lifecycle_comment
         ds[name] = (dims, arr, attrs)
 
-    ds = ds.assign_coords(lifestages=np.arange(5))
+    ds = ds.assign_coords(lifestages=np.arange(nstages))
     ds.attrs["Title"] = ("Track statistics of radar-based MCS with shape and extremes recomputed on the merged mask, "
                          "and lifecycle staging")
-    ds.attrs["mcs_lifecycle_thresh_hour"] = mcs_lifecycle_thresh
-    ds.attrs["mcs_lifecycle_smooth_hour"] = params["mcs_lifecycle_smooth_hour"]
+    ds.attrs.update(lifecycle_global_attrs(params, time_resolution))
     ds.attrs.update(cluster_global_attrs(radii_expand_km, overwrite_km))
     if track_classes is not None:
         ds.attrs["regionprops_track_classes"] = np.array(track_classes, dtype=np.int32)

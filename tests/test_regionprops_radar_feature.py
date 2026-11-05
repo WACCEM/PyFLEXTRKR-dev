@@ -476,7 +476,8 @@ class TestDriver:
     def test_conv_diameter_sum_is_recomputed_on_the_merged_mask(self, tmp_path):
         """Track A: cells 1, 2 (own feature) and 3 (fragment); track B: cell 4; each cell is 25 px = 225 km2."""
         config, _ = build_run(tmp_path, radius_km=20.0, with_conv_diameter_sum=True)
-        config.update(mcs_size_method="conv_diameter_sum", mcs_size_thresh=40)
+        # the first-pass file of this fixture has area_45dbz and no track_class: the keys of the earlier definitions
+        config.update(mcs_size_method="conv_diameter_sum", mcs_size_thresh=40, mcs_dbz45_area_varname="area_45dbz", mcs_lifecycle_classes=None)
         compute_regionprops(config)
         ds = open_out(config)
         one_cell = 2.0 * np.sqrt(25 * 9.0 / np.pi)

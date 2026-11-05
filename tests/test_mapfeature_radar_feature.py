@@ -159,6 +159,45 @@ class TestMapFeatureRadarFeature:
         # Pixels outside any tracked cloud should stay at fillval
         assert feature_class[0, 0] == -9999
 
+    def test_mcs_number_map_is_painted_on_the_mcs_mask_with_zero_elsewhere(self, tmp_path):
+        """The number of the MCS track on its mask (own feature and the folded fragment), 0 (the _FillValue) elsewhere; 0 for a non-MCS track."""
+        cloudid_outfile, filebasetime = _build_cloudid(tmp_path)
+        outdir = str(tmp_path) + "/"
+        config = {'feature_varname': 'feature_number', 'feature_type': 'radar_feature', 'dbz_thresh': 10, 'ref_varname': 'dbz_comp',
+                  'fillval': -9999}
+        args = (cloudid_outfile, filebasetime, np.array([0]), np.array([1]), np.array([1]), np.array([0]), np.array([0]),
+                np.array([[2]]), np.array([[0]]), "status explanation", config, outdir, "mcstrack_")
+        ds = xr.open_dataset(map_feature(*args, file_mcsnumber=np.array([7])), decode_times=False, mask_and_scale=False)
+        number, tracked = ds["mcs_number"].values.squeeze(), ds["cloudtracknumber"].values.squeeze() == 1
+        assert np.all(number[tracked] == 7)                                          # the extent of cloudtracknumber, fragment included
+        assert np.all(number[F2_ROWS, F2_COLS] == 7) and np.all(number[~tracked] == 0)
+        assert ds["mcs_number"].attrs["_FillValue"] == 0 and "MCS number" in ds["mcs_number"].attrs["long_name"]
+        # a track that is not an MCS has the number 0: the map is all zero
+        ds = xr.open_dataset(map_feature(*args, file_mcsnumber=np.array([0])), decode_times=False, mask_and_scale=False)
+        assert not ds["mcs_number"].values.any()
+        # not asked for: no map
+        assert "mcs_number" not in xr.open_dataset(map_feature(*args), decode_times=False, mask_and_scale=False)
+
+    def test_track_class_map_is_painted_like_feature_class_with_its_own_value(self, tmp_path):
+        """feature_class is the class at this time (here 2, multi-cell), track_class the class of the track (1, MCS), constant for the track."""
+        cloudid_outfile, filebasetime = _build_cloudid(tmp_path)
+        outdir = str(tmp_path) + "/"
+        config = {'feature_varname': 'feature_number', 'feature_type': 'radar_feature', 'dbz_thresh': 10, 'ref_varname': 'dbz_comp',
+                  'fillval': -9999}
+        args = (cloudid_outfile, filebasetime, np.array([0]), np.array([1]), np.array([1]), np.array([0]), np.array([0]),
+                np.array([[2]]), np.array([[0]]), "status explanation", config, outdir, "mcstrack_")
+        ds = xr.open_dataset(map_feature(*args, file_featureclass=np.array([2]), file_trackclass=np.array([CLASS_MCS])),
+                             decode_times=False, mask_and_scale=False)
+        feature_class, track_class = ds["feature_class"].values.squeeze(), ds["track_class"].values.squeeze()
+        tracked = ds["cloudtracknumber"].values.squeeze() == 1
+        assert np.all(feature_class[tracked] == 2) and np.all(track_class[tracked] == CLASS_MCS)
+        assert np.all(track_class[F2_ROWS, F2_COLS] == CLASS_MCS)                    # the merged-in fragment takes the parent's class
+        assert track_class[0, 0] == -9999 and ds["track_class"].attrs["_FillValue"] == -9999
+        assert "Track class" in ds["track_class"].attrs["long_name"] and "Feature class" in ds["feature_class"].attrs["long_name"]
+        # only the track class asked for: no feature_class map
+        ds = xr.open_dataset(map_feature(*args, file_trackclass=np.array([CLASS_MCS])), decode_times=False, mask_and_scale=False)
+        assert "track_class" in ds and "feature_class" not in ds
+
     def test_without_featureclass_arg_omits_output_var(self, tmp_path):
         """file_featureclass defaults to None - feature_class must not appear."""
         cloudid_outfile, filebasetime = _build_cloudid(tmp_path)

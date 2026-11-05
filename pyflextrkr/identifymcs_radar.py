@@ -25,7 +25,7 @@ import xarray as xr
 
 from pyflextrkr.ft_utilities import load_sparse_trackstats
 from pyflextrkr.smooth_trajectory import smooth_trajectory
-from pyflextrkr.mcs_lifecycle import _steps_from_hours
+from pyflextrkr.mcs_lifecycle import _steps_from_hours, LIFECYCLE_METHODS, LIFECYCLE_LINE_VARNAMES
 
 # Feature class codes. MCS is decided first; the other three are mutually exclusive and cover every feature:
 # stratiform = no convective cell, single cell = one cell (with or without stratiform), multi cell = two or more cells.
@@ -512,6 +512,25 @@ def classify_feature_class(mcs_status, ncells, fillval=-9999):
     return feature_class
 
 
+def number_mcs_tracks(is_mcs):
+    """
+    Sequential number of the MCS tracks of a statistics file: 1, 2, 3, ... in the order of the tracks, 0 for the other tracks.
+
+    Args:
+        is_mcs: 1D array-like of bool or int, the is_mcs flag of the kept tracks in the order of the file.
+
+    Returns:
+        mcs_number: 1D np.array(int32), same length. The numbering belongs to the file it is made for (a year file counts the MCS
+        of the year, a monthly file starts again at 1).
+    """
+    is_mcs = np.asarray(is_mcs).astype(bool)
+    return np.where(is_mcs, np.cumsum(is_mcs), 0).astype(np.int32)
+
+
+MCS_NUMBER_LONG_NAME = ("Sequential number of the MCS tracks of this file (1, 2, 3, ... in the order of the tracks, "
+                        "tracks with is_mcs = 1); 0 = not an MCS")
+
+
 def classify_track_class(feature_class, fillval=-9999):
     """
     Per-track summary class: the most-organized class observed at any time
@@ -531,6 +550,14 @@ def classify_track_class(feature_class, fillval=-9999):
 # Parameters
 # ---------------------------------------------------------------------------
 
+def _class_list(value):
+    """A list of track_class values (ints) from a config value; None = every class."""
+    if value is None:
+        return None
+    values = [value] if np.isscalar(value) else list(value)
+    return [int(v) for v in values]
+
+
 def mcs_params_from_config(config):
     """
     MCS criteria and lifecycle staging parameters from the config, with their defaults (shared by
@@ -544,25 +571,57 @@ def mcs_params_from_config(config):
     for old_key, new_key in (("mcs_length_method", "mcs_size_method"), ("mcs_length_thresh", "mcs_size_thresh")):
         if old_key in config:
             raise ValueError(f"The config key '{old_key}' was renamed to '{new_key}': change it in the config")
-    default_method = SIZE_METHOD_MAJORAXIS if "mcs_majoraxis_thresh" in config else SIZE_METHOD_CONV_DIAMETER_SUM
+    # An earlier config (the legacy size key and no mcs_size_method) is one written for the earlier definitions: the keys that it does
+    # not set keep the earlier values (major axis, area_45dbz of the whole feature, lifecycle of every track of 8 h or more with the
+    # lags of the hourly design); a config that does not have the legacy key gets the current definitions.
+    earlier_config = "mcs_majoraxis_thresh" in config and "mcs_size_method" not in config
+    default_method = SIZE_METHOD_MAJORAXIS if earlier_config else SIZE_METHOD_CONV_DIAMETER_SUM
     size_method = config.get("mcs_size_method", default_method)
     if size_method not in MCS_SIZE_VARNAMES:
         raise ValueError(f"mcs_size_method '{size_method}' is not one of {sorted(MCS_SIZE_VARNAMES)}")
     size_thresh = config.get("mcs_size_thresh", config.get("mcs_majoraxis_thresh", 100))
+    # Lifecycle rules: 'single' (one lifecycle per track: one genesis, no decay before mature, interruptions of the mature stage
+    # bridged, a returning line is redeveloping; the line is conv_diameter_sum, the stratiform floor the median) or 'episodes'
+    # (every line episode on its own, with lags; an earlier config keeps this, the major axis and the mean)
+    lifecycle_method = config.get("mcs_lifecycle_method", "episodes" if earlier_config else "single")
+    lifecycle_line = config.get("mcs_lifecycle_line_method", "conv_majoraxis" if earlier_config else "conv_diameter_sum")
+    if lifecycle_method not in LIFECYCLE_METHODS:
+        raise ValueError(f"mcs_lifecycle_method '{lifecycle_method}' is not one of {list(LIFECYCLE_METHODS)}")
+    if lifecycle_line not in LIFECYCLE_LINE_VARNAMES:
+        raise ValueError(f"mcs_lifecycle_line_method '{lifecycle_line}' is not one of {list(LIFECYCLE_LINE_VARNAMES)}")
+    lifecycle_sf_stat = config.get("mcs_lifecycle_sf_stat", "mean" if earlier_config else "median")
+    if lifecycle_sf_stat not in ("mean", "median"):
+        raise ValueError(f"mcs_lifecycle_sf_stat '{lifecycle_sf_stat}' is not 'mean' or 'median'")
+    # Natural upscale growth flag (lifecycle_upscale_flag): the first mature stage must come at least this long [hour] after the
+    # first sample of the track for the bit mature_after_min_time
+    upscale_min_mature = config.get("mcs_upscale_min_mature_hour", 1.0)
+    if not isinstance(upscale_min_mature, (int, float)) or isinstance(upscale_min_mature, bool) or upscale_min_mature < 0:
+        raise ValueError(f"mcs_upscale_min_mature_hour '{upscale_min_mature}' is not a number of hours >= 0")
     return {
         'mcs_size_method': size_method,
         'mcs_size_thresh': size_thresh,
         'mcs_majoraxis_thresh': size_thresh if size_method == SIZE_METHOD_MAJORAXIS
         else config.get("mcs_majoraxis_thresh", 100),
+        # 45-dBZ criterion: the area of the convective (convsf == 4) pixels of the feature above 45 dBZ (conv_area_45dbz); the earlier
+        # definition used the area of the whole feature (area_45dbz)
+        'mcs_dbz45_area_varname': config.get("mcs_dbz45_area_varname", "area_45dbz" if earlier_config else "conv_area_45dbz"),
         'mcs_dbz45_area_thresh': config.get("mcs_dbz45_area_thresh", 0),
         'mcs_duration_thresh': config.get("mcs_duration_thresh", 4),
         'mcs_gap_hour': config.get("mcs_gap_hour", 0.25),
+        'mcs_lifecycle_method': lifecycle_method,
+        'mcs_lifecycle_line_method': lifecycle_line,
         'mcs_lifecycle_line_thresh': config.get("mcs_lifecycle_line_thresh", 100),
         'mcs_lifecycle_gap_hour': config.get("mcs_lifecycle_gap_hour", 1.0),
-        'mcs_lifecycle_genesis_lag_hour': config.get("mcs_lifecycle_genesis_lag_hour", 1.0),
-        'mcs_lifecycle_mature_lag_hour': config.get("mcs_lifecycle_mature_lag_hour", 2.0),
+        # The two lags are used by the 'episodes' method only (0 unless set: an earlier config keeps the lags of the hourly design)
+        'mcs_lifecycle_genesis_lag_hour': config.get("mcs_lifecycle_genesis_lag_hour", 1.0 if earlier_config else 0.0),
+        'mcs_lifecycle_mature_lag_hour': config.get("mcs_lifecycle_mature_lag_hour", 2.0 if earlier_config else 0.0),
         'mcs_lifecycle_sf_area_min': config.get("mcs_lifecycle_sf_area_min", 0),
+        'mcs_lifecycle_sf_stat': lifecycle_sf_stat,
         'mcs_lifecycle_smooth_hour': config.get("mcs_lifecycle_smooth_hour", 0.5),
+        # Which tracks are staged: no minimum lifetime and the MCS only; an earlier config keeps 8 h and every class
+        'mcs_lifecycle_thresh': config.get("mcs_lifecycle_thresh", 8 if earlier_config else 0),
+        'mcs_lifecycle_classes': _class_list(config.get("mcs_lifecycle_classes", None if earlier_config else [1])),
+        'mcs_upscale_min_mature_hour': float(upscale_min_mature),
     }
 
 
@@ -580,7 +639,7 @@ def mcs_size_test_text(config, params):
         text: string, the method and the threshold, and the reason when mcs_size_method is not in the config (the default
             definition, or the major axis because of the legacy key mcs_majoraxis_thresh).
     """
-    text = f"MCS size test: {params['mcs_size_method']} >= {params['mcs_size_thresh']} km"
+    text = f"MCS size test: {params['mcs_size_method']} >= {params['mcs_size_thresh']} km, 45 dBZ area {params['mcs_dbz45_area_varname']} > {params['mcs_dbz45_area_thresh']}"
     if "mcs_size_method" not in config:
         text += (" (mcs_size_method not set: earlier config with mcs_majoraxis_thresh keeps the major axis)"
                  if "mcs_majoraxis_thresh" in config else " (mcs_size_method not set: the default)")
@@ -634,12 +693,12 @@ def identifymcs_radar(config):
     max_speed_ms = config.get("max_speed_for_trajectory_smoothing", 50)
     max_speed_kmh = max_speed_ms * 3.6
 
-    mcs_dbz45_area_varname = config.get("mcs_dbz45_area_varname", "area_45dbz")
     finalstats_min_area = config.get("finalstats_min_area", 0)
     finalstats_min_duration = config.get("finalstats_min_duration", None)
 
     params = mcs_params_from_config(config)
     logger.info(mcs_size_test_text(config, params))
+    mcs_dbz45_area_varname = params["mcs_dbz45_area_varname"]
     mcs_merge_duration = config.get("mcs_merge_duration", 1.0)
     mcs_split_duration = config.get("mcs_split_duration", 1.0)
 
@@ -870,6 +929,7 @@ def identifymcs_radar(config):
     var_dict = {
         "is_mcs": is_mcs[keep_track_indices].astype(np.int16),
         "track_class": track_class[keep_track_indices],
+        "mcs_number": number_mcs_tracks(is_mcs[keep_track_indices]),
         "feature_class": feature_class_2d[keep_track_indices, :],
         "mcs_status": mcs_status_2d[keep_track_indices, :],
         "merge_cloudnumber": merge_cloudnumber,
@@ -886,6 +946,7 @@ def identifymcs_radar(config):
         "track_class": {"long_name": "Most-organized feature class observed on this track: "
                          "1=MCS, 2=multi-cell, 3=single-cell, 4=stratiform",
                          "units": "unitless", "_FillValue": fillval},
+        "mcs_number": {"long_name": MCS_NUMBER_LONG_NAME, "units": "unitless", "_FillValue": 0},
         "feature_class": {"long_name": "Per-time feature class: 1=MCS, 2=multi-cell, "
                            "3=single-cell, 4=stratiform", "units": "unitless", "_FillValue": fillval},
         "mcs_status": {"long_name": "Flag indicating the status of MCS based on radar criteria. 1=Yes, 0=No",
@@ -934,6 +995,7 @@ def identifymcs_radar(config):
     if params['mcs_size_method'] == SIZE_METHOD_MAJORAXIS:
         dsout.attrs["mcs_majoraxis_thresh_km"] = params['mcs_majoraxis_thresh']
     dsout.attrs["mcs_dbz45_area_thresh_km2"] = params['mcs_dbz45_area_thresh']
+    dsout.attrs["mcs_dbz45_area_varname"] = params['mcs_dbz45_area_varname']
     dsout.attrs["mcs_duration_thresh_hour"] = params['mcs_duration_thresh']
     dsout.attrs["Created_on"] = time.ctime(time.time())
 

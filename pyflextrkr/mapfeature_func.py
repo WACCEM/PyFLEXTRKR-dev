@@ -21,6 +21,8 @@ def map_feature(
         pixeltracking_outpath,
         pixeltracking_filebase,
         file_featureclass=None,
+        file_trackclass=None,
+        file_mcsnumber=None,
 ):
     """
     Map track numbers to pixel level files for all feature tracking.
@@ -62,6 +64,14 @@ def map_feature(
             3=single-cell, 4=stratiform). When provided, a
             feature_class pixel map is written, with merge/split fragment
             pixels taking their parent track's class.
+        file_trackclass: np.array, optional, default=None
+            Class of the track of each cloud (identifymcs_radar.py's track_class, the same value
+            at every time of a track). When provided, a track_class pixel map is written in the
+            same way as feature_class.
+        file_mcsnumber: np.array, optional, default=None
+            MCS number of the track of each cloud (identifymcs_radar.py's mcs_number: 1, 2, 3, ... for the MCS tracks of the
+            statistics file, 0 for the other tracks). When provided, a mcs_number pixel map is written on the mask of every MCS
+            track (own feature and the merge/split fragments folded into it), 0 (the _FillValue) elsewhere.
 
     Returns:
         tracksmap_outfile: string
@@ -112,8 +122,16 @@ def map_feature(
     trackmap_merge = np.zeros((1, ny, nx), dtype=int)
     trackmap_split = np.zeros((1, ny, nx), dtype=int)
 
+    # Optional class maps, painted like the track numbers: the class of the feature at this time (feature_class) and the
+    # constant class of its track (track_class); fragment pixels take the class of the track they are folded into
+    class_values = {}
     if file_featureclass is not None:
-        featureclassmap = np.full((1, ny, nx), fillval, dtype=int)
+        class_values["feature_class"] = file_featureclass
+    if file_trackclass is not None:
+        class_values["track_class"] = file_trackclass
+    class_maps = {name: np.full((1, ny, nx), fillval, dtype=int) for name in class_values}
+    # Optional MCS number map: the number of the MCS track on its mask (the extent of cloudtracknumber), 0 elsewhere
+    mcsnumber_map = np.zeros((1, ny, nx), dtype=int) if file_mcsnumber is not None else None
 
     # Check number of matched features
     nmatchcloud = len(file_cloudnumber)
@@ -134,8 +152,10 @@ def map_feature(
                 trackmap[0, cmask] = file_trackindex[jj] + 1
                 trackmap_include_ms[0, cmask] = file_trackindex[jj] + 1
                 statusmap[0, cmask] = jjstatus
-                if file_featureclass is not None:
-                    featureclassmap[0, cmask] = file_featureclass[jj]
+                for name, values in class_values.items():
+                    class_maps[name][0, cmask] = values[jj]
+                if mcsnumber_map is not None:
+                    mcsnumber_map[0, cmask] = file_mcsnumber[jj]
             else:
                 logger.warning(f"Warning: No matching cloud pixel found: {jjcloudnumber}")
 
@@ -153,8 +173,10 @@ def map_feature(
                         trackmap_include_ms[0, s_cmask] = file_trackindex[jj] + 1
                         trackmap_split[0, s_cmask] = file_trackindex[jj] + 1
                         # Split fragment pixels take their parent track's class
-                        if file_featureclass is not None:
-                            featureclassmap[0, s_cmask] = file_featureclass[jj]
+                        for name, values in class_values.items():
+                            class_maps[name][0, s_cmask] = values[jj]
+                        if mcsnumber_map is not None:
+                            mcsnumber_map[0, s_cmask] = file_mcsnumber[jj]
                     else:
                         logger.warning(f"Warning: No matching splitting cloud found: {is_number}")
 
@@ -172,8 +194,10 @@ def map_feature(
                         trackmap_include_ms[0, m_cmask] = file_trackindex[jj] + 1
                         trackmap_merge[0, m_cmask] = file_trackindex[jj] + 1
                         # Merge fragment pixels take their parent track's class
-                        if file_featureclass is not None:
-                            featureclassmap[0, m_cmask] = file_featureclass[jj]
+                        for name, values in class_values.items():
+                            class_maps[name][0, m_cmask] = values[jj]
+                        if mcsnumber_map is not None:
+                            mcsnumber_map[0, m_cmask] = file_mcsnumber[jj]
                     else:
                         logger.warning(f"Warning: No matching merging cloud found: {im_number}")
 
@@ -306,14 +330,28 @@ def map_feature(
             "reflectivity_threshold": dbz_thresh,
         }
         dbztrackmap = xr.DataArray(dbztrackmap, coords=coords, dims=dims_keep, attrs=dbztrackmap_attrs)
-        if file_featureclass is not None:
-            featureclassmap_attrs = {
-                "long_name": "Feature class: 1=MCS, 2=multi-cell, 3=single-cell, 4=stratiform",
-                "units": "unitless",
-                "_FillValue": fillval,
-                "comments": "Merge/split fragment pixels take their parent track's class.",
-            }
-            featureclassmap = xr.DataArray(featureclassmap, coords=coords, dims=dims_keep, attrs=featureclassmap_attrs)
+        class_attrs = {
+            "feature_class": {
+                "long_name": "Feature class at this time: 1=MCS, 2=multi-cell, 3=single-cell, 4=stratiform",
+                "comments": "The class of the feature at this time: 1 only at the times of a qualifying MCS period. "
+                            "Merge/split fragment pixels take their parent track's class.",
+            },
+            "track_class": {
+                "long_name": "Track class: 1=MCS, 2=multi-cell, 3=single-cell, 4=stratiform",
+                "comments": "The most organized class of the track at any time, the same value at every time of the track. "
+                            "Merge/split fragment pixels take their parent track's class.",
+            },
+        }
+        class_maps = {
+            name: xr.DataArray(arr, coords=coords, dims=dims_keep, attrs=dict(class_attrs[name], units="unitless", _FillValue=fillval))
+            for name, arr in class_maps.items()
+        }
+        if mcsnumber_map is not None:
+            mcsnumber_map = xr.DataArray(mcsnumber_map, coords=coords, dims=dims_keep, attrs={
+                "long_name": "MCS number: the sequential number of the MCS track (mcs_number of the statistics file)",
+                "units": "unitless", "_FillValue": 0,
+                "comments": "The number of the MCS track on its mask (own feature and the merge/split fragments folded into it, "
+                            "the extent of cloudtracknumber); 0 (the _FillValue) elsewhere."})
 
     # Create a copy of the input dataset
     ds_out = ds_in.copy(deep=True)
@@ -332,8 +370,10 @@ def map_feature(
         ds_out = ds_out.assign(dbztracknumber=dbztrackmap)
     if feature_type == "radar_feature":
         ds_out = ds_out.assign(dbztracknumber=dbztrackmap)
-        if file_featureclass is not None:
-            ds_out = ds_out.assign(feature_class=featureclassmap)
+        for name, class_map in class_maps.items():
+            ds_out = ds_out.assign({name: class_map})
+        if mcsnumber_map is not None:
+            ds_out = ds_out.assign(mcs_number=mcsnumber_map)
         # The statistics were computed with the cell clusters dilated further (regionprops_driver): give the pixel files the
         # same groups, not the clusters of the cloudid file
         overwrite_km = conv_dilate_overwrite_km(config)

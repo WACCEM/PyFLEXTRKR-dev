@@ -89,6 +89,26 @@ def mapfeature_driver(
     else:
         stats_featureclass = None
 
+    # Optional track class (the same value at every time of a track), painted into the pixel files as its own map
+    mapfeature_track_class_varname = config.get("mapfeature_track_class_varname", None)
+    stats_trackclass = None
+    if mapfeature_track_class_varname is not None:
+        if mapfeature_track_class_varname not in stats_varnames:
+            logger.critical(f"mapfeature_track_class_varname '{mapfeature_track_class_varname}' is not in the statistics file. "
+                            f"Tracking will now exit.")
+            sys.exit()
+        stats_trackclass = ds[mapfeature_track_class_varname].values
+
+    # Optional MCS number (the same value at every time of a track, 0 = not an MCS), painted as a map on the mask of the MCS tracks
+    mapfeature_mcs_number_varname = config.get("mapfeature_mcs_number_varname", None)
+    stats_mcsnumber = None
+    if mapfeature_mcs_number_varname is not None:
+        if mapfeature_mcs_number_varname not in stats_varnames:
+            logger.critical(f"mapfeature_mcs_number_varname '{mapfeature_mcs_number_varname}' is not in the statistics file. "
+                            f"Tracking will now exit.")
+            sys.exit()
+        stats_mcsnumber = np.nan_to_num(ds[mapfeature_mcs_number_varname].values, nan=0).astype(int)
+
     # Put merge/split tracknumbers & cloudnumbers in a list
     ms_tracknumber = ["merge_tracknumbers", "split_tracknumbers"]
     ms_cloudnumber = ["merge_cloudnumber", "split_cloudnumber"]
@@ -156,6 +176,8 @@ def mapfeature_driver(
 
         # Optional per-cloud feature class for this time
         file_featureclass = stats_featureclass[itrack, itime] if stats_featureclass is not None else None
+        file_trackclass = stats_trackclass[itrack] if stats_trackclass is not None else None
+        file_mcsnumber = stats_mcsnumber[itrack] if stats_mcsnumber is not None else None
 
         # Serial
         if run_parallel == 0:
@@ -174,6 +196,8 @@ def mapfeature_driver(
                 pixeltracking_outpath,
                 pixeltracking_filebase,
                 file_featureclass=file_featureclass,
+                file_trackclass=file_trackclass,
+                file_mcsnumber=file_mcsnumber,
             )
         # Parallel
         elif run_parallel >= 1:
@@ -192,6 +216,8 @@ def mapfeature_driver(
                 pixeltracking_outpath,
                 pixeltracking_filebase,
                 file_featureclass=file_featureclass,
+                file_trackclass=file_trackclass,
+                file_mcsnumber=file_mcsnumber,
             )
             results.append(result)
         else:

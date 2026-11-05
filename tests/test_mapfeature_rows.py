@@ -102,3 +102,58 @@ def test_pixel_files_of_the_rows_step_equal_those_of_the_dense_step(tmp_path):
 def test_the_optional_feature_class_map(tmp_path):
     dense_dir, rows_dir, _ = run_both(tmp_path, mapfeature_class_varname="track_status")
     assert pixel_files_differ(dense_dir, rows_dir) == []
+
+
+def test_the_track_class_map_of_the_rows_step_equals_the_dense_step_and_is_constant_per_track(tmp_path):
+    """A track variable (track_class) painted as its own map: the same pixels in both steps, the same value in every frame of a track."""
+    config, arrays = prepare(tmp_path)
+    path = f"{config['stats_outpath']}{ROBUST}.nc"
+    ds = xr.open_dataset(path, decode_times=False, mask_and_scale=False).load()
+    ds.close()
+    ds["track_class"] = (["tracks"], np.array([2, 1], dtype=np.int16), {"long_name": "test", "_FillValue": np.int16(-9999)})
+    os.remove(path)
+    ds.to_netcdf(path)
+    write_rows(dense_to_rows(path), f"{config['stats_outpath']}{ROBUST}.rows")
+    config.update(mapfeature_class_varname="track_status", mapfeature_track_class_varname="track_class")
+    dense_dir, rows_dir = str(tmp_path / "pixel_dense") + "/", str(tmp_path / "pixel_rows") + "/"
+    mapfeature_driver(dict(config, pixeltracking_outpath=dense_dir), trackstats_filebase="mcs_tracks_robust_")
+    mapfeature_driver_rows(dict(config, pixeltracking_outpath=rows_dir), trackstats_filebase="mcs_tracks_robust_")
+    assert pixel_files_differ(dense_dir, rows_dir) == []
+    for name in sorted(os.listdir(rows_dir)):
+        with xr.open_dataset(rows_dir + name, decode_times=False, mask_and_scale=False) as px:
+            ctn, tc = px["cloudtracknumber"].values.squeeze(), px["track_class"].values.squeeze()
+            assert np.all(tc[ctn == 1] == 2) and np.all(tc[ctn == 2] == 1) and np.all(tc[ctn == 0] == -9999)     # in every frame, fragments included
+            assert "feature_class" in px
+    # a name that is not a track variable stops with a message
+    with pytest.raises(SystemExit):
+        mapfeature_driver_rows(dict(config, pixeltracking_outpath=str(tmp_path / "x") + "/", mapfeature_track_class_varname="nope"),
+                               trackstats_filebase="mcs_tracks_robust_")
+
+
+def test_the_mcs_number_map_of_the_rows_step_equals_the_dense_step(tmp_path):
+    """The mcs_number track variable painted as its own map on the MCS masks: the same pixels in both steps, 0 where there is no MCS."""
+    config, arrays = prepare(tmp_path)
+    path = f"{config['stats_outpath']}{ROBUST}.nc"
+    ds = xr.open_dataset(path, decode_times=False, mask_and_scale=False).load()
+    ds.close()
+    ds["mcs_number"] = (["tracks"], np.array([0, 3], dtype=np.int32), {"long_name": "test", "_FillValue": np.int32(0)})
+    os.remove(path)
+    ds.to_netcdf(path)
+    write_rows(dense_to_rows(path), f"{config['stats_outpath']}{ROBUST}.rows")
+    config.update(mapfeature_class_varname="track_status", mapfeature_mcs_number_varname="mcs_number")
+    dense_dir, rows_dir = str(tmp_path / "pixel_dense") + "/", str(tmp_path / "pixel_rows") + "/"
+    mapfeature_driver(dict(config, pixeltracking_outpath=dense_dir), trackstats_filebase="mcs_tracks_robust_")
+    mapfeature_driver_rows(dict(config, pixeltracking_outpath=rows_dir), trackstats_filebase="mcs_tracks_robust_")
+    assert pixel_files_differ(dense_dir, rows_dir) == []
+    for name in sorted(os.listdir(rows_dir)):
+        with xr.open_dataset(rows_dir + name, decode_times=False, mask_and_scale=False) as px:
+            ctn, mn = px["cloudtracknumber"].values.squeeze(), px["mcs_number"].values.squeeze()
+            assert np.all(mn[ctn == 2] == 3) and not mn[ctn != 2].any()              # only the MCS track, in every frame
+    # without the key there is no map; a name that is not a track variable stops with a message
+    config.pop("mapfeature_mcs_number_varname")
+    mapfeature_driver_rows(dict(config, pixeltracking_outpath=str(tmp_path / "none") + "/"), trackstats_filebase="mcs_tracks_robust_")
+    with xr.open_dataset(str(tmp_path / "none") + "/" + sorted(os.listdir(str(tmp_path / "none")))[0], decode_times=False) as px:
+        assert "mcs_number" not in px
+    with pytest.raises(SystemExit):
+        mapfeature_driver_rows(dict(config, pixeltracking_outpath=str(tmp_path / "x") + "/", mapfeature_mcs_number_varname="nope"),
+                               trackstats_filebase="mcs_tracks_robust_")

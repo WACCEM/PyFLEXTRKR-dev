@@ -24,7 +24,7 @@ import time
 import numpy as np
 
 from pyflextrkr.identifymcs_radar import (
-    classify_feature_class, classify_track_class, find_mergesplit_parents, identify_mcs_periods_by_method, mcs_size_test_text, mcs_size_varname,
+    MCS_NUMBER_LONG_NAME, classify_feature_class, classify_track_class, number_mcs_tracks, find_mergesplit_parents, identify_mcs_periods_by_method, mcs_size_test_text, mcs_size_varname,
     mcs_params_from_config, resolve_fragment_roots,
 )
 from pyflextrkr.rowstats import FRAGMENT_KINDS, TableBuilder, gather_index, load_sparse_entries, write_rows
@@ -221,11 +221,11 @@ def identifymcs_radar_rows(config):
     max_trackduration = int(max(config["duration_range"]))
     round_base = config.get("duration_range_round_base", 10)
     max_speed_kmh = config.get("max_speed_for_trajectory_smoothing", 50) * 3.6
-    mcs_dbz45_area_varname = config.get("mcs_dbz45_area_varname", "area_45dbz")
     finalstats_min_area = config.get("finalstats_min_area", 0)
     finalstats_min_duration = config.get("finalstats_min_duration", None)
     params = mcs_params_from_config(config)
     logger.info(mcs_size_test_text(config, params))
+    mcs_dbz45_area_varname = params["mcs_dbz45_area_varname"]
     mcs_merge_duration = config.get("mcs_merge_duration", 1.0)
     mcs_split_duration = config.get("mcs_split_duration", 1.0)
     statistics_file = f"{stats_path}{config['trackstats_sparse_filebase']}{startdate}_{enddate}.nc"
@@ -347,7 +347,7 @@ def identifymcs_radar_rows(config):
     global_attrs.update({
         "Title": "Final track statistics with radar-based MCS identification and classification",
         "mcs_size_method": params['mcs_size_method'], "mcs_size_thresh_km": params['mcs_size_thresh'],
-        "mcs_dbz45_area_thresh_km2": params['mcs_dbz45_area_thresh'],
+        "mcs_dbz45_area_thresh_km2": params['mcs_dbz45_area_thresh'], "mcs_dbz45_area_varname": params['mcs_dbz45_area_varname'],
         "mcs_duration_thresh_hour": params['mcs_duration_thresh'], "Created_on": time.ctime(time.time()),
     })
     if params['mcs_size_method'] == "majoraxis":
@@ -408,6 +408,8 @@ def identifymcs_radar_rows(config):
                           {"long_name": ATTRS_1D["is_mcs"], "units": "unitless", "_FillValue": fillval})
     builder.add_track_var("track_class", track_class[keep_track_indices],
                           {"long_name": ATTRS_1D["track_class"], "units": "unitless", "_FillValue": fillval})
+    builder.add_track_var("mcs_number", number_mcs_tracks(is_mcs[keep_track_indices]),
+                          {"long_name": MCS_NUMBER_LONG_NAME, "units": "unitless", "_FillValue": 0})
     builder.add_entry_var("feature_class", feature_class_flat[index], {
         "long_name": "Per-time feature class: 1=MCS, 2=multi-cell, 3=single-cell, 4=stratiform", "units": "unitless",
         "_FillValue": fillval}, fill=fillval)

@@ -79,6 +79,27 @@ def mapfeature_driver_rows(
     if mapfeature_class_varname is not None and mapfeature_class_varname in meta["vars_2d"]:
         stats_featureclass = entries[mapfeature_class_varname]
 
+    # Optional track class (the same value at every time of a track), painted as its own map: a track-table variable
+    # (track_class), broadcast to the entries of the track
+    mapfeature_track_class_varname = config.get("mapfeature_track_class_varname", None)
+    stats_trackclass = None
+    if mapfeature_track_class_varname is not None:
+        if mapfeature_track_class_varname not in tables.tracks:
+            logger.critical(f"mapfeature_track_class_varname '{mapfeature_track_class_varname}' is not a track variable of the statistics "
+                            f"file. Tracking will now exit.")
+            sys.exit()
+        stats_trackclass = np.asarray(tables.tracks[mapfeature_track_class_varname])[track_of]
+
+    # Optional MCS number (the same value at every time of a track, 0 = not an MCS), painted as a map on the mask of the MCS tracks
+    mapfeature_mcs_number_varname = config.get("mapfeature_mcs_number_varname", None)
+    stats_mcsnumber = None
+    if mapfeature_mcs_number_varname is not None:
+        if mapfeature_mcs_number_varname not in tables.tracks:
+            logger.critical(f"mapfeature_mcs_number_varname '{mapfeature_mcs_number_varname}' is not a track variable of the statistics "
+                            f"file. Tracking will now exit.")
+            sys.exit()
+        stats_mcsnumber = np.nan_to_num(np.asarray(tables.tracks[mapfeature_mcs_number_varname]), nan=0).astype(int)[track_of]
+
     # Merge / split track numbers (general ones are stored as [tracks, times] variables), else the fill value
     if {"merge_tracknumbers", "split_tracknumbers"}.issubset(meta["vars_2d"]):
         stats_mergetracknumber, stats_splittracknumber = entries["merge_tracknumbers"], entries["split_tracknumbers"]
@@ -138,7 +159,9 @@ def mapfeature_driver_rows(
             pixeltracking_outpath,
             pixeltracking_filebase,
         )
-        kwargs = {"file_featureclass": stats_featureclass[entry] if stats_featureclass is not None else None}
+        kwargs = {"file_featureclass": stats_featureclass[entry] if stats_featureclass is not None else None,
+                  "file_trackclass": stats_trackclass[entry] if stats_trackclass is not None else None,
+                  "file_mcsnumber": stats_mcsnumber[entry] if stats_mcsnumber is not None else None}
         if run_parallel == 0:
             map_feature(*args, **kwargs)
         elif run_parallel >= 1:

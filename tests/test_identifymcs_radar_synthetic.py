@@ -25,6 +25,7 @@ from pyflextrkr.identifymcs_radar import (
     attach_fragments,
     classify_feature_class,
     classify_track_class,
+    number_mcs_tracks,
     CLASS_MCS, CLASS_MULTICELL, CLASS_ISOLATED_CELL, CLASS_NON_CONVECTIVE,
     CLASS_SINGLE_CELL, CLASS_STRATIFORM,
 )
@@ -175,6 +176,61 @@ class TestIdentifyMcsPeriodsConvDiameter:
         assert a[1] == b[1]
 
 
+class TestMcsParamsOfEarlierAndCurrentConfigs:
+    def test_current_config_gets_the_current_definitions(self):
+        p = mcs_params_from_config({})
+        assert p['mcs_dbz45_area_varname'] == 'conv_area_45dbz'
+        assert (p['mcs_lifecycle_thresh'], p['mcs_lifecycle_classes']) == (0, [1])
+        assert (p['mcs_lifecycle_genesis_lag_hour'], p['mcs_lifecycle_mature_lag_hour']) == (0.0, 0.0)
+        # the single-pass lifecycle with the diameter-sum line and the median stratiform floor
+        assert (p['mcs_lifecycle_method'], p['mcs_lifecycle_line_method'], p['mcs_lifecycle_sf_stat']) == ('single', 'conv_diameter_sum', 'median')
+
+    def test_earlier_config_keeps_the_earlier_definitions_for_the_keys_it_does_not_set(self):
+        p = mcs_params_from_config({'mcs_majoraxis_thresh': 100})
+        assert p['mcs_dbz45_area_varname'] == 'area_45dbz'
+        assert (p['mcs_lifecycle_thresh'], p['mcs_lifecycle_classes']) == (8, None)
+        assert (p['mcs_lifecycle_genesis_lag_hour'], p['mcs_lifecycle_mature_lag_hour']) == (1.0, 2.0)
+        # the earlier lifecycle: every line episode with its lags, the major axis, the mean floor
+        assert (p['mcs_lifecycle_method'], p['mcs_lifecycle_line_method'], p['mcs_lifecycle_sf_stat']) == ('episodes', 'conv_majoraxis', 'mean')
+
+    def test_explicit_keys_win_in_both(self):
+        for config in ({}, {'mcs_majoraxis_thresh': 100}):
+            p = mcs_params_from_config(dict(config, mcs_dbz45_area_varname='conv_area_50dbz', mcs_lifecycle_thresh=3, mcs_lifecycle_classes=[1, 2],
+                                            mcs_lifecycle_genesis_lag_hour=0.5, mcs_lifecycle_mature_lag_hour=1.0, mcs_lifecycle_sf_stat='median',
+                                            mcs_lifecycle_method='episodes', mcs_lifecycle_line_method='conv_diameter_sum'))
+            assert (p['mcs_dbz45_area_varname'], p['mcs_lifecycle_thresh'], p['mcs_lifecycle_classes']) == ('conv_area_50dbz', 3, [1, 2])
+            assert (p['mcs_lifecycle_genesis_lag_hour'], p['mcs_lifecycle_mature_lag_hour'], p['mcs_lifecycle_sf_stat']) == (0.5, 1.0, 'median')
+            assert (p['mcs_lifecycle_method'], p['mcs_lifecycle_line_method']) == ('episodes', 'conv_diameter_sum')
+        assert mcs_params_from_config({'mcs_lifecycle_classes': 1})['mcs_lifecycle_classes'] == [1]        # a single value is a list of one
+        # the single-pass rules on an earlier config, set explicitly
+        assert mcs_params_from_config({'mcs_majoraxis_thresh': 100, 'mcs_lifecycle_method': 'single'})['mcs_lifecycle_method'] == 'single'
+
+    def test_the_minimum_time_to_mature_of_the_upscale_flag(self):
+        assert mcs_params_from_config({})['mcs_upscale_min_mature_hour'] == 1.0
+        assert mcs_params_from_config({'mcs_majoraxis_thresh': 100})['mcs_upscale_min_mature_hour'] == 1.0     # an earlier config too
+        assert mcs_params_from_config({'mcs_upscale_min_mature_hour': 2})['mcs_upscale_min_mature_hour'] == 2.0
+        assert mcs_params_from_config({'mcs_upscale_min_mature_hour': 0})['mcs_upscale_min_mature_hour'] == 0.0
+        for bad in (-1, 'one hour', True, None):
+            with pytest.raises(ValueError, match="mcs_upscale_min_mature_hour"):
+                mcs_params_from_config({'mcs_upscale_min_mature_hour': bad})
+
+    def test_unknown_lifecycle_choices_stop_with_a_message(self):
+        with pytest.raises(ValueError, match="mcs_lifecycle_method 'cycles'"):
+            mcs_params_from_config({'mcs_lifecycle_method': 'cycles'})
+        with pytest.raises(ValueError, match="mcs_lifecycle_line_method 'majoraxis'"):
+            mcs_params_from_config({'mcs_lifecycle_line_method': 'majoraxis'})
+        with pytest.raises(ValueError, match="mcs_lifecycle_sf_stat 'max'"):
+            mcs_params_from_config({'mcs_lifecycle_sf_stat': 'max'})
+
+
+class TestNumberMcsTracks:
+    def test_the_mcs_tracks_are_numbered_in_the_order_of_the_file_and_the_others_are_zero(self):
+        n = number_mcs_tracks([0, 1, 0, 1, 1, 0])
+        assert n.tolist() == [0, 1, 0, 2, 3, 0] and n.dtype == np.int32
+        assert number_mcs_tracks(np.array([True, True, False])).tolist() == [1, 2, 0]
+        assert number_mcs_tracks([0, 0]).tolist() == [0, 0] and number_mcs_tracks([]).tolist() == []
+
+
 class TestMcsSizeMethod:
     def test_no_size_key_gives_the_diameter_sum(self):
         """The default definition: the sum of the circular-equivalent diameters of the convective cells, 100 km."""
@@ -203,11 +259,11 @@ class TestMcsSizeMethod:
     def test_log_line_says_which_test_runs_and_why(self):
         from pyflextrkr.identifymcs_radar import mcs_size_test_text
         text = mcs_size_test_text({}, mcs_params_from_config({}))
-        assert 'conv_diameter_sum >= 100 km' in text and 'the default' in text
+        assert 'conv_diameter_sum >= 100 km' in text and 'the default' in text and '45 dBZ area conv_area_45dbz > 0' in text
         legacy = {'mcs_majoraxis_thresh': 100}
         assert 'major axis' in mcs_size_test_text(legacy, mcs_params_from_config(legacy))
         explicit = {'mcs_size_method': 'majoraxis', 'mcs_size_thresh': 90}
-        assert mcs_size_test_text(explicit, mcs_params_from_config(explicit)) == 'MCS size test: majoraxis >= 90 km'
+        assert mcs_size_test_text(explicit, mcs_params_from_config(explicit)) == 'MCS size test: majoraxis >= 90 km, 45 dBZ area conv_area_45dbz > 0'
 
     def test_conv_diameter_sum_config(self):
         params = mcs_params_from_config({'mcs_size_method': 'conv_diameter_sum', 'mcs_size_thresh': 120})
@@ -624,7 +680,7 @@ class TestClassification:
 # End-to-end driver test with a hand-built sparse trackstats file
 # ---------------------------------------------------------------------------
 
-def _build_sparse_trackstats_file(tmp_path):
+def _build_sparse_trackstats_file(tmp_path, conv_area_45dbz=0.0):
     """
     Build a minimal sparse trackstats_*.nc file directly (matching the
     structure load_sparse_trackstats expects), with 3 tracks:
@@ -648,6 +704,7 @@ def _build_sparse_trackstats_file(tmp_path):
 
     majoraxis = np.zeros((ntracks, max_trackduration))
     area_45dbz = np.zeros((ntracks, max_trackduration))
+    conv_area_45dbz_2d = np.zeros((ntracks, max_trackduration))
     base_time = np.zeros((ntracks, max_trackduration))
     ncells = np.zeros((ntracks, max_trackduration))
     conv_area = np.zeros((ntracks, max_trackduration))
@@ -687,6 +744,7 @@ def _build_sparse_trackstats_file(tmp_path):
     base_time[2, 0:d2] = t0_epoch + np.arange(d2) * dt_sec
     majoraxis[2, 0:d2] = 150.0
     area_45dbz[2, 0:d2] = 50.0
+    conv_area_45dbz_2d[2, 0:d2] = conv_area_45dbz       # the 45 dBZ area of the convective pixels (0: only stratiform echo above 45 dBZ)
     conv_area[2, 0:d2] = 50.0
     ncells[2, 0:d2] = 3
     conv_diameter_sum[2, 0:d2] = 40.0    # three small cells in a 150 km feature: long, but not 100 km of cells
@@ -714,6 +772,7 @@ def _build_sparse_trackstats_file(tmp_path):
     sparse_vars = {
         "majoraxis": _flatten(majoraxis),
         "area_45dbz": _flatten(area_45dbz),
+        "conv_area_45dbz": _flatten(conv_area_45dbz_2d),
         "base_time": _flatten(base_time),
         "ncells": _flatten(ncells).astype(np.int32),
         "conv_area": _flatten(conv_area),
@@ -816,6 +875,19 @@ class TestIdentifymcsRadarEndToEnd:
 
         # the lifecycle is staged by the second pass (regionprops_driver), not here
         assert not any(v.startswith("lifecycle_") for v in ds.data_vars)
+
+        # the MCS number: 1 for the only MCS track, 0 (the _FillValue) for the others
+        assert ds["mcs_number"].values[mcs_track] == 1 and ds["mcs_number"].values[isolated_track] == 0
+        assert ds["mcs_number"].dims == ("tracks",) and ds["mcs_number"].dtype == np.int32
+        assert ds["mcs_number"].attrs["_FillValue"] == 0 and "MCS" in ds["mcs_number"].attrs["long_name"]
+
+    def test_mcs_number_counts_the_kept_mcs_tracks_after_the_filter(self, tmp_path):
+        # the track dropped by the safety-valve filter does not take a number
+        stats_path = _build_sparse_trackstats_file(tmp_path)
+        config = _make_driver_config(stats_path)
+        config["finalstats_min_area"] = 1000
+        ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
+        assert ds["is_mcs"].values.tolist() == [1] and ds["mcs_number"].values.tolist() == [1]
 
     def test_total_area_includes_folded_fragments(self, tmp_path):
         stats_path = _build_sparse_trackstats_file(tmp_path)
@@ -949,6 +1021,27 @@ class TestIdentifymcsRadarConvDiameter:
         assert ds.attrs["mcs_size_method"] == "conv_diameter_sum"
         assert ds.attrs["mcs_size_thresh_km"] == 100
         assert np.all(ds["is_mcs"].values == 0)                 # 150 km major axis but 40 km of cell diameters
+
+    def test_the_45_dbz_area_of_the_convective_pixels_is_the_default(self, tmp_path):
+        """No mcs_dbz45_area_varname: conv_area_45dbz. The long feature has 45 dBZ echo, but none in its convective pixels: not an MCS."""
+        stats_path = _build_sparse_trackstats_file(tmp_path)
+        config = _make_driver_config(stats_path)
+        config.update(mcs_size_method="majoraxis")                          # not an earlier config: the current defaults
+        config.pop("mcs_dbz45_area_varname")                                 # the fixture names it: the default is what is tested
+        ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
+        assert np.all(ds["is_mcs"].values == 0) and ds.attrs["mcs_dbz45_area_varname"] == "conv_area_45dbz"
+        # the whole-feature area is still there when a config asks for it
+        config.update(mcs_dbz45_area_varname="area_45dbz")
+        ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
+        assert int(ds["is_mcs"].values.sum()) == 1 and ds.attrs["mcs_dbz45_area_varname"] == "area_45dbz"
+
+    def test_convective_pixels_above_45_dbz_make_the_mcs(self, tmp_path):
+        stats_path = _build_sparse_trackstats_file(tmp_path, conv_area_45dbz=20.0)
+        config = _make_driver_config(stats_path)
+        config.update(mcs_size_method="majoraxis")
+        config.pop("mcs_dbz45_area_varname")
+        ds = xr.open_dataset(identifymcs_radar(config), decode_times=False, mask_and_scale=False)
+        assert int(ds["is_mcs"].values.sum()) == 1
 
     def test_small_cells_in_a_long_feature_are_not_mcs(self, tmp_path):
         stats_path = _build_sparse_trackstats_file(tmp_path)

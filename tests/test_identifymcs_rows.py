@@ -239,6 +239,8 @@ def test_rows_step_equals_dense_step_on_the_three_track_file(tmp_path):
     dense, rows = run_both(stats_path)
     assert table_differences(dense, rows) == []
     assert len(rows.duration) == 2 and rows.fragments["cloudnumber"].tolist() == [101, 102]
+    # the MCS number is a track variable of the rows (equal to the dense file by table_differences above)
+    assert sorted(rows.tracks["mcs_number"].tolist()) == [0, 1] and rows.tracks["is_mcs"].tolist() == [int(n > 0) for n in rows.tracks["mcs_number"]]
 
 
 @pytest.mark.parametrize("seed", range(12))

@@ -596,3 +596,347 @@ class TestLifecycleRobustness:
                 assert set(np.unique(stage)) <= {1, 2, 3, 4, 5}
                 assert np.all((idx >= -1) & (idx < len(t)))
                 assert ncycles >= 0 and isinstance(complete, bool)
+
+
+# ---------------------------------------------------------------------------
+# The staging of the lifecycle without lags: genesis = first time of the organized line, mature = after it while line and
+# stratiform area hold, decay = after the last mature time. "After" is a later sample, not a duration.
+# ---------------------------------------------------------------------------
+
+TEXTBOOK_PARAMS = dict(L.PARAMS, mcs_lifecycle_genesis_lag_hour=0.0, mcs_lifecycle_mature_lag_hour=0.0)
+
+
+def _ideal(dt, hours=14.0):
+    """Convective initiation at 1 h, line from 2 h to 10 h, stratiform area above its mean from 4 h to 8 h."""
+    t = np.arange(0.0, hours, dt)
+    conv = np.where(t >= 1.0, 50.0, 0.0)
+    length = np.where((t >= 2.0) & (t < 10.0), 150.0, np.where(t >= 1.0, 40.0, 0.0))
+    strat = np.where(t < 4.0, 100.0, np.where(t < 8.0, 5000.0, 300.0))
+    return t, conv, length, strat
+
+
+class TestStagesFollowOneAnother:
+
+    @pytest.mark.parametrize("dt", [1.0 / 12.0, 1.0 / 6.0, 0.25, 1.0 / 3.0, 0.5, 1.0])
+    def test_onsets_are_the_same_at_every_resolution(self, dt):
+        """5, 10, 15, 20, 30 and 60 min: genesis at the first line sample (2 h), mature at 4 h, decay at 8 h, one cycle, complete."""
+        t, conv, length, strat = _ideal(dt)
+        stage, cycle, idx, ncycles, complete = classify_lifecycle(conv, length, strat, dt, TEXTBOOK_PARAMS, time_hours=t)
+        assert ncycles == 1 and complete
+        np.testing.assert_allclose(t[idx[1:5]], [1.0, 2.0, 4.0, 8.0], atol=1e-9)
+        assert np.all(np.diff(stage[stage >= STAGE_UNORGANIZED]) >= 0)          # the stages only follow one another
+
+    def test_the_lags_of_the_hourly_design_start_genesis_and_mature_later(self):
+        """With the lags of 1 h and 2 h that the earlier configs set: genesis 1 h after the line, mature 2 h after genesis."""
+        t, conv, length, strat = _ideal(1.0 / 12.0)
+        _, _, idx, _, _ = classify_lifecycle(conv, length, strat, 1.0 / 12.0, L.PARAMS, time_hours=t)
+        np.testing.assert_allclose(t[idx[2:4]], [3.0, 5.0], atol=1e-9)
+
+    def test_one_line_sample_is_genesis_and_has_no_mature_stage(self):
+        n = 30
+        conv, strat = np.full(n, 50.0), np.full(n, 1000.0)
+        length = np.full(n, 40.0)
+        length[10] = 150.0
+        stage, _, idx, ncycles, complete = classify_lifecycle(conv, length, strat, DT, TEXTBOOK_PARAMS)
+        assert ncycles == 1 and not complete
+        assert stage[10] == STAGE_GENESIS and idx[3] == -1
+
+    def test_mature_starts_at_a_later_sample_than_genesis_even_when_the_stratiform_area_is_there_from_the_start(self):
+        n = 40
+        conv, length, strat = np.full(n, 50.0), np.full(n, 150.0), np.full(n, 1000.0)
+        stage, _, idx, _, _ = classify_lifecycle(conv, length, strat, DT, TEXTBOOK_PARAMS)
+        assert idx[2] == 0 and idx[3] == 1
+        assert stage[0] == STAGE_GENESIS and stage[1] == STAGE_MATURE
+
+    def test_the_median_floor_is_lower_than_the_mean_floor_of_a_skewed_series(self):
+        n = 40
+        conv, length = np.full(n, 50.0), np.full(n, 150.0)
+        strat = np.r_[np.full(30, 100.0), np.full(10, 10000.0)]
+        mean_params, median_params = dict(TEXTBOOK_PARAMS), dict(TEXTBOOK_PARAMS, mcs_lifecycle_sf_stat='median')
+        assert stratiform_floor(strat, mean_params) == pytest.approx(2575.0)
+        assert stratiform_floor(strat, median_params) == pytest.approx(100.0)
+        mature_mean = classify_lifecycle(conv, length, strat, DT, mean_params)[2][3]
+        mature_median = classify_lifecycle(conv, length, strat, DT, median_params)[2][3]
+        assert mature_mean == 30 and mature_median == 1
+        with pytest.raises(ValueError, match="mcs_lifecycle_sf_stat"):
+            stratiform_floor(strat, dict(TEXTBOOK_PARAMS, mcs_lifecycle_sf_stat='mode'))
+
+
+class TestLifecycleSettings:
+
+    def test_effective_constants_at_several_resolutions(self):
+        from pyflextrkr.mcs_lifecycle import effective_constants, effective_constants_text
+        params = dict(TEXTBOOK_PARAMS, mcs_lifecycle_smooth_hour=0.5)
+        samples = {dt: effective_constants(params, dt)['smooth_samples'] for dt in (1.0 / 12.0, 0.25, 0.5, 1.0)}
+        assert samples == {1.0 / 12.0: 7, 0.25: 3, 0.5: 1, 1.0: 1}               # no smoothing from 30 min on
+        c = effective_constants(L.PARAMS, 1.0)                                    # the lags of the hourly design are whole steps there
+        assert (c['genesis_lag_hour'], c['mature_lag_hour'], c['gap_hour']) == (1.0, 2.0, 1.0)
+        assert effective_constants(TEXTBOOK_PARAMS, 0.5)['genesis_lag_hour'] == 0.0           # 0 stays 0, it is not rounded up to a step
+        assert "no smoothing" in effective_constants_text(params, 0.5) and "no smoothing" not in effective_constants_text(params, 1.0 / 12.0)
+
+    def test_lifecycle_tracks_selects_by_lifetime_class_and_regionprops_selection(self):
+        from pyflextrkr.mcs_lifecycle import lifecycle_tracks
+        life = np.array([2.0, 5.0, 9.0, 12.0, 30.0])
+        cls = np.array([4, 1, 1, 2, 1])
+        everything = np.ones(5, dtype=bool)
+        assert lifecycle_tracks(life, cls, dict(mcs_lifecycle_thresh=0, mcs_lifecycle_classes=[1]), everything).tolist() == [1, 2, 4]
+        assert lifecycle_tracks(life, cls, dict(mcs_lifecycle_thresh=8, mcs_lifecycle_classes=None), everything).tolist() == [2, 3, 4]
+        assert lifecycle_tracks(life, cls, dict(mcs_lifecycle_thresh=0, mcs_lifecycle_classes=[1]), cls != 4).tolist() == [1, 2, 4]
+        assert lifecycle_tracks(life, None, dict(mcs_lifecycle_thresh=0, mcs_lifecycle_classes=None), np.array([1, 0, 0, 0, 1], bool)).tolist() == [0, 4]
+
+    def test_global_attributes_record_the_settings(self):
+        from pyflextrkr.mcs_lifecycle import lifecycle_global_attrs
+        attrs = lifecycle_global_attrs(dict(TEXTBOOK_PARAMS, mcs_lifecycle_thresh=0, mcs_lifecycle_smooth_hour=0.5, mcs_lifecycle_sf_stat='mean',
+                                            mcs_lifecycle_classes=[1]), DT)
+        assert attrs['mcs_lifecycle_thresh_hour'] == 0 and attrs['mcs_lifecycle_smooth_samples'] == 7
+        assert attrs['mcs_lifecycle_classes'].tolist() == [1] and attrs['mcs_lifecycle_genesis_lag_hour'] == 0.0
+        assert 'mcs_lifecycle_classes' not in lifecycle_global_attrs(dict(TEXTBOOK_PARAMS, mcs_lifecycle_thresh=8, mcs_lifecycle_smooth_hour=0.5,
+                                                                          mcs_lifecycle_sf_stat='mean', mcs_lifecycle_classes=None), DT)
+
+
+# ---------------------------------------------------------------------------
+# The single-pass method (mcs_lifecycle_method 'single'): one genesis, no decay before the first mature stage, interruptions of the
+# mature stage bridged, a line that returns before maturity is "redeveloping" (stage 6)
+# ---------------------------------------------------------------------------
+
+from pyflextrkr.mcs_lifecycle import (  # noqa: E402
+    STAGE_REDEVELOPING, classify_lifecycle_single, count_runs, mature_segments, n_lifecycle_stages, lifecycle_method,
+    lifecycle_line_varname, lifecycle_variable_attrs, effective_constants, effective_constants_text,
+)
+
+SINGLE_PARAMS = dict(L.PARAMS, mcs_lifecycle_method='single', mcs_lifecycle_line_method='conv_diameter_sum', mcs_lifecycle_sf_stat='median',
+                     mcs_lifecycle_genesis_lag_hour=0.0, mcs_lifecycle_mature_lag_hour=0.0, mcs_lifecycle_smooth_hour=0.0)
+
+
+def _trace(hours, line_on, strat_points, conv_from=0.5, dt=DT):
+    """
+    A synthetic track on a regular axis: convective area from conv_from, line 150 km inside the (start, end) hour intervals of
+    line_on and 40 km elsewhere (0 without convection), stratiform area = linear interpolation of the (hour, km2) points.
+    """
+    t = np.arange(0.0, hours, dt)
+    conv = np.where(t >= conv_from, 50.0, 0.0)
+    length = np.where(t >= conv_from, 40.0, 0.0)
+    for a, b in line_on:
+        length[(t >= a) & (t < b)] = 150.0
+    xs, ys = zip(*strat_points)
+    return t, conv, length, np.interp(t, xs, ys)
+
+
+def _stage_at(t, stage, hour):
+    """The stage of the sample at (or just after) an hour."""
+    return int(stage[int(np.searchsorted(t, hour - 1e-9))])
+
+
+class TestSinglePassLifecycle:
+
+    @pytest.mark.parametrize("dt", [1.0 / 12.0, 1.0 / 6.0, 0.25, 1.0 / 3.0, 0.5, 1.0])
+    def test_ideal_track_is_one_genesis_mature_decay_at_every_resolution(self, dt):
+        """Genesis at the first line sample (2 h), mature at 4 h, decay when the line ends (10 h): the same at 5 ... 60 min."""
+        t, conv, length, strat = _ideal(dt)
+        stage, cycle, idx, ncycles, complete = classify_lifecycle(conv, length, strat, dt, SINGLE_PARAMS, time_hours=t)
+        assert complete and ncycles == 1 and mature_segments(stage) == 1 and len(idx) == 6
+        np.testing.assert_allclose(t[idx[1:5]], [1.0, 2.0, 4.0, 10.0], atol=1e-9)
+        assert idx[5] == -1                                                       # no redeveloping
+        assert np.all(np.diff(stage[stage >= STAGE_UNORGANIZED]) >= 0)
+        assert cycle[t < 2.0].max() == 0 and cycle[t >= 2.0].min() == 1
+
+    def test_a_returning_line_before_maturity_is_redeveloping_never_a_second_genesis(self):
+        """Line 2-3 h (strat low), gone 3-5 h, back 5-6 h (strat still low), then line and stratiform area 6-10 h."""
+        t, conv, length, strat = _trace(14.0, [(2, 3), (5, 10)], [(0, 10.0), (5.9, 10.0), (6.0, 5000.0), (10.0, 5000.0), (10.1, 200.0), (14.0, 200.0)])
+        stage, cycle, idx, _, complete = classify_lifecycle_single(conv, length, strat, DT, SINGLE_PARAMS, time_hours=t)
+        assert [_stage_at(t, stage, h) for h in (1.0, 2.5, 4.0, 5.5, 7.0, 11.0)] == [
+            STAGE_UNORGANIZED, STAGE_GENESIS, STAGE_UNORGANIZED, STAGE_REDEVELOPING, STAGE_MATURE, STAGE_DECAY]
+        assert count_runs(stage, STAGE_GENESIS) == 1 and complete and idx[5] == t.tolist().index(t[stage == STAGE_REDEVELOPING][0])
+
+    def test_no_decay_without_a_mature_stage_and_the_returning_line_is_redeveloping(self):
+        t, conv, length, strat = _trace(10.0, [(2, 4), (6, 8)], [(0, 0.0), (10, 0.0)])         # no stratiform area at all
+        stage, _, idx, ncycles, complete = classify_lifecycle_single(conv, length, strat, DT, SINGLE_PARAMS, time_hours=t)
+        assert not complete and ncycles == 2 and idx[3] == -1 and idx[4] == -1
+        assert [_stage_at(t, stage, h) for h in (3.0, 5.0, 7.0, 9.0)] == [STAGE_GENESIS, STAGE_UNORGANIZED, STAGE_REDEVELOPING, STAGE_UNORGANIZED]
+
+    def test_a_line_dip_inside_the_mature_stage_is_bridged_while_the_stratiform_area_holds(self):
+        """Line 2-6 and 9-10 h, off 6-9 h (3 h, longer than the 1 h gap) but the stratiform area stays above its floor from 4 h on."""
+        t, conv, length, strat = _trace(14.0, [(2, 6), (9, 10)], [(0, 100.0), (3.9, 100.0), (4.0, 5000.0), (12.0, 5000.0), (12.1, 100.0), (14.0, 100.0)])
+        stage, _, idx, _, complete = classify_lifecycle_single(conv, length, strat, DT, SINGLE_PARAMS, time_hours=t)
+        assert mature_segments(stage) == 1 and complete
+        assert np.all(stage[(t >= 4.0) & (t < 10.0)] == STAGE_MATURE)                 # the dip does not interrupt it
+        assert np.all(stage[t >= 10.0] == STAGE_DECAY) and count_runs(stage, STAGE_DECAY) == 1
+        # a dip with the stratiform area holding is bridged whatever the gap: the system is still there
+        same = classify_lifecycle_single(conv, length, strat, DT, dict(SINGLE_PARAMS, mcs_lifecycle_gap_hour=0.0), time_hours=t)[0]
+        assert np.array_equal(same, stage)
+
+    def test_a_stretch_without_line_and_stratiform_area_is_bridged_only_up_to_the_gap(self):
+        """Line on 2-10 h except 6-6.5 h, stratiform area at its floor 4-12 h except 6-6.5 h: neither holds for 0.5 h."""
+        strat = [(0, 100.0), (3.9, 100.0), (4.0, 5000.0), (5.99, 5000.0), (6.0, 100.0), (6.49, 100.0), (6.5, 5000.0), (12.0, 5000.0), (12.1, 100.0), (14.0, 100.0)]
+        t, conv, length, strat = _trace(14.0, [(2, 6), (6.5, 10)], strat)
+        for gap, segments in ((1.0, 1), (0.5, 1), (0.25, 2), (0.0, 2)):
+            stage = classify_lifecycle_single(conv, length, strat, DT, dict(SINGLE_PARAMS, mcs_lifecycle_gap_hour=gap), time_hours=t)[0]
+            assert mature_segments(stage) == segments
+        assert _stage_at(t, stage, 6.25) == STAGE_DECAY                              # gap 0: the stretch between the segments
+
+    def test_a_real_dissipation_gives_two_mature_segments_and_the_line_between_is_redeveloping(self):
+        """Line and stratiform area 3-6 h and 9-13 h; nothing from 6 to 9 h except a line without stratiform area at 7.5-9 h."""
+        strat = [(0, 50.0), (2.9, 50.0), (3.0, 5000.0), (6.0, 5000.0), (6.1, 50.0), (8.9, 50.0), (9.0, 5000.0), (13.0, 5000.0), (13.1, 50.0), (14.0, 50.0)]
+        t, conv, length, strat = _trace(14.0, [(2, 6), (9, 13)], strat)
+        stage, cycle, _, _, _ = classify_lifecycle_single(conv, length, strat, DT, SINGLE_PARAMS, time_hours=t)
+        assert mature_segments(stage) == 2
+        assert [_stage_at(t, stage, h) for h in (2.5, 4.0, 7.0, 10.0, 13.5)] == [STAGE_GENESIS, STAGE_MATURE, STAGE_DECAY, STAGE_MATURE, STAGE_DECAY]
+        assert cycle[t < 2.0].max() == 0 and _stage_at(t, cycle, 4.0) == 1 and _stage_at(t, cycle, 10.0) == 2
+        # the same with a line returning at 7.5-9 h that has no stratiform area: that stretch is redeveloping
+        t, conv, length, strat = _trace(14.0, [(2, 6), (7.5, 13)], [(0, 50.0), (2.9, 50.0), (3.0, 5000.0), (6.0, 5000.0), (6.1, 50.0), (8.9, 50.0), (9.0, 5000.0), (13.0, 5000.0), (13.1, 50.0), (14.0, 50.0)])
+        stage = classify_lifecycle_single(conv, length, strat, DT, SINGLE_PARAMS, time_hours=t)[0]
+        assert _stage_at(t, stage, 6.5) == STAGE_DECAY and _stage_at(t, stage, 8.0) == STAGE_REDEVELOPING and mature_segments(stage) == 2
+
+    def test_the_line_at_the_first_sample_is_genesis_and_mature_follows_at_a_later_sample(self):
+        n = 40
+        conv, length, strat = np.full(n, 50.0), np.full(n, 150.0), np.full(n, 1000.0)
+        stage, _, idx, _, _ = classify_lifecycle_single(conv, length, strat, DT, SINGLE_PARAMS)
+        assert idx[2] == 0 and idx[3] == 1 and stage[0] == STAGE_GENESIS and np.all(stage[1:] == STAGE_MATURE)
+
+    def test_without_a_line_there_are_only_cloud_only_and_unorganized(self):
+        t, conv, length, strat = _trace(6.0, [], [(0, 100.0), (6, 100.0)])
+        stage, cycle, idx, ncycles, complete = classify_lifecycle_single(conv, length, strat, DT, SINGLE_PARAMS, time_hours=t)
+        assert set(np.unique(stage)) == {STAGE_CLOUD_ONLY, STAGE_UNORGANIZED} and ncycles == 0 and not complete and np.all(cycle == 0)
+        assert classify_lifecycle_single(np.array([]), np.array([]), np.array([]), DT, SINGLE_PARAMS)[2].tolist() == [-1] * 6
+
+    def test_the_order_rules_hold_for_random_series(self):
+        """No decay before the first mature stage, one genesis run, redeveloping only after genesis and never after the last mature stage."""
+        rng = np.random.default_rng(3)
+        for _ in range(200):
+            n = int(rng.integers(20, 200))
+            conv = np.where(_random_runs(rng, n, 0.8), 50.0, 0.0)
+            length = np.where(_random_runs(rng, n, 0.5), 150.0, 40.0) * (conv > 0)
+            strat = rng.choice([0.0, 100.0, 1000.0, 8000.0], size=n)
+            stage, cycle, idx, ncycles, complete = classify_lifecycle_single(conv, length, strat, DT, SINGLE_PARAMS)
+            g, m, d, r = (np.where(stage == s)[0] for s in (STAGE_GENESIS, STAGE_MATURE, STAGE_DECAY, STAGE_REDEVELOPING))
+            assert count_runs(stage, STAGE_GENESIS) <= 1
+            assert not d.size or (m.size and d[0] > m[0])
+            assert not r.size or (g.size and r[0] > g[0])
+            assert not (r.size and m.size) or r[-1] < m[-1]
+            assert np.all(np.diff(cycle) >= 0) and (idx == np.array([(np.where(stage == s)[0][:1].tolist() or [-1])[0] for s in range(1, 7)])).all()
+            assert complete == bool(g.size and m.size and d.size) and mature_segments(stage) == count_runs(stage, STAGE_MATURE)
+
+    def test_the_dispatch_passes_the_line_series_and_the_method_key_defaults_to_the_earlier_rules(self):
+        t, conv, length, strat = _ideal(DT)
+        a = classify_lifecycle(conv, length, strat, DT, SINGLE_PARAMS, time_hours=t)
+        b = classify_lifecycle_single(conv, length, strat, DT, SINGLE_PARAMS, time_hours=t)
+        assert all(np.array_equal(x, y) for x, y in zip(a[:3], b[:3])) and a[3:] == b[3:]
+        episodes = classify_lifecycle(conv, length, strat, DT, dict(TEXTBOOK_PARAMS, mcs_lifecycle_method='episodes'), time_hours=t)
+        assert len(episodes[2]) == 5 and all(np.array_equal(x, y) for x, y in zip(episodes[:3], classify_lifecycle(conv, length, strat, DT, TEXTBOOK_PARAMS, time_hours=t)[:3]))
+        with pytest.raises(ValueError, match="mcs_lifecycle_method"):
+            classify_lifecycle(conv, length, strat, DT, dict(SINGLE_PARAMS, mcs_lifecycle_method='cycles'))
+
+    def test_the_stages_do_not_depend_on_an_irregular_time_axis(self):
+        """The MRMS steps alternate between 4 and 6 minutes: the same sequence of stages as the regular axis, onsets within one step."""
+        steps = np.tile([4.0, 6.0], 200) / 60.0
+        t = np.r_[0.0, np.cumsum(steps)]
+        t = t[t < 14.0]
+        conv = np.where(t >= 1.0, 50.0, 0.0)
+        length = np.where((t >= 2.0) & (t < 10.0), 150.0, np.where(t >= 1.0, 40.0, 0.0))
+        strat = np.where(t < 4.0, 100.0, np.where(t < 8.0, 5000.0, 300.0))
+        stage, _, idx, _, complete = classify_lifecycle_single(conv, length, strat, DT, SINGLE_PARAMS, time_hours=t)
+        assert complete and mature_segments(stage) == 1
+        np.testing.assert_allclose(t[idx[1:5]], [1.0, 2.0, 4.0, 10.0], atol=0.1)
+
+    def test_the_helpers_the_attributes_and_the_log_line(self):
+        assert count_runs([1, 3, 3, 1, 3], 3) == 2 and mature_segments([2, 4, 4, 5, 4]) == 2 and mature_segments([]) == 0
+        assert (n_lifecycle_stages(SINGLE_PARAMS), n_lifecycle_stages(L.PARAMS)) == (6, 5)
+        assert lifecycle_method(L.PARAMS) == 'episodes' and lifecycle_line_varname(L.PARAMS) == 'conv_majoraxis'
+        with pytest.raises(ValueError, match="mcs_lifecycle_line_method"):
+            lifecycle_line_varname(dict(L.PARAMS, mcs_lifecycle_line_method='majoraxis'))
+        attrs, comment = lifecycle_variable_attrs(SINGLE_PARAMS, -9999)
+        assert '6=redeveloping' in attrs['lifecycle_stage']['long_name'] and '(1-6)' in attrs['lifecycle_index']['long_name']
+        assert {'lifecycle_nmature', 'lifecycle_erratic_flag'} <= set(attrs) and 'conv_diameter_sum' in comment
+        old_attrs, old_comment = lifecycle_variable_attrs(dict(L.PARAMS), -9999)
+        assert 'lifecycle_nmature' not in old_attrs and '6=' not in old_attrs['lifecycle_stage']['long_name'] and 'conv_majoraxis' in old_comment
+        text = effective_constants_text(dict(SINGLE_PARAMS, mcs_lifecycle_smooth_hour=0.5), DT)
+        assert 'single genesis' in text and 'conv_diameter_sum' in text and 'median' in text and 'bridged up to 1 h' in text
+        assert effective_constants(SINGLE_PARAMS, 0.5)['gap_hour'] == 1.0 and effective_constants(L.PARAMS, 1.0 / 12.0)['gap_hour'] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Natural upscale growth flag (lifecycle_upscale_flag) and the times to genesis / mature / redeveloping
+# ---------------------------------------------------------------------------
+
+from pyflextrkr.mcs_lifecycle import (  # noqa: E402
+    UPSCALE_FLAG_MASKS, UPSCALE_FLAG_MEANINGS, UPSCALE_GENESIS_OBSERVED, UPSCALE_MATURE_AFTER_MIN_TIME, UPSCALE_MATURE_OBSERVED,
+    UPSCALE_REDEVELOPING_BEFORE_MATURE, UPSCALE_REQUIRED_MASK, UPSCALE_STARTS_UNORGANIZED, upscale_growth,
+)
+
+
+def _hours(stage):
+    """A 5-minute time axis for a stage array."""
+    return np.arange(len(stage)) * DT
+
+
+class TestUpscaleGrowthFlag:
+
+    def test_the_bits_and_the_requirement_mask(self):
+        assert UPSCALE_FLAG_MASKS == (1, 2, 4, 8, 16) and UPSCALE_REQUIRED_MASK == 15
+        assert UPSCALE_FLAG_MEANINGS.split() == ["starts_unorganized", "genesis_observed", "mature_observed", "mature_after_min_time",
+                                                 "redeveloping_before_mature"]
+
+    def test_an_ideal_track_meets_every_requirement_and_the_times_are_from_the_first_sample(self):
+        # cloud only, unorganized, genesis (from 2 h), mature (from 4 h), decay (from 10 h) on a 5-minute axis
+        t, conv, length, strat = _ideal(DT)
+        stage = classify_lifecycle_single(conv, length, strat, DT, SINGLE_PARAMS, time_hours=t)[0]
+        flag, t_g, t_m, t_r = upscale_growth(stage, t, 1.0)
+        assert flag == 15 and (flag & UPSCALE_REQUIRED_MASK) == UPSCALE_REQUIRED_MASK
+        np.testing.assert_allclose([t_g, t_m], [2.0, 4.0], atol=1e-9)
+        assert np.isnan(t_r)
+        # the times count from the first sample, whatever the clock of the axis
+        flag2, t_g2, t_m2, _ = upscale_growth(stage, t + 100.0, 1.0)
+        assert flag2 == flag and (t_g2, t_m2) == pytest.approx((t_g, t_m))
+
+    def test_a_track_that_starts_already_organized_does_not_set_the_first_bit(self):
+        stage = np.array([3, 3, 4, 4, 4, 5, 5])
+        flag, t_g, t_m, _ = upscale_growth(stage, _hours(stage) * 12, 1.0)           # steps of 1 h
+        assert flag & UPSCALE_STARTS_UNORGANIZED == 0 and flag & UPSCALE_GENESIS_OBSERVED and flag & UPSCALE_MATURE_OBSERVED
+        assert t_g == 0.0 and t_m == 2.0 and flag & UPSCALE_MATURE_AFTER_MIN_TIME
+
+    def test_the_minimum_time_to_mature_sets_its_bit_and_a_key_changes_it(self):
+        stage = np.array([2, 2, 3, 4, 4, 5])
+        t = np.arange(6) * 0.25                                                       # mature after 0.75 h
+        assert upscale_growth(stage, t, 1.0)[0] & UPSCALE_MATURE_AFTER_MIN_TIME == 0
+        assert upscale_growth(stage, t, 0.5)[0] & UPSCALE_MATURE_AFTER_MIN_TIME
+        assert upscale_growth(stage, t, 0.0)[0] == 15
+        # exactly at the limit counts
+        assert upscale_growth(np.array([2, 3, 4]), np.array([0.0, 0.5, 1.0]), 1.0)[0] & UPSCALE_MATURE_AFTER_MIN_TIME
+
+    def test_a_redeveloping_stage_before_the_first_mature_stage_is_recorded_not_required(self):
+        stage = np.array([2, 3, 2, 6, 6, 4, 4, 5])
+        flag, t_g, t_m, t_r = upscale_growth(stage, np.arange(8) * 1.0, 1.0)
+        assert flag == 31 and (flag & UPSCALE_REQUIRED_MASK) == UPSCALE_REQUIRED_MASK
+        assert flag & UPSCALE_REDEVELOPING_BEFORE_MATURE and (t_g, t_r, t_m) == (1.0, 3.0, 5.0)
+        # a redeveloping stage after the first mature stage does not set the information bit, but its time is not recorded
+        # either unless it is the first one: the time is the first redeveloping sample of the track
+        stage2 = np.array([2, 3, 4, 4, 5, 6, 4, 5])
+        flag2, _, _, t_r2 = upscale_growth(stage2, np.arange(8) * 1.0, 1.0)
+        assert flag2 == 15 and t_r2 == 5.0
+
+    def test_missing_stages_give_nan_times_and_no_bits(self):
+        flag, t_g, t_m, t_r = upscale_growth(np.array([1, 2, 2, 2]), np.arange(4) * 1.0, 1.0)
+        assert flag == UPSCALE_STARTS_UNORGANIZED and np.isnan([t_g, t_m, t_r]).all()
+        flag, t_g, t_m, _ = upscale_growth(np.array([2, 3, 3, 6]), np.arange(4) * 1.0, 1.0)         # genesis, never mature
+        assert flag == (UPSCALE_STARTS_UNORGANIZED | UPSCALE_GENESIS_OBSERVED | UPSCALE_REDEVELOPING_BEFORE_MATURE) and np.isnan(t_m)
+        assert upscale_growth(np.array([], dtype=int), np.array([]), 1.0)[0] == 0
+
+    @pytest.mark.parametrize("dt", [1.0 / 12.0, 1.0 / 6.0, 0.25, 0.5, 1.0])
+    def test_the_flag_and_the_times_do_not_depend_on_the_time_resolution(self, dt):
+        t, conv, length, strat = _ideal(dt)
+        stage = classify_lifecycle_single(conv, length, strat, dt, SINGLE_PARAMS, time_hours=t)[0]
+        flag, t_g, t_m, t_r = upscale_growth(stage, t, 1.0)
+        assert flag == 15 and np.isnan(t_r)
+        assert abs(t_g - 2.0) <= dt + 1e-9 and abs(t_m - 4.0) <= dt + 1e-9
+
+    def test_the_attributes_of_the_new_variables(self):
+        attrs, _ = lifecycle_variable_attrs(SINGLE_PARAMS, -9999)
+        assert list(attrs['lifecycle_upscale_flag']['flag_masks']) == [1, 2, 4, 8, 16]
+        assert attrs['lifecycle_upscale_flag']['flag_meanings'] == UPSCALE_FLAG_MEANINGS
+        assert 'mature_after_min_time' in attrs['lifecycle_upscale_flag']['flag_description'] and '(flag & 15) == 15' in attrs['lifecycle_upscale_flag']['flag_description']
+        for name in ("genesis", "mature", "redeveloping"):
+            a = attrs[f'lifecycle_time_to_{name}_hr']
+            assert a['units'] == 'hour' and np.isnan(a['_FillValue'])
+        # the earlier method has none of them
+        old_attrs, _ = lifecycle_variable_attrs(dict(L.PARAMS), -9999)
+        assert not any(k.startswith(('lifecycle_upscale', 'lifecycle_time_to')) for k in old_attrs)
