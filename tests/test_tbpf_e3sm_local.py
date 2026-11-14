@@ -6,7 +6,7 @@ monthly rain map and the precipitation accumulated along the tracks. The file of
 the file of 00 UTC is complete): that frame is skipped, recorded in the manifest of idfeature, and the output checks pass.
 
 Needs $PYFLEXTRKR_E3SM_INPUT (the folder with the year folders, .../olr_pcp) and, because of the `local` marker, $PYFLEXTRKR_TEST_DATA set to any
-folder; run folders below $PYFLEXTRKR_TEST_WORKDIR (default: a pytest temporary folder; about 20 GB for 3 days), the days $PYFLEXTRKR_E3SM_DAYS (3),
+folder; run folders below $PYFLEXTRKR_TEST_WORKDIR (default: a pytest temporary folder; about 4 GB for 3 days), the days $PYFLEXTRKR_E3SM_DAYS (3),
 the workers $PYFLEXTRKR_TEST_NPROCS (the 128 of the template); $PYFLEXTRKR_TEST_REUSE=1 compares the runs that finished before in that folder
 without making them again. The step ledgers
 (wall time, CPU, memory of every step) are in <workdir>/<run>/ledger/step_ledger.jsonl. Nothing is submitted: the scripts run on this node.
