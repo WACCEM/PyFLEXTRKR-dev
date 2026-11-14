@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from pyflextrkr.rowstats import (RaggedArray, RowStats, TableBuilder, dense_to_rows, load_trackstats, read_tables, rows_to_dense,
-                                 subset_tracks, table_differences, write_dense_netcdf, write_rows)
+from pyflextrkr.rowstats import (RaggedArray, RowStats, TableBuilder, dense_to_rows, load_trackstats, rows_to_dense, subset_tracks,
+                                 table_differences, write_dense_netcdf, write_rows)
 from test_rowstats import NTIMES, NTRACKS, _assert_same_dataset, _dense, _write
 
 NPF = 3

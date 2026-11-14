@@ -172,20 +172,29 @@ def open_data_source(config, start_basetime=None, end_basetime=None):
     .zarr is a Zarr store), _data_time_varname, _data_scale, _data_offset, and for NetCDF files named by time
     _data_subdir_format (strftime pattern of day or month folders, null = flat folder) and _data_every_sec (only the files whose
     time is a multiple of it, null = all files).
+
+    Without trackpcp_data_path (null or absent) the data are the pixel-level files of the run itself (pixeltracking_outpath, files named
+    pixeltracking_filebase): the Tb+PF pixel files hold the precipitation (trackpcp_data_varname, default 'precipitation') at the times of the
+    mask, so no second copy of the data is needed.
     """
-    path = config["trackpcp_data_path"]
+    path = config.get("trackpcp_data_path")
+    from_pixel_files = path is None
+    if from_pixel_files:
+        path = config["pixeltracking_outpath"]
     fmt = config.get("trackpcp_data_format", None)
     if fmt is None:
         fmt = "zarr" if path.rstrip("/").endswith(".zarr") else "netcdf"
-    varname = config["trackpcp_data_varname"]
+    varname = config.get("trackpcp_data_varname", "precipitation") if from_pixel_files else config["trackpcp_data_varname"]
     scale = float(config.get("trackpcp_data_scale", 1.0))
     offset = float(config.get("trackpcp_data_offset", 0.0))
     if fmt == "zarr":
         return ZarrSource(path, varname=varname, time_varname=config.get("trackpcp_data_time_varname", None) or "time",
                           start_basetime=start_basetime, end_basetime=end_basetime, scale=scale, offset=offset)
     if fmt == "netcdf":
+        filebase = (config.get("trackpcp_data_filebase") or config.get("pixeltracking_filebase", "")) if from_pixel_files \
+            else config.get("trackpcp_data_filebase", "")
         return NetCDFFileSource(
-            path, config.get("trackpcp_data_filebase", ""), time_format=config.get("trackpcp_data_time_format", "yyyymodd_hhmmss"),
+            path, filebase, time_format=config.get("trackpcp_data_time_format", "yyyymodd_hhmmss"),
             varname=varname, time_varname=config.get("trackpcp_data_time_varname", None),
             start_basetime=start_basetime, end_basetime=end_basetime, scale=scale, offset=offset,
             subdir_format=config.get("trackpcp_data_subdir_format", None), every_sec=config.get("trackpcp_data_every_sec", None))

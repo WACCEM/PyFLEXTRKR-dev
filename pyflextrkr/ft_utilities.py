@@ -1249,7 +1249,11 @@ def save_grid_area(grid_area, lat2d, lon2d, filepath):
     comp = dict(zlib=True)
     encoding = {var: comp for var in ds.data_vars}
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    ds.to_netcdf(path=filepath, mode="w", format="NETCDF4", encoding=encoding)
+    # Write a file of this process and move it into place in one step: jobs that start at the same time (one job per month) may all
+    # find no file and all write it, and a reader must never see a half-written file (os.replace is atomic on one file system)
+    tmp_path = f"{filepath}.tmp{os.getpid()}"
+    ds.to_netcdf(path=tmp_path, mode="w", format="NETCDF4", encoding=encoding)
+    os.replace(tmp_path, filepath)
     logger.info(f"Grid area file saved: {filepath}")
     return filepath
 

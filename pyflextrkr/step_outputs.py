@@ -39,7 +39,7 @@ from pyflextrkr.ft_utilities import subset_files_timerange
 from pyflextrkr.step_timing import timed_step
 
 STEPS = ("idfeature", "tracksingle", "gettracks", "trackstats", "identifymcs", "matchpf", "robustmcs", "regionprops", "mapfeature",
-         "speed", "trackpcp", "preprocess", "remap_healpix", "regrid_mask")
+         "speed", "rainmap", "trackpcp", "preprocess", "remap_healpix", "regrid_mask")
 
 
 def track_file_name(new_basetime, filebase="track_"):
@@ -475,6 +475,18 @@ def _check_robustmcs(config, strict):
     return (not missing and ntracks > 0), (f"variables {missing} are missing" if missing else f"{ntracks} robust MCS tracks")
 
 
+def _check_rainmap(config, strict):
+    """The monthly maps: one file for every calendar month of the period that has pixel-level files, none of them empty."""
+    from pyflextrkr.rainmap_driver import expected_outputs
+    files = expected_outputs(config)
+    if not files:
+        return False, "no pixel-level files in the period"
+    missing = [f for f in files if not os.path.isfile(f) or os.path.getsize(f) == 0]
+    if missing:
+        return False, f"{len(missing)} of {len(files)} monthly files are missing or empty, e.g. {missing[0]}"
+    return True, f"{len(files)} monthly files"
+
+
 def _check_unchecked(config, strict):
     """
     A step whose outputs are not checked (a conversion or a regridding): it is never skipped (strict: the question "can it be
@@ -483,7 +495,7 @@ def _check_unchecked(config, strict):
     return (not strict), "its outputs are not checked"
 
 
-CHECKS_TBPF = {"identifymcs": _check_identifymcs_tb, "matchpf": _check_matchpf, "robustmcs": _check_robustmcs,
+CHECKS_TBPF = {"identifymcs": _check_identifymcs_tb, "matchpf": _check_matchpf, "robustmcs": _check_robustmcs, "rainmap": _check_rainmap,
                "preprocess": _check_unchecked, "remap_healpix": _check_unchecked, "regrid_mask": _check_unchecked}
 
 
@@ -576,8 +588,8 @@ def run_step(step, config, state, func, client=None, **kwargs):
     return result
 
 
-STEPS_AFTER_TRACKSTATS = ("identifymcs", "matchpf", "robustmcs", "regionprops", "mapfeature", "speed", "trackpcp", "remap_healpix",
-                          "regrid_mask")
+STEPS_AFTER_TRACKSTATS = ("identifymcs", "matchpf", "robustmcs", "regionprops", "mapfeature", "speed", "rainmap", "trackpcp",
+                          "remap_healpix", "regrid_mask")
 
 
 def _note_empty(step, config, state):

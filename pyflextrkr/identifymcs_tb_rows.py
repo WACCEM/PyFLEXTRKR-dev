@@ -3,10 +3,11 @@ Rows-mode identifymcs for Tb tracking (config stats_format: rows).
 
 The same MCS identification from the cold cloud shield (Tb) as identifymcs.identifymcs_tb, on flat arrays (one position for every valid
 (track, time) entry of every track, track after track) instead of the [tracks, times] and [tracks, times, slots] arrays, writing the
-row tables of pyflextrkr.rowstats (a Parquet folder) instead of the dense netCDF file. The dense step keeps a [tracks, longest track]
-array of every variable for all the tracks of the file and scans all the tracks once for every MCS to find the clouds that merge into
-it: for a year of global tracking (about a million tracks) that is memory and time that are not available. Here the memory follows the
-number of entries, and the merging and splitting clouds of all the MCS are found in one pass.
+row tables of pyflextrkr.rowstats (a Parquet folder) instead of the dense netCDF file. The dense step makes [MCS, longest track, nmaxlinks] arrays
+for the cloud numbers, statuses and areas of the merging and splitting clouds (80 kB per MCS and array with 400 times and the 50 slots of the reference
+config: 4 GB for 50,000 MCS, six such arrays in memory, four written to the file, and read again by every later step), and it looks for the clouds that
+merge into or split from an MCS by a pass over all the tracks for every MCS. Here the memory follows the number of entries, and the merging and
+splitting clouds of all the MCS are found in one pass (tests/benchmark_tbpf_rows_scale.py compares the two on a synthetic file of a million tracks).
 
 What is kept as it is in the dense step: a track is an MCS if some period of consecutive times (gaps of at most mcs_tb_gap time
 steps) has a cold cloud shield area (core + cold area) above mcs_tb_area_thresh for at least mcs_tb_duration_thresh hours and the track
