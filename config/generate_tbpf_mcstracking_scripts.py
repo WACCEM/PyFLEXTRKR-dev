@@ -404,9 +404,30 @@ def dependency_option(job_ids):
 ########################################################################################################################
 # The campaign
 ########################################################################################################################
+def pin_code_lines(pin_code):
+    """
+    The line of a slurm script that makes the jobs import this checkout of the package.
+
+    The conda environment has an editable install of one checkout, so a queued job imports whatever that working copy holds when it starts (a
+    branch switch breaks it). Run the generator from a separate git worktree of a commit and pin it: the jobs then import that worktree, whatever
+    happens to the working copy.
+
+    Args:
+        pin_code: bool
+            Pin the checkout of this generator (its folder's parent).
+
+    Returns:
+        lines: string
+            '' or the export line of PYTHONPATH (with a newline), also inherited by the Dask workers that srun starts.
+    """
+    if not pin_code:
+        return ''
+    return f"export PYTHONPATH={shlex.quote(REPO)}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+
+
 def build_campaign(periods, config_template, output_dir, input_dir=None, root_path=None, run_script=DEFAULT_RUN_SCRIPT, chunk_size=None,
                    account='', qos='regular', python_env=DEFAULT_PYTHON_ENV, mail_user=None, track_time='01:00:00', stats_time='06:00:00',
-                   stats_nodes=1, workers_per_node=64, worker_memory='7GB', overrides=None):
+                   stats_nodes=1, workers_per_node=64, worker_memory='7GB', overrides=None, profile_dir=None, pin_code=False):
     """
     Write the configs and the slurm scripts of a campaign and return its jobs.
 
@@ -439,6 +460,11 @@ def build_campaign(periods, config_template, output_dir, input_dir=None, root_pa
             Dask workers per node and their memory limit (multi-node stats job).
         overrides: dictionary (default: None)
             {step: bool} for the optional steps rainmap and trackpcp (replacing the flags of the template).
+        profile_dir: string (default: None)
+            Folder of the step ledgers: every job gets step_profile_dir: <profile_dir>/<job name> (a folder of its own: jobs that run at the
+            same time must not share one step_ledger.jsonl and memory_timeline.csv). None: the key of the template stays as it is.
+        pin_code: bool (default: False)
+            The jobs import the checkout of this generator (PYTHONPATH in every slurm script, see pin_code_lines).
 
     Returns:
         jobs: list of dictionaries
@@ -459,15 +485,19 @@ def build_campaign(periods, config_template, output_dir, input_dir=None, root_pa
         stats_template = f.read()
     config_base = os.path.splitext(os.path.basename(config_template))[0]
     mail_lines = f"#SBATCH --mail-user={mail_user}\n#SBATCH --mail-type=END,FAIL" if mail_user else ''
+    env_lines = pin_code_lines(pin_code)
     jobs = []
 
     def add_job(name, kind, config_text, needs=(), prelude='', wallclock=track_time, multinode=False):
         """Write the config and the slurm script of a job and add it to jobs."""
         config_path = os.path.join(output_dir, f"{config_base}_{name}.yml")
+        # The step ledger of the job in a folder of its own
+        if profile_dir:
+            config_text = set_key(config_text, 'step_profile_dir', os.path.join(os.path.abspath(profile_dir), name))
         with open(config_path, 'w') as f:
             f.write(config_text)
         tokens = {'ACCOUNT': account, 'QOS': qos, 'JOB_NAME': name, 'WALLCLOCK': wallclock, 'MAIL_LINES': mail_lines,
-                  'PYTHON_ENV': python_env, 'PRELUDE': prelude, 'RUN_SCRIPT': run_script_path, 'CONFIG': config_path,
+                  'PYTHON_ENV': python_env, 'ENV_LINES': env_lines, 'PRELUDE': prelude, 'RUN_SCRIPT': run_script_path, 'CONFIG': config_path,
                   'NODES': stats_nodes, 'WORKERS_PER_NODE': workers_per_node, 'WORKER_MEMORY': worker_memory,
                   'CPUS_PER_WORKER': CPUS_PER_WORKER}
         script_path = os.path.join(output_dir, f"slurm_{name}.sh")
@@ -547,6 +577,11 @@ def submit(jobs, output_dir, names=None, sbatch='sbatch'):
             raise SystemExit(f"ERROR: submitting {job['name']} failed: {e.stderr.strip()}\njobs submitted before it: {ids if ids else 'none'}")
         ids[job['name']] = result.stdout.strip().split(';')[0]
         print(f"  submitted {job['name']:24s} job {ids[job['name']]}" + (f"  after {', '.join(waits)}" if waits else ''))
+        # The record of the submission (the job ids are what the performance collector and a later resubmission need)
+        record = {'name': job['name'], 'job_id': ids[job['name']], 'after': waits, 'after_ids': [ids[n] for n in waits],
+                  'script': job['script'], 'config': job['config'], 'submitted': datetime.now().isoformat(timespec='seconds')}
+        with open(os.path.join(output_dir, 'submissions.jsonl'), 'a') as f:
+            f.write(json.dumps(record) + '\n')
     return ids
 
 
@@ -581,7 +616,13 @@ def main():
     parser.add_argument('--rainmap', choices=['on', 'off'], default=None, help='the monthly rain maps: on or off (default: run_rainmap of the template)')
     parser.add_argument('--trackpcp', choices=['on', 'off'], default=None,
                         help='the precipitation accumulated along the tracks: on or off (default: run_trackpcp of the template)')
-    parser.add_argument('--submit', action='store_true', help='submit the jobs (default: only write the files)')
+    parser.add_argument('--profile-dir', default=None,
+                        help='folder of the step ledgers (wall time, CPU, memory of every step): every job gets its own folder <profile-dir>/<job name> '
+                             '(default: the step_profile_dir of the template, i.e. off)')
+    parser.add_argument('--pin-code', action='store_true',
+                        help='the jobs import the checkout this generator is in (PYTHONPATH in the slurm scripts): run the generator from a git '
+                             'worktree of a commit, and queued jobs are not affected by what happens to your working copy')
+    parser.add_argument('--submit', action='store_true', help='submit the jobs, and append them to submissions.jsonl (default: only write the files)')
     parser.add_argument('--jobs', nargs='+', default=None, help='with --submit: only these jobs (names are printed); the jobs '
                         'they need that are not listed are taken as finished')
     args = parser.parse_args()
@@ -590,7 +631,7 @@ def main():
     overrides = {step: value == 'on' for step, value in (('rainmap', args.rainmap), ('trackpcp', args.trackpcp)) if value is not None}
     jobs = build_campaign(month_range(args.start, args.end, args.seam_offset_minutes), args.config_template, args.output_dir, args.input_dir, args.root_path, args.run_script,
                           args.chunk_months, args.account, args.qos, args.python_env, args.mail_user, args.track_time, args.stats_time,
-                          args.stats_nodes, args.workers_per_node, args.worker_memory, overrides)
+                          args.stats_nodes, args.workers_per_node, args.worker_memory, overrides, args.profile_dir, args.pin_code)
     print(f"{len(jobs)} jobs, files in {os.path.abspath(args.output_dir)}:")
     for job in jobs:
         print(f"  {job['name']:24s} {job['kind']:6s} " + (f"after {', '.join(job['needs'])}" if job['needs'] else 'at once'))

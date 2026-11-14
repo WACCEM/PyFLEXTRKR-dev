@@ -83,7 +83,7 @@ the steps whose `run_<step>` flags are on, for the dates of the config, with no 
 ## Templates and the generator
 
 ```
-config template (STARTDATE, ENDDATE, YEAR-MONTH, INPUT_DIR, TRACK_DIR) ──┐
+config template (STARTDATE, ENDDATE, YEAR-MONTH, INPUT_DIR, TRACK_DIR)  ──┐
 slurm templates (@TOKENS@)                                              ──┼─> generator ──> <out>/config_..._track<YYYYMM>.yml, slurm_track<YYYYMM>.sh
 run script                                                              ──┘                  <out>/config_..._stats<first>_<last>.yml, slurm_stats...sh
                                                                                             (--submit: sbatch with the dependencies)
@@ -92,6 +92,7 @@ run script                                                              ──�
 | file | use | notes |
 |---|---|---|
 | [config_mcs_tbpf_e3sm_0p1deg_template.yml](../config/config_mcs_tbpf_e3sm_0p1deg_template.yml) | config template of the E3SM 0.1 degree global tracking | the thresholds of [config_mcs_tbpf_imergv7_mcsmip.yml](../config/config_mcs_tbpf_imergv7_mcsmip.yml); `robustmcs_definition`, `stats_format: rows`, `run_rainmap: True`, `run_trackpcp: False` |
+| [config_mcs_tbpf_imergv7_global_template.yml](../config/config_mcs_tbpf_imergv7_global_template.yml) | config template of the global combined Tb + IMERG V07B tracking | the E3SM template with the IMERG data keys (`clouddatasource: gpmirimerg`, `idclouds_minute: 00`, `tb_varname: Tb`, `pcp_varname: precipitation`, `databasename: merg_`): a campaign of each differs only in the data |
 | [slurm_tbpf_mcstracking_track.sh](../config/slurm_tbpf_mcstracking_track.sh) | slurm template, one node | track jobs, the plain job of one month, a stats job on one node; `run_parallel: 1`, `nprocesses` of the config |
 | [slurm_tbpf_mcstracking_stats_multinode.sh](../config/slurm_tbpf_mcstracking_stats_multinode.sh) | slurm template of a stats job on several nodes | a Dask scheduler on the first node and 64 workers per node; the communication timeouts of the production scripts |
 | [generate_tbpf_mcstracking_scripts.py](../config/generate_tbpf_mcstracking_scripts.py) | the generator | self-contained; nothing is submitted without `--submit` |
@@ -104,7 +105,7 @@ Placeholders of the config template (replaced where they stand in a value; a com
 | `YEAR-MONTH` | `YYYY-MM`: the template has `tracking_path_name: tracking/YEAR-MONTH`, so each month has its own folder of cloudid and track files |
 | `INPUT_DIR`, `TRACK_DIR` | `--input-dir` and `--root-path` (the input data and `root_path` of the outputs) |
 
-The slurm templates have `@ACCOUNT@`, `@QOS@`, `@JOB_NAME@`, `@NODES@`, `@WALLCLOCK@`, `@MAIL_LINES@`, `@PYTHON_ENV@`, `@PRELUDE@` (the links and the stitching of a stats job),
+The slurm templates have `@ACCOUNT@`, `@QOS@`, `@JOB_NAME@`, `@NODES@`, `@WALLCLOCK@`, `@MAIL_LINES@`, `@PYTHON_ENV@`, `@ENV_LINES@` (`--pin-code`), `@PRELUDE@` (the links and the stitching of a stats job),
 `@RUN_SCRIPT@`, `@CONFIG@`, `@WORKERS_PER_NODE@`, `@CPUS_PER_WORKER@` and `@WORKER_MEMORY@`; a placeholder that is left stops the generator. No e-mail address or account is written in the
 files: they come from the options.
 
@@ -120,7 +121,9 @@ files: they come from the options.
 | `--stats-nodes N`, `--workers-per-node`, `--worker-memory` | nodes of a stats job (more than 1 uses the multi-node template and `run_parallel: 2`), Dask workers per node (64) and their memory limit (`7GB`) |
 | `--rainmap`, `--trackpcp` | `on` or `off`: replaces the `run_rainmap` / `run_trackpcp` of the template (default: the template decides) |
 | `--run-script`, `--python-env` | the run script (default `run_mcs_tbpf_unified.py`), the conda environment of the jobs |
-| `--submit`, `--jobs NAME ...` | submit; only the named jobs (the jobs they need that are not listed are taken as finished) |
+| `--profile-dir DIR` | the step ledgers (wall time, CPU, memory of every step): every job gets its own folder `DIR/<job name>` as `step_profile_dir` (jobs that run at the same time must not share one ledger); default: the key of the template, i.e. off |
+| `--pin-code` | the jobs import the checkout the generator is in (`export PYTHONPATH=...` in every script). The conda environment has an editable install of one working copy, so a queued job imports whatever that copy holds when it starts (a branch switch breaks it): run the generator from a `git worktree` of a commit and pin it |
+| `--submit`, `--jobs NAME ...` | submit (and append every job with its id and the ids it waits for to `submissions.jsonl` in the output folder); only the named jobs (the jobs they need that are not listed are taken as finished) |
 
 Before the first file is written the generator checks the template: the placeholders in `startdate`, `enddate` and `tracking_path_name`, and, with `run_robustmcs` on, `robustmcs_definition` and the keys of
 its definition. Every generated config can be read with `load_config` (the tests do that).
@@ -317,6 +320,8 @@ Every step has a flag in the config and finished steps keep their files. **Witho
 the files, below) is not run again, and every step after the first one that runs runs in any case; submitting the same script again continues the job from the step that was not finished. With
 `verify_step_outputs: True` (the default) the run stops with exit code 1 when a step did not make complete outputs. **By editing the flags:** copy the generated config, set the flags of the finished steps to
 `False` and submit the script again. `run_mapfeature` needs the `mcs_tracks_robust_*` file of `run_robustmcs`; the run stops before the step with a message if it is not there.
+The log of a job is `logs/log_<job name>_<job id>.log` (and `dask_scheduler_<job id>.log`, `dask_workers_<job id>.log` of a multi-node stats job): the job id is in the name, so a job that is submitted again keeps the log of
+its first attempt; `submissions.jsonl` in the folder of the scripts lists every submission with its job id.
 
 ## Checks while the job runs
 

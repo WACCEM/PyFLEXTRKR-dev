@@ -20,14 +20,15 @@ import generate_tbpf_mcstracking_scripts as G  # noqa: E402
 from pyflextrkr.ft_utilities import load_config  # noqa: E402
 
 TEMPLATE = os.path.join(REPO, "config", "config_mcs_tbpf_e3sm_0p1deg_template.yml")
+IMERG_TEMPLATE = os.path.join(REPO, "config", "config_mcs_tbpf_imergv7_global_template.yml")
 
 
-def _campaign(tmp_path, start="2009-01", end="2009-12", **kwargs):
-    """Write the files of a campaign for the E3SM template and return the jobs."""
+def _campaign(tmp_path, start="2009-01", end="2009-12", template=TEMPLATE, **kwargs):
+    """Write the files of a campaign for the E3SM template (or another one) and return the jobs."""
     kwargs.setdefault("input_dir", str(tmp_path / "input"))
     kwargs.setdefault("root_path", str(tmp_path / "root"))
     kwargs.setdefault("account", "m9999")
-    return G.build_campaign(G.month_range(start, end), TEMPLATE, str(tmp_path / "out"), **kwargs)
+    return G.build_campaign(G.month_range(start, end), template, str(tmp_path / "out"), **kwargs)
 
 
 def _read(path):
@@ -139,7 +140,7 @@ def test_the_stats_job_links_the_months_and_stitches_their_track_numbers_before_
     assert script.index("link_period_folders.py") < script.index("stitch_tracknumbers.py") < script.index("dask-scheduler") < script.index("run_mcs_tbpf_unified.py")
     # the header: account, nodes, time of the stats job, mail, the job name and its log; the workers
     assert "#SBATCH -A m9999" in script and "#SBATCH --nodes=4" in script and "#SBATCH --time=05:00:00" in script
-    assert "#SBATCH --mail-user=someone@example.org" in script and "#SBATCH --output=logs/log_stats200901_200912.log" in script
+    assert "#SBATCH --mail-user=someone@example.org" in script and "#SBATCH --output=logs/log_stats200901_200912_%j.log" in script
     assert "workers_per_node=64" in script and "--cpus-per-task=2" in script and "--memory-limit=7GB" in script
     assert "#SBATCH --time=01:30:00" in _read(jobs[0]["script"]) and "--mail-user" in _read(jobs[0]["script"])
 
@@ -177,6 +178,37 @@ def test_the_e3sm_template_has_the_types_of_the_reference_config():
                  and not isinstance(v, (int, float))}
     assert different == {}
     assert all(isinstance(template[k], bool) for k in ("olr2tb", "run_rainmap", "run_trackpcp", "verify_step_outputs", "skip_completed_steps"))
+
+
+def test_the_imerg_template_is_the_reference_config_with_the_placeholders_and_the_row_tables():
+    # every key that the reference config (IMERGv7, MCSMIP) has has the same value, except the paths and dates the generator fills, the folder of
+    # the month and the dense trackstats file (not needed: the MCS steps read the sparse file)
+    template, reference = (yaml.safe_load(_read(p)) for p in (IMERG_TEMPLATE, os.path.join(REPO, "config", "config_mcs_tbpf_imergv7_mcsmip.yml")))
+    different = {k for k in set(template) & set(reference) if template[k] != reference[k]}
+    assert different == {"clouddata_path", "root_path", "startdate", "enddate", "tracking_path_name", "trackstats_dense_netcdf"}
+    # what the template adds: the definition (the generator refuses without it), the row tables, the checks and the optional steps
+    assert template["robustmcs_definition"] == "mcsmip" and template["stats_format"] == "rows" and template["clouddata_subdir_format"] == "%Y"
+    assert template["run_rainmap"] is True and template["run_trackpcp"] is False and template["trackpcp_data_path"] is None
+    assert template["idclouds_minute"] == 0 and template["clouddatasource"] == "gpmirimerg" and template["olr2tb"] is False
+
+
+def test_the_imerg_and_the_e3sm_templates_differ_only_in_the_data_keys():
+    # so that a campaign of each differs only in the data
+    imerg, e3sm = (yaml.safe_load(_read(p)) for p in (IMERG_TEMPLATE, TEMPLATE))
+    assert {k for k in set(imerg) | set(e3sm) if imerg.get(k) != e3sm.get(k)} == {
+        "databasename", "olr2tb", "olr_varname", "tb_varname", "pcp_varname", "pcp_convert_factor", "clouddatasource", "idclouds_hourly",
+        "idclouds_minute", "idclouds_dt_thresh"}
+
+
+def test_an_imerg_campaign_has_the_same_jobs_without_a_seam_offset_and_its_configs_load(tmp_path):
+    jobs = _campaign(tmp_path, start="2019-01", end="2019-12", template=IMERG_TEMPLATE, stats_nodes=4, profile_dir=str(tmp_path / "profile"))
+    assert [j["name"] for j in jobs] == [f"track2019{m:02d}" for m in range(1, 13)] + ["stats201901_201912"]
+    dec = yaml.safe_load(_read(jobs[11]["config"]))
+    assert (dec["startdate"], dec["enddate"], dec["databasename"], dec["clouddatasource"]) == ("20191201.0000", "20200101.0000", "merg_", "gpmirimerg")
+    for job in jobs:
+        assert not re.search(r"@[A-Z_]+@", _read(job["script"])), job["script"]
+        config = load_config(job["config"], make_dirs=False)
+        assert config["feature_type"] == "tb_pf" and config["tb_varname"] == "Tb" and config["idclouds_hourly"] == 1
 
 
 def test_no_placeholder_is_left_in_any_file_and_the_configs_load(tmp_path):
@@ -250,6 +282,49 @@ def test_submit_waits_for_the_jobs_it_needs_and_a_listed_job_alone_takes_the_oth
     assert record.read_text().splitlines()[1].startswith(f"--parsable --dependency=afterok:{again['track200902']} --kill-on-invalid-dep=yes")
     with pytest.raises(SystemExit, match="no such job"):
         G.submit(jobs, str(tmp_path / "out"), names=["track209901"], sbatch=str(fake))
+
+
+def test_submit_records_every_job_with_its_id_and_the_ids_it_waits_for(tmp_path):
+    jobs = _campaign(tmp_path, start="2009-01", end="2009-03")
+    fake = tmp_path / "fake_sbatch"
+    fake.write_text('#!/bin/bash\nn=$(cat %s 2>/dev/null || echo 200); n=$((n+1)); echo $n > %s; echo "$n;cluster"\n' % (tmp_path / "c", tmp_path / "c"))
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    G.submit(jobs, str(tmp_path / "out"), sbatch=str(fake))
+    lines = [json.loads(line) for line in _read(tmp_path / "out" / "submissions.jsonl").splitlines()]
+    assert [(r["name"], r["job_id"]) for r in lines] == [("track200901", "201"), ("track200902", "202"), ("track200903", "203"), ("stats200901_200903", "204")]
+    assert lines[-1]["after"] == ["track200901", "track200902", "track200903"] and lines[-1]["after_ids"] == ["201", "202", "203"]
+    assert lines[0]["after_ids"] == [] and lines[0]["script"] == jobs[0]["script"] and lines[0]["config"] == jobs[0]["config"]
+    # a second submission of one job appends (the first record stays: the job ids of every attempt are kept)
+    G.submit(jobs, str(tmp_path / "out"), names=["track200902"], sbatch=str(fake))
+    again = [json.loads(line) for line in _read(tmp_path / "out" / "submissions.jsonl").splitlines()]
+    assert len(again) == 5 and again[-1]["name"] == "track200902" and again[-1]["job_id"] == "205"
+
+
+def test_every_job_gets_a_ledger_folder_of_its_own_with_profile_dir(tmp_path):
+    jobs = _campaign(tmp_path, start="2009-01", end="2009-03", profile_dir=str(tmp_path / "profile"))
+    folders = [yaml.safe_load(_read(j["config"]))["step_profile_dir"] for j in jobs]
+    assert folders == [str(tmp_path / "profile" / j["name"]) for j in jobs] and len(set(folders)) == 4
+    # without the option the key of the template stays (off)
+    plain = _campaign(tmp_path / "plain", start="2009-01", end="2009-03")
+    assert all(yaml.safe_load(_read(j["config"])).get("step_profile_dir") is None for j in plain)
+
+
+def test_pin_code_makes_the_jobs_import_the_checkout_of_the_generator(tmp_path):
+    pinned = _campaign(tmp_path, start="2009-01", end="2009-03", stats_nodes=2, pin_code=True)
+    line = f"export PYTHONPATH={REPO}${{PYTHONPATH:+:$PYTHONPATH}}"
+    for job in pinned:
+        script = _read(job["script"])
+        # after the environment is activated and before anything runs (the links, the stitching, the Dask start, the run script)
+        assert line in script and script.index("source activate") < script.index(line) < script.index("python ")
+    plain = _campaign(tmp_path / "plain", start="2009-01", end="2009-03", stats_nodes=2)
+    assert all("PYTHONPATH" not in _read(j["script"]) for j in plain)
+
+
+def test_the_logs_carry_the_job_id_and_a_dead_worker_does_not_kill_the_others(tmp_path):
+    jobs = _campaign(tmp_path, start="2009-01", end="2009-03", stats_nodes=2)
+    assert all(f"#SBATCH --output=logs/log_{j['name']}_%j.log" in _read(j["script"]) for j in jobs)
+    stats = _read(jobs[-1]["script"])
+    assert "srun --kill-on-bad-exit=0 -N $SLURM_NNODES" in stats and "dask_scheduler_${SLURM_JOB_ID}.log" in stats
 
 
 def test_periods_of_any_length_make_a_campaign(tmp_path):
