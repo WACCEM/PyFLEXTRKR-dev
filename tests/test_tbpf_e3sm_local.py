@@ -2,11 +2,13 @@
 The E3SM 0.1 degree global workflow on real data (a compute node): the first days of 2009 of the E3SM ne120 simulation, tracked as one-day
 periods whose track numbers are stitched (the generator's own scripts, run with bash in the order of their dependencies), give the results of
 one continuous run of the same days: every cloudid file, pairwise link, statistics file and pixel-level file (tests/tbpf_compare.py), the
-monthly rain map and the precipitation accumulated along the tracks. The first hour of the simulation has no data (all values missing): the frame
-is skipped, recorded in the manifest of idfeature, and the output checks pass.
+monthly rain map and the precipitation accumulated along the tracks. The file of 01 UTC on 1 January 2009 has no OLR (FLUT is missing everywhere;
+the file of 00 UTC is complete): that frame is skipped, recorded in the manifest of idfeature, and the output checks pass.
 
-Needs $PYFLEXTRKR_E3SM_INPUT (the folder with the year folders, .../olr_pcp), folders below $PYFLEXTRKR_TEST_WORKDIR (default: a pytest temporary
-folder; about 20 GB for 3 days), the days $PYFLEXTRKR_E3SM_DAYS (3), the workers $PYFLEXTRKR_TEST_NPROCS (the 128 of the template). The step ledgers
+Needs $PYFLEXTRKR_E3SM_INPUT (the folder with the year folders, .../olr_pcp) and, because of the `local` marker, $PYFLEXTRKR_TEST_DATA set to any
+folder; run folders below $PYFLEXTRKR_TEST_WORKDIR (default: a pytest temporary folder; about 20 GB for 3 days), the days $PYFLEXTRKR_E3SM_DAYS (3),
+the workers $PYFLEXTRKR_TEST_NPROCS (the 128 of the template); $PYFLEXTRKR_TEST_REUSE=1 compares the runs that finished before in that folder
+without making them again. The step ledgers
 (wall time, CPU, memory of every step) are in <workdir>/<run>/ledger/step_ledger.jsonl. Nothing is submitted: the scripts run on this node.
 """
 import json
@@ -90,6 +92,33 @@ def _run(jobs, folder):
     return seconds
 
 
+def _frames_without_olr(input_dir, nhours):
+    """
+    The hourly files of the first nhours + 1 hours of 2009 whose OLR is missing everywhere: idfeature skips them (miss_thresh), so they have no cloudid file.
+
+    Args:
+        input_dir: string
+            Folder with the year folders of the E3SM files (<input_dir>/2009/ne120_olr_pcp_YYYYMMDDHH.nc).
+        nhours: int
+            Number of hours after the first file (the files of nhours + 1 instants are looked at).
+
+    Returns:
+        empty: list of strings
+            Names of the files whose FLUT is all NaN.
+    """
+    import numpy as np
+    import xarray as xr
+    empty = []
+    # One file per hour from the start of the period to its end (the end instant is included, as in the tracking)
+    for hour in range(nhours + 1):
+        name = f"ne120_olr_pcp_{(START + timedelta(hours=hour)).strftime('%Y%m%d%H')}.nc"
+        with xr.open_dataset(os.path.join(input_dir, "2009", name)) as ds:
+            # A frame with no valid OLR at all is the case this test needs to cover
+            if bool(np.isnan(ds["FLUT"].values).all()):
+                empty.append(name)
+    return empty
+
+
 def _ledger_table(path):
     """
     The step ledger as a table: one line per step with the wall time, the effective cores and the memory.
@@ -135,23 +164,37 @@ def test_stitched_days_equal_the_continuous_run_on_the_e3sm_data(tmp_path_factor
     _profile(jobs_s, os.path.join(stitched, "ledger"))
     _profile(jobs_c, os.path.join(continuous, "ledger"))
 
-    seconds_c = _run(jobs_c, os.path.join(continuous, "jobs"))
-    seconds_s = _run(jobs_s, os.path.join(stitched, "jobs"))
-    print("continuous job:", {k: round(v / 60, 1) for k, v in seconds_c.items()}, "min")
-    print("stitched jobs:", {k: round(v / 60, 1) for k, v in seconds_s.items()}, "min")
+    # With $PYFLEXTRKR_TEST_REUSE the runs that finished before (they left .run_ok) are not made again, only compared
+    markers = [os.path.join(folder, ".run_ok") for folder in (continuous, stitched)]
+    if os.environ.get("PYFLEXTRKR_TEST_REUSE") and all(os.path.isfile(m) for m in markers):
+        print("the finished runs of this folder are used (PYFLEXTRKR_TEST_REUSE)")
+    else:
+        for marker in markers:
+            if os.path.isfile(marker):
+                os.remove(marker)
+        seconds_c = _run(jobs_c, os.path.join(continuous, "jobs"))
+        seconds_s = _run(jobs_s, os.path.join(stitched, "jobs"))
+        print("continuous job:", {k: round(v / 60, 1) for k, v in seconds_c.items()}, "min")
+        print("stitched jobs:", {k: round(v / 60, 1) for k, v in seconds_s.items()}, "min")
+        for marker in markers:
+            open(marker, "w").close()
     for name, folder in (("continuous", continuous), ("stitched", stitched)):
         print(f"--- steps of the {name} run")
         print("\n".join(_ledger_table(os.path.join(folder, "ledger", "step_ledger.jsonl"))))
 
-    # The first hour has no data: the frame is skipped and counted, the other frames have a cloudid file
+    # The frames without OLR are skipped and counted (the number is taken from the input files), the other frames have a cloudid file
     root_c, root_s = os.path.join(continuous, "root"), os.path.join(stitched, "root")
     manifest = json.load(open(os.path.join(root_c, "tracking", "all", "idfeature_manifest.json")))
-    assert manifest["n_calls_skipped"] == 1 and manifest["n_inputs"] == 24 * ndays + 1, manifest
+    empty = _frames_without_olr(input_dir, 24 * ndays)
+    print(f"frames without OLR in the input: {empty}; manifest: {manifest}")
+    assert len(empty) >= 1, "the first days of 2009 are expected to hold a frame without OLR (the skip path is not covered otherwise)"
+    assert manifest["n_inputs"] == 24 * ndays + 1 and manifest["n_calls_skipped"] == len(empty), manifest
     # Every file equal: the continuous run against the stitched one (its cloudid and track files are those of the folder of links)
     link_folder = f"tracking/campaign_{periods[0]['tag']}_{periods[-1]['tag']}"
     report = compare_runs(root_c, root_s, rows_a=True, rows_b=True, tracking_a="tracking/all", tracking_b=link_folder)
     print(f"compared {report['compared']}")
-    assert report["compared"]["stats"] >= 7 and report["compared"]["pixel"] > 0 and report["compared"]["tracking"] > 0
+    # The statistics files: tracknumbers, the sparse trackstats and the four MCS files (no dense trackstats file: trackstats_dense_netcdf is 0)
+    assert report["compared"]["stats"] == 6 and report["compared"]["pixel"] > 0 and report["compared"]["tracking"] > 0
     assert report["differences"] == []
     # The monthly rain map and the accumulation along the tracks
     maps = [os.path.join(r, "stats", "monthly", "mcs_rainmap_200901.nc") for r in (root_c, root_s)]

@@ -13,7 +13,9 @@ tables that rowstats makes of them.
 import argparse
 import glob
 import os
+import re
 import sys
+from datetime import datetime
 
 import numpy as np
 import xarray as xr
@@ -107,13 +109,41 @@ def stats_differences(path_a, path_b):
     return table_differences(_tables(path_a), _tables(path_b))
 
 
+def _period_length(path):
+    """
+    The length of the period in the name of a statistics file (<name><start>_<end>.<extension>, the dates are YYYYMMDD.HHMM).
+
+    Args:
+        path: string
+            Path of the file or row folder.
+
+    Returns:
+        length: datetime.timedelta or None
+            None if the name does not hold two dates.
+    """
+    dates = re.findall(r"\d{8}\.\d{4}", os.path.basename(path))
+    if len(dates) < 2:
+        return None
+    return datetime.strptime(dates[1], "%Y%m%d.%H%M") - datetime.strptime(dates[0], "%Y%m%d.%H%M")
+
+
 def _stats_path(root, name, rows):
     """
-    The statistics file of a run: <root>/stats/<name><dates>.nc, or .rows for the row tables (None if there is none or several).
+    The statistics file of a run: <root>/stats/<name><dates>.nc, or .rows for the row tables (None if there is none).
+
+    The root of a stitched campaign holds the tracknumbers file of every period next to the stitched one; with several files the one of the
+    longest period (the file of the whole run) is taken, and None if two of them have that length or a name has no dates.
     """
     pattern = f"{root}/stats/{name}[0-9]*.{'rows' if rows else 'nc'}"
     found = sorted(glob.glob(pattern))
-    return found[0] if len(found) == 1 else None
+    if len(found) <= 1:
+        return found[0] if found else None
+    # Several files: the one of the longest period
+    lengths = [_period_length(p) for p in found]
+    if None in lengths:
+        return None
+    longest = [p for p, length in zip(found, lengths) if length == max(lengths)]
+    return longest[0] if len(longest) == 1 else None
 
 
 def compare_runs(root_a, root_b, rows_b=False, rows_a=False, tracking_a="tracking", tracking_b="tracking"):

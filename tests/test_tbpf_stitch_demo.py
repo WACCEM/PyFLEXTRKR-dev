@@ -12,6 +12,7 @@ made here if it is not there.
 Needs the demo input below $PYFLEXTRKR_TEST_DATA, folders below $PYFLEXTRKR_TEST_WORKDIR (the cases of both test files share the continuous runs),
 workers $PYFLEXTRKR_TEST_NPROCS (16). A compute node.
 """
+import glob
 import os
 import re
 import subprocess
@@ -38,26 +39,50 @@ STITCH_CASES = [
 ]
 
 
-def _periods(start, end, n):
+def _seam_offset_minutes(root, startdate):
     """
-    n periods that cover [start, end] with seams at whole hours that are not the same fraction in every case (the first period is longer
-    when the number of hours does not divide).
+    Minutes by which the time of the cloudid files is later than the time in the names of the input files: the first cloudid file of a run
+    against the start date (the IMERG combined files are named 00:00 and their data say 00:30; the global demo and E3SM have no offset).
+
+    Args:
+        root: string
+            Root of a finished run of the case.
+        startdate: string
+            YYYYMMDD.HHMM, the start of the run (the time in the name of the first input file).
+
+    Returns:
+        minutes: int
+            0 to 59.
+    """
+    first = sorted(glob.glob(f"{root}/tracking/cloudid_*.nc"))[0]
+    time_of_data = datetime.strptime(os.path.basename(first)[len("cloudid_"):-3], "%Y%m%d_%H%M%S")
+    return int(((time_of_data - datetime.strptime(startdate, "%Y%m%d.%H%M")).total_seconds() // 60) % 60)
+
+
+def _periods(start, end, n, offset_minutes=0):
+    """
+    n periods that cover [start, end] with seams at whole hours of the start; a period that ends at a seam ends offset_minutes later, so that
+    the cloudid file of the seam instant is in the window of both periods (see generate_tbpf_mcstracking_scripts.month_range).
 
     Args:
         start, end: string
             YYYYMMDD.HHMM.
         n: int
             Number of periods.
+        offset_minutes: int (default: 0)
+            Minutes by which the time of the cloudid files is later than the time in the names of the input files.
 
     Returns:
         periods: list of dictionaries
-            tag, name, start, end; the end of a period is the start of the next.
+            tag, name, start, end; the start of a period is the seam instant, the end of the previous one is the seam instant plus the offset;
+            the first start and the last end are those of the run.
     """
     fmt = "%Y%m%d.%H%M"
     t0, t1 = datetime.strptime(start, fmt), datetime.strptime(end, fmt)
     hours = int((t1 - t0).total_seconds() // 3600)
     edges = [t0 + timedelta(hours=round(hours * i / n)) for i in range(n)] + [t1]
-    return [{"tag": f"p{i}", "name": f"p{i}", "start": edges[i].strftime(fmt), "end": edges[i + 1].strftime(fmt)} for i in range(n)]
+    ends = [edges[i + 1] + timedelta(minutes=offset_minutes) for i in range(n - 1)] + [t1]
+    return [{"tag": f"p{i}", "name": f"p{i}", "start": edges[i].strftime(fmt), "end": ends[i].strftime(fmt)} for i in range(n)]
 
 
 def _template_of(case, tmp_path, runner):
@@ -107,13 +132,14 @@ def test_stitched_chunks_equal_the_continuous_run(runner, case, nchunks, fmt):
     if CASES[case][4] is not None:
         os.system(f"cp {os.path.join(input_dir, CASES[case][4])} {root}/")
     overrides = {"rainmap": False}
-    periods = _periods(startdate, enddate, nchunks)
+    offset = _seam_offset_minutes(continuous, startdate)
+    periods = _periods(startdate, enddate, nchunks, offset)
     jobs = G.build_campaign(periods, template, os.path.join(campaign, "jobs"), input_dir, root, account="none", stats_nodes=1, overrides=overrides)
-    # The stats config of the dense variant: the statistics are dense netCDF files
-    if fmt == "dense":
-        stats_job = jobs[-1]
-        text = open(stats_job["config"]).read()
-        open(stats_job["config"], "w").write(G.set_key(text, "stats_format", "dense"))
+    # The format of the statistics of the stats job: rows (Parquet folders) or dense (the netCDF files of the old steps)
+    stats_job = jobs[-1]
+    text = open(stats_job["config"]).read()
+    open(stats_job["config"], "w").write(G.set_key(text, "stats_format", fmt))
+    print(f"{case}: seam offset {offset} min, periods {[(p['start'], p['end']) for p in periods]}")
     assert [j["kind"] for j in jobs] == ["track"] * nchunks + ["stats"]
     # Run the scripts in the order of the jobs: the track jobs, then the stats job (the dependencies of sbatch are the order here)
     for job in jobs:

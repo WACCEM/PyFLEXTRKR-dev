@@ -83,7 +83,7 @@ datatimeresolution: 1.0  # [hour] Temporal resolution of the input data
 olr2tb: True
 olr_varname: FLUT
 pcp_varname: PRECT
-pcp_convert_factor: 3.6e6  # m/s to mm/h
+pcp_convert_factor: 3600000.0  # m/s to mm/h (3.6e6: YAML reads 3.6e6, without a sign in the exponent, as a string)
 # Any value other than gpmirimerg: the precipitation is read at the time of the Tb (one time per file), no 30-minute handling
 clouddatasource: e3sm_ne120
 time_dimname: time

@@ -77,6 +77,22 @@ def test_compare_runs_counts_the_files_and_finds_a_missing_file_and_a_changed_pi
     assert "mcstracking/mcstrack_20250101_000000.nc: x: 1 of 3 values differ" in found and len(found) == 3
 
 
+def test_compare_runs_takes_the_file_of_the_whole_period_in_a_stitched_root(tmp_path):
+    # The root of a stitched campaign has the tracknumbers file of every period next to the stitched file of the whole run
+    _make_run(tmp_path / "a")
+    _make_run(tmp_path / "b")
+    for period in ("20250101.0000_20250101.1200", "20250101.1200_20250102.0000"):
+        _dataset(fill=9.0).to_netcdf(tmp_path / "b" / "stats" / f"tracknumbers_{period}.nc")
+    report = compare_runs(str(tmp_path / "a"), str(tmp_path / "b"))
+    assert report == {"compared": {"tracking": 3, "stats": 3, "pixel": 1}, "differences": []}
+    # a stitched file that differs from the continuous one is found (the per-period files are not the ones compared)
+    _dataset(fill=5.0).to_netcdf(tmp_path / "b" / "stats" / "tracknumbers_20250101.0000_20250102.0000.nc")
+    assert compare_runs(str(tmp_path / "a"), str(tmp_path / "b"))["differences"] == ["stats/tracknumbers_: x: 1 of 3 values differ"]
+    # two files of the longest period, or a file without dates, cannot be told apart: no file is compared and the run reports it
+    shutil.copy(tmp_path / "b" / "stats" / "tracknumbers_20250101.0000_20250102.0000.nc", tmp_path / "b" / "stats" / "tracknumbers_20250201.0000_20250202.0000.nc")
+    assert compare_runs(str(tmp_path / "a"), str(tmp_path / "b"))["differences"] == ["stats/tracknumbers_: only in the first run"]
+
+
 def test_compare_runs_reads_the_row_folders_of_the_second_run(tmp_path):
     for name in ("a", "b"):
         _make_run(tmp_path / name)
