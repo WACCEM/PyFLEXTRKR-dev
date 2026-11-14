@@ -171,6 +171,8 @@ python ./runscripts/run_celltracking.py ./config/config_nexrad500m_example.yml
 python ./runscripts/run_mcs_tbpf.py ./config/config_wrf4km_mcs_tbpf_example.yml
 ```
 
+For MCS tracking from Tb and precipitation, `runscripts/run_mcs_tbpf_unified.py` supersedes the `run_mcs_tbpf*.py` scripts: one script, the MCSMIP or the Feng et al. (2021) robust MCS definition chosen by the config key `robustmcs_definition`, output checks, row-table statistics, one job per month stitched into a year, optional monthly rain maps. See [docs/tbpf_mcs_workflow.md](docs/tbpf_mcs_workflow.md).
+
 ### **Example run scripts and config files are in the highlighted directories:**
 ![](https://github.com/FlexTRKR/PyFLEXTRKR/releases/download/docs-assets/run_command_explanation.png)
 

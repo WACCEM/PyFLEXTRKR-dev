@@ -34,6 +34,8 @@ and the Dask client of the run; the default is `False`, a run without the flag i
 
 Two days of the radar_feature MCS tracking (19,849 tracks, row-format statistics, QPE from the combined files): the step takes 0.54 min on one node with 32 workers and writes 5 files.
 
+**Tb+PF tracking.** `runscripts/run_mcs_tbpf_unified.py` has the same optional step (`run_trackpcp: True`, off by default) for the robust MCSs of the Tb+PF pipeline: step 2 only (`trackpcp_steps: [2]`), with the cloud-shield mask `cloudtracknumber` and the precipitation of the pixel-level files of the run itself as the data (`trackpcp_data_path: null`, `trackpcp_data_varname: precipitation`; hourly data and hourly tracks: `trackpcp_time_match: nearest`, `trackpcp_window_sec: 3600`; no class variable: `trackpcp_class_varname: null`, `trackpcp_convective_varname: null`). The accumulated rain of all the MCSs at a pixel equals `mcs_precipitation` of the monthly rain map of the same period. See [tbpf_mcs_workflow.md](tbpf_mcs_workflow.md#rain-maps-and-the-accumulation-along-the-tracks).
+
 ### The data source
 
 `trackpcp_data_path` / `_filebase` / `_time_format` / `_varname` describe the files as for the tracking inputs. Two options for inputs that are not one file per record in one folder

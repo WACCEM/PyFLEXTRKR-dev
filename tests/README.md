@@ -9,6 +9,8 @@ Tests are written with [pytest](https://docs.pytest.org/) and are split into thr
 | Local integration | `test_convolve_method_demo_data.py` | Local / HPC only | Yes (demo inputs) |
 | Local regression | `test_regression_local.py` | Local / HPC only | Yes (demo outputs) |
 | End-to-end demos | `run_demo_tests.py` | Local / HPC only | Auto-downloads |
+| Tb+PF workflow (synthetic) | `test_identifymcs_tb_rows.py`, `test_matchtbpf_rows.py`, `test_robustmcs_rows.py`, `test_rowstats_entry3d.py`, `test_run_mcs_tbpf_unified.py`, `test_generate_tbpf_scripts.py`, `test_rainmap_driver.py`, `test_trackpcp_tbpf.py`, `test_grid_area_atomic.py`, `test_tbpf_compare.py` | GitHub CI + local | No |
+| Tb+PF workflow (demos, E3SM) | `test_tbpf_unified_demo.py` (the unified script equals the old scripts), `test_tbpf_stitch_demo.py` (stitched chunks equal a continuous run), `test_tbpf_e3sm_local.py` (the E3SM 0.1 degree workflow on real data) | Local / HPC compute node | Yes (`PYFLEXTRKR_TEST_DATA`, `PYFLEXTRKR_E3SM_INPUT`) |
 
 ---
 
