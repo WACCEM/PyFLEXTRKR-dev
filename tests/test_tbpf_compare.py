@@ -93,6 +93,30 @@ def test_compare_runs_takes_the_file_of_the_whole_period_in_a_stitched_root(tmp_
     assert compare_runs(str(tmp_path / "a"), str(tmp_path / "b"))["differences"] == ["stats/tracknumbers_: only in the first run"]
 
 
+def test_the_command_line_compares_a_stitched_root_and_refuses_an_empty_comparison(tmp_path, capsys):
+    from tbpf_compare import main
+    _make_run(tmp_path / "a")
+    _make_run(tmp_path / "b")
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    assert main([a, b]) == 0 and "compared: {'tracking': 3, 'stats': 3, 'pixel': 1}" in capsys.readouterr().out
+    # the stitched run keeps its cloudid and track files in a folder of links: with the default folder nothing is found there, which used to
+    # pass as "no difference"
+    os.makedirs(tmp_path / "b" / "tracking" / "campaign_p0_p1")
+    for name in os.listdir(tmp_path / "b" / "tracking"):
+        if name.endswith(".nc"):
+            shutil.move(str(tmp_path / "b" / "tracking" / name), str(tmp_path / "b" / "tracking" / "campaign_p0_p1" / name))
+    assert main([a, b]) == 1                                              # the files of the first run are only in the first run
+    assert main([a, b, "--tracking-b", "tracking/campaign_p0_p1"]) == 0
+    # a root that holds nothing is not "the same" as a run: its files are only in the first run
+    assert main([a, str(tmp_path / "nothing")]) == 1
+    # two folders with no file at all have no difference but nothing was compared: an error (2), not a pass
+    capsys.readouterr()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert main([str(empty), str(empty)]) == 2 and "no file compared in tracking, stats, pixel" in capsys.readouterr().out
+    assert main([str(empty), str(empty), "--allow-empty"]) == 0
+
+
 def test_compare_runs_reads_the_row_folders_of_the_second_run(tmp_path):
     for name in ("a", "b"):
         _make_run(tmp_path / name)

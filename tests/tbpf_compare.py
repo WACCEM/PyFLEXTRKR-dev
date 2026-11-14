@@ -8,7 +8,8 @@ the same if every variable has the same dimensions, dtype, values (NaN equals Na
 except the time stamps Created_on and Created (the time the step ran). A row folder is compared with a dense file or another row folder through the
 tables that rowstats makes of them.
 
-    python tests/tbpf_compare.py ROOT_A ROOT_B [--rows-b]       # prints the differences, exit code 1 if there are any
+    python tests/tbpf_compare.py ROOT_A ROOT_B [--rows-a] [--rows-b] [--tracking-a DIR] [--tracking-b DIR]
+                                                # prints the differences, exit code 1 if there are any, 2 if none but a group of files had nothing to compare
 """
 import argparse
 import glob
@@ -207,21 +208,43 @@ def compare_runs(root_a, root_b, rows_b=False, rows_a=False, tracking_a="trackin
     return {"compared": compared, "differences": differences}
 
 
-def main():
+def main(argv=None):
     """
     Command line: compare two runs and print the differences.
+
+    Args:
+        argv: list of strings (default: None)
+            Arguments (None: sys.argv[1:]).
+
+    Returns:
+        code: int
+            0: the runs are the same, 1: there are differences, 2: no difference but a group of files (tracking, stats, pixel) had no file to
+            compare (a run compared with a folder that does not hold its files would otherwise look the same as an empty one).
     """
     parser = argparse.ArgumentParser(description="Compare the outputs of two Tb+PF tracking runs.")
-    parser.add_argument("root_a", help="root of the first run (dense statistics files)")
+    parser.add_argument("root_a", help="root of the first run")
     parser.add_argument("root_b", help="root of the second run")
+    parser.add_argument("--rows-a", action="store_true", help="the MCS statistics of the first run are row folders (default: dense netCDF files)")
     parser.add_argument("--rows-b", action="store_true", help="the MCS statistics of the second run are row folders")
-    args = parser.parse_args()
-    report = compare_runs(args.root_a, args.root_b, rows_b=args.rows_b)
+    parser.add_argument("--tracking-a", default="tracking",
+                        help="folder of the cloudid and track files of the first run below its root (default: %(default)s; the folder of links "
+                             "of a stitched campaign is tracking/campaign_<first>_<last>)")
+    parser.add_argument("--tracking-b", default="tracking", help="the same for the second run (default: %(default)s)")
+    parser.add_argument("--allow-empty", action="store_true", help="do not fail when a group of files has nothing to compare")
+    args = parser.parse_args(argv)
+    report = compare_runs(args.root_a, args.root_b, rows_b=args.rows_b, rows_a=args.rows_a, tracking_a=args.tracking_a, tracking_b=args.tracking_b)
     print(f"compared: {report['compared']}")
     for line in report["differences"]:
         print(line)
     print(f"{len(report['differences'])} differences")
-    return 1 if report["differences"] else 0
+    if report["differences"]:
+        return 1
+    # No difference is only a pass if files were compared: a folder that does not hold the files of the run looks the same as an empty one
+    empty = [group for group, n in report["compared"].items() if n == 0]
+    if empty and not args.allow_empty:
+        print(f"ERROR: no file compared in {', '.join(empty)}: check --tracking-a/-b and --rows-a/-b (or --allow-empty)")
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
