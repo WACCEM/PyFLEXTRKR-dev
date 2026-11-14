@@ -70,6 +70,7 @@ def campaign(tmp_path):
     (root / "profile" / "track202001").mkdir()
     (root / "profile" / "track202001" / "step_ledger.jsonl").write_text("\n".join(_ledger_line(s, "101", t, w) for s, t, w in steps) + "\n")
     _log(folder / "logs" / "log_track202001_101.log", [
+        ("10:05:00,000", "distributed.semaphore - CRITICAL - Refreshing an unknown lease ID abc for /x/cloudid_1.nc. This might be due to leases timing out"),
         ("10:10:30,500", "Step idfeature finished in 10.00 min"), ("10:10:30,700", "Step idfeature outputs verified: 744 cloudid files for 745 input files (1 frames skipped by miss_thresh)"),
         ("10:12:32,000", "Step tracksingle finished in 2.00 min"), ("10:12:32,100", "Step tracksingle outputs verified: track files for all 743 pairs of the 744 cloudid files"),
         ("10:13:34,000", "Step gettracks finished in 1.00 min"), ("10:13:34,050", "Step gettracks outputs verified: 5000 track numbers, last file cloudid_20200201_000000.nc")])
@@ -206,7 +207,9 @@ def test_counts_of_the_campaign_and_the_dask_warnings(campaign):
     assert c["trackstats_tracks"] == 9000 and c["identifymcs_mcs_tb"] == 300
     assert c["robustmcs_mcs_robust"] == 40 and c["matchpf_matched_entries"] == 600 and c["mapfeature_pixel_files"] == 1417
     assert result["dask"]["stats202001_202002"] == {"event_loop_unresponsive": 1, "unresponsive": 1, "gather_failed": 1, "worker_removed": 1,
-                                                    "killed_worker": 0, "memory_95": 0, "comm_closed": 1, "timeout": 0}
+                                                    "killed_worker": 0, "memory_95": 0, "comm_closed": 1, "timeout": 0, "lease_timeout": 0}
+    # a track job's own log counts too: the LocalCluster logs there
+    assert result["dask"]["track202001"]["lease_timeout"] == 1 and result["dask"]["track202002"]["lease_timeout"] == 0
     assert result["outputs"]["tracking"] == {"gb": 0.0, "files": 1} and result["outputs"]["stats"] == {"gb": 0.0, "files": 0}
 
 

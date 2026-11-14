@@ -38,13 +38,15 @@ STATS_STEPS = ("trackstats", "identifymcs", "matchpf", "robustmcs", "mapfeature"
 # The fields of sacct (one text line per job, step of a job: <id>, <id>.batch, <id>.extern, <id>.0)
 SACCT_FIELDS = ("JobIDRaw", "JobName", "State", "ExitCode", "Submit", "Eligible", "Start", "End", "ElapsedRaw", "TimelimitRaw", "NNodes",
                 "NodeList", "WorkDir", "MaxRSS", "MaxRSSNode", "MaxRSSTask", "AveRSS", "TotalCPU")
-# Patterns of the Dask logs of a stats job that say the cluster was in trouble (counted, not interpreted)
+# Patterns of the Dask messages (the logs of the Dask scheduler and workers of a stats job, and the log of every job: the LocalCluster of a track
+# job logs there) that say the cluster was in trouble (counted, not interpreted; the lease message is a CRITICAL line that Dask prints when a task
+# that holds the lease of a file for netCDF writing was busy for longer than the lease timeout: a harmless overbooking of a semaphore of one file)
 # ('Event loop was unresponsive in Worker for N s' is an INFO line that Dask prints whenever a task holds the GIL for a few seconds: it is counted
 # apart, a worker or scheduler that is unresponsive is a sign of trouble)
 DASK_WARNINGS = {"event_loop_unresponsive": r"Event loop was unresponsive", "unresponsive": r"^(?!.*Event loop was unresponsive).*unresponsive",
                  "gather_failed": r"Couldn't gather", "worker_removed": r"Removing worker",
                  "killed_worker": r"KilledWorker", "memory_95": r"95\s*%|memory use is high|exceeded .* memory budget",
-                 "comm_closed": r"CommClosedError", "timeout": r"TimeoutError|timed out"}
+                 "comm_closed": r"CommClosedError", "timeout": r"TimeoutError|timed out", "lease_timeout": r"Refreshing an unknown lease ID"}
 # What the 'Step X outputs verified: ...' text of every step holds: the counts that the doc reports
 VERIFIED_COUNTS = {
     "idfeature": r"(?P<cloudid_files>\d+) cloudid files for (?P<input_files>\d+) input files(?: \((?P<frames_skipped>\d+) frames skipped)?",
@@ -586,7 +588,7 @@ def collect(campaign_dir, root, tag, sacct_text=None, profile_dir=None, tz="Amer
 
     Returns:
         result: dictionary
-            schema, campaign, jobs, derived, counts, outputs, dask (see the module description).
+            schema, campaign, jobs, derived, counts, outputs, dask ({job name: Dask message counts}; see the module description).
     """
     with open(os.path.join(campaign_dir, "jobs.json")) as f:
         job_defs = json.load(f)
@@ -610,12 +612,14 @@ def collect(campaign_dir, root, tag, sacct_text=None, profile_dir=None, tz="Amer
         month = re.search(r"(\d{4})(\d{2})$", name)
         jobs.append({"name": name, "kind": kind, "month": f"{month.group(1)}-{month.group(2)}" if month and kind == "track" else None,
                      "attempts": attempts, "final": final})
-    # The Dask logs of the stats job (scheduler and workers of every attempt)
+    # The Dask messages of every job: its log, and the logs of the Dask scheduler and workers of a stats job, of every attempt
     dask = {}
     for job in jobs:
-        if job["kind"] == "stats":
-            logs = [p for a in job["attempts"] for p in glob.glob(os.path.join(campaign_dir, "logs", f"dask_*_{a['job_id']}.log"))]
-            dask[job["name"]] = count_dask_warnings(logs)
+        logs = []
+        for a in job["attempts"]:
+            logs += glob.glob(os.path.join(campaign_dir, "logs", f"log_{job['name']}_{a['job_id']}.log"))
+            logs += glob.glob(os.path.join(campaign_dir, "logs", f"dask_*_{a['job_id']}.log"))
+        dask[job["name"]] = count_dask_warnings(logs)
     commits = sorted({r.get("git") for j in job_defs for r in read_ledger(os.path.join(profile_dir, j["name"], "step_ledger.jsonl")) if r.get("git")})
     return {
         "schema": SCHEMA, "campaign": {"tag": tag, "campaign_dir": os.path.abspath(campaign_dir), "root": root, "git": commits,
