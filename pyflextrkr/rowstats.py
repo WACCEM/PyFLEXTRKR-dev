@@ -960,8 +960,14 @@ class TableBuilder:
         return builder
 
     def _remember(self, name, attrs, dtype=None, dims=None):
-        """Keep the attributes (JSON-ready), dtype and dimensions of a variable."""
-        self.attrs[name] = {k: _netcdf_attr(v) for k, v in (attrs or {}).items()}
+        """
+        Keep the attributes (JSON-ready), dtype and dimensions of a variable. The _FillValue attribute is stored with the dtype of the
+        variable, as a netCDF file has it (an integer -9999 on a float32 variable is -9999.0 after the file has been written and read).
+        """
+        kept = {k: _netcdf_attr(v) for k, v in (attrs or {}).items()}
+        if dtype is not None and isinstance(kept.get("_FillValue"), (int, float)):
+            kept["_FillValue"] = _json_value(np.dtype(dtype).type(kept["_FillValue"]))
+        self.attrs[name] = kept
         if dtype is not None:
             self.dtypes[name] = str(np.dtype(dtype))
         if dims is not None:
