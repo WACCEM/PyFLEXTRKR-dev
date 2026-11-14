@@ -124,13 +124,18 @@ def _relabel(arr, mapping):
     return out
 
 
-def stitch_arrays(periods):
+def stitch_arrays(periods, restart="warn"):
     """
     Join the track numbers of consecutive periods (see the module description).
 
     Args:
         periods: list of dictionaries
             Output of read_period, in time order.
+        restart: string (default: 'warn')
+            What to do when two periods that are closer than timegap share no cloudid file, so that no pair links them (the tracks restart
+            at the boundary): 'warn' logs a warning and counts a chain break, 'error' raises ValueError. A campaign of periods that are meant
+            to share their seam files uses 'error': a seam that was missed (for example a period that ends before the time of the cloudid
+            file of the instant it shares, when that time is not the time in the name of the input file) must not cut tracks silently.
 
     Returns:
         result: dictionary
@@ -139,9 +144,12 @@ def stitch_arrays(periods):
             unlinked boundaries between them).
 
     Raises:
-        ValueError: if neighbouring periods overlap by more than the seam file, or the seam files differ.
+        ValueError: if neighbouring periods overlap by more than the seam file, or the seam files differ, or (restart='error') two
+        periods that are closer than timegap share no file.
     """
     logger = logging.getLogger(__name__)
+    if restart not in ("warn", "error"):
+        raise ValueError(f"restart must be 'warn' or 'error', not {restart!r}")
     nclouds = max(p["track_numbers"].shape[1] for p in periods)
     if len({p["cloudid"].shape[1] for p in periods}) != 1:
         raise ValueError("the file names of the periods have different lengths")
@@ -171,6 +179,11 @@ def stitch_arrays(periods):
             raise ValueError(f"periods {index - 1} and {index} overlap ({periods[index - 1]['path']}, {p['path']}): they must "
                              f"share exactly one cloudid file or none")
         elif first_time - last_time < timegap:
+            if restart == "error":
+                raise ValueError(f"periods {index - 1} and {index} are {(first_time - last_time) / 60.0:.1f} min apart and share no cloudid file, "
+                                 f"so no pair links them ({periods[index - 1]['path']}, {p['path']}). Periods that follow each other have to "
+                                 f"share the cloudid file of one instant: the period that ends there must include the time of that cloudid file "
+                                 f"(when it is not the time in the name of the input file, later by the difference)")
             kind = "restart"
             n_breaks += 1
             logger.warning(f"Periods {index - 1} and {index} are {(first_time - last_time) / 60.0:.1f} min apart but no pair "
@@ -229,7 +242,7 @@ def stitch_arrays(periods):
     return result
 
 
-def stitch_tracknumbers(paths, outfile, tracking_dirs=None, featuresize_varname="npix_feature"):
+def stitch_tracknumbers(paths, outfile, tracking_dirs=None, featuresize_varname="npix_feature", restart="warn"):
     """
     Stitch the tracknumbers files of consecutive periods into one file with global track numbers.
 
@@ -243,6 +256,8 @@ def stitch_tracknumbers(paths, outfile, tracking_dirs=None, featuresize_varname=
             (feature sizes and, if present, the feature numbers must be identical).
         featuresize_varname: string (default: 'npix_feature')
             Variable with the feature sizes in the cloudid files.
+        restart: string (default: 'warn')
+            'warn' or 'error': what to do when two periods that are closer than timegap share no file (see stitch_arrays).
 
     Returns:
         outfile: string
@@ -253,7 +268,7 @@ def stitch_tracknumbers(paths, outfile, tracking_dirs=None, featuresize_varname=
         for i in range(1, len(periods)):
             if periods[i]["basetimes"][0] == periods[i - 1]["basetimes"][-1]:
                 _check_seam_file(periods[i - 1], tracking_dirs[i - 1], periods[i], tracking_dirs[i], featuresize_varname)
-    result = stitch_arrays(periods)
+    result = stitch_arrays(periods, restart)
     first, last = periods[0]["attrs"], periods[-1]["attrs"]
     if os.path.isfile(outfile):
         os.remove(outfile)

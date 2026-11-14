@@ -14,12 +14,14 @@ of all steps. For a chunk of several months:
                        then trackstats, identifymcs, matchpf, robustmcs, mapfeature and speed, and the optional rainmap and trackpcp over the
                        whole chunk. The stitching is a few minutes inside this job, not a job of its own (a job costs a further queue wait).
 
-Every job starts only after the jobs it needs finished without error (sbatch --dependency=afterok, --kill-on-invalid-dep=yes: if a track job
+Neighbouring months share the cloudid file of the seam instant, which both must include (--seam-offset-minutes: for input whose cloudid time is not
+the time in the name of the input file; the stitching command is run with --require-seams, so a missed seam stops the stats job instead of cutting
+tracks). Every job starts only after the jobs it needs finished without error (sbatch --dependency=afterok, --kill-on-invalid-dep=yes: if a track job
 fails, the stats job of its chunk is cancelled, not left pending). NOTHING IS SUBMITTED WITHOUT --submit: the files are written and the job
 list is printed.
 
     python generate_tbpf_mcstracking_scripts.py -s 2009-01 -e 2009-12 -c config_mcs_tbpf_e3sm_0p1deg_template.yml -o campaign_2009 \\
-        --input-dir /pscratch/.../olr_pcp --root-path /pscratch/.../mcs_tbpf/2009 --account m1657 [--stats-nodes 4] [--submit]
+        --input-dir /pscratch/.../olr_pcp --root-path /pscratch/.../mcs_tbpf/2009 --account <account> [--stats-nodes 4] [--submit]
 
 The config template has the placeholders STARTDATE, ENDDATE and YEAR-MONTH (the period and the folder of the month) and INPUT_DIR, TRACK_DIR
 (--input-dir, --root-path); the template decides whether the optional steps rainmap and trackpcp run (run_rainmap, run_trackpcp), --rainmap and
@@ -37,7 +39,7 @@ import re
 import shlex
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import yaml
 
@@ -60,31 +62,44 @@ CPUS_PER_WORKER = 2
 ########################################################################################################################
 # Periods and chunks
 ########################################################################################################################
-def month_range(start, end):
+def month_range(start, end, seam_offset_minutes=0):
     """
     The months of a campaign as periods.
+
+    Neighbouring periods share the cloudid file of the instant that ends one and starts the next. idfeature chooses the input files by the
+    time in their names, every later step chooses the cloudid files by their own time (the time in the data). Where the two are the same
+    (the E3SM files: one file per nominal hour) the end date of a month is the start date of the next one, and both include the shared file.
+    Where the cloudid time is later than the time in the name of its input file (the IMERG combined files: the name says 00:00, the data 00:30),
+    the period that ends at the seam has to end later by that difference, or the cloudid file of the seam is outside its window and no pair links
+    the two periods: the end date of a period is then the start date of the next one plus seam_offset_minutes.
 
     Args:
         start, end: string
             First and last month, YYYY-MM.
+        seam_offset_minutes: int (default: 0)
+            Minutes by which the cloudid time of the seam file is later than the time in the name of its input file; it has to be less than the
+            time between two input files (a period must not take in the next input file).
 
     Returns:
         months: list of dictionaries
             In time order: tag (YYYYMM), name (YYYY-MM, the folder of the month), start and end (YYYYMMDD.HHMM: 00:00 of the first day of the
-            month and of the next month, so the end date of a month is the start date of the next one).
+            month, and of the next month plus seam_offset_minutes).
 
     Raises:
-        SystemExit: the last month is before the first.
+        SystemExit: the last month is before the first, or the offset is negative.
     """
     first, last = datetime.strptime(start, '%Y-%m'), datetime.strptime(end, '%Y-%m')
     if last < first:
         raise SystemExit(f"ERROR: the last month {end} is before the first month {start}")
+    if seam_offset_minutes < 0:
+        raise SystemExit(f"ERROR: --seam-offset-minutes must be 0 or more, not {seam_offset_minutes}")
     months, current = [], first
     while current <= last:
         # The first day of the next month
         following = current.replace(year=current.year + (current.month == 12), month=1 if current.month == 12 else current.month + 1)
         months.append({'tag': current.strftime('%Y%m'), 'name': current.strftime('%Y-%m'),
-                       'start': current.strftime('%Y%m%d.0000'), 'end': following.strftime('%Y%m%d.0000')})
+                       'start': current.strftime('%Y%m%d.0000'),
+                       'end': (following + timedelta(minutes=seam_offset_minutes)).strftime('%Y%m%d.%H%M')})
         current = following
     return months
 
@@ -287,8 +302,9 @@ def stitch_lines(group, month_folders, link_folder, stats_folder, filebase):
     name = lambda first, last: f"{stats_folder}{filebase}{first['start']}_{last['end']}.nc"
     link = ['python', os.path.join(RUNSCRIPT_DIR, 'link_period_folders.py'), link_folder] + month_folders
     stitch = (['python', os.path.join(RUNSCRIPT_DIR, 'stitch_tracknumbers.py'), name(group[0], group[-1])]
-              + [name(m, m) for m in group] + ['--tracking-dirs'] + month_folders)
-    return ("# Join the periods of this chunk: one folder with links to their files, the stitched tracknumbers file\n"
+              + [name(m, m) for m in group] + ['--tracking-dirs'] + month_folders + ['--require-seams'])
+    return ("# Join the periods of this chunk: one folder with links to their files, the stitched tracknumbers file (--require-seams: a boundary\n"
+            "# without a shared cloudid file would restart the tracks there, the job stops instead)\n"
             f"{' '.join(q(a) for a in link)} || exit 1\n"
             f"{' '.join(q(a) for a in stitch)} || exit 1\n")
 
@@ -389,7 +405,7 @@ def dependency_option(job_ids):
 # The campaign
 ########################################################################################################################
 def build_campaign(periods, config_template, output_dir, input_dir=None, root_path=None, run_script=DEFAULT_RUN_SCRIPT, chunk_size=None,
-                   account='', qos='regular', python_env=DEFAULT_PYTHON_ENV, mail_user=None, track_time='03:00:00', stats_time='06:00:00',
+                   account='', qos='regular', python_env=DEFAULT_PYTHON_ENV, mail_user=None, track_time='01:00:00', stats_time='06:00:00',
                    stats_nodes=1, workers_per_node=64, worker_memory='7GB', overrides=None):
     """
     Write the configs and the slurm scripts of a campaign and return its jobs.
@@ -414,8 +430,8 @@ def build_campaign(periods, config_template, output_dir, input_dir=None, root_pa
             Conda environment of the jobs.
         mail_user: string (default: None)
             E-mail address for the job mails; None: no mail lines.
-        track_time, stats_time: string (default: '03:00:00', '06:00:00')
-            Wallclock of the track / month jobs and of the stats jobs (sbatch --time syntax).
+        track_time, stats_time: string (default: '01:00:00', '06:00:00')
+            Wallclock of the track jobs, and of the stats jobs and the plain job of one period (all steps), sbatch --time syntax.
         stats_nodes: int (default: 1)
             Nodes of a stats job; more than 1 uses the multi-node template (a Dask scheduler and workers_per_node workers on every node) and
             run_parallel: 2 in its config.
@@ -468,7 +484,7 @@ def build_campaign(periods, config_template, output_dir, input_dir=None, root_pa
             text = fill_config(template, first, input_dir, root_path, flags)
             folders = folders_of(text)
             warn_if_folder_used(folders['root'], folders['tracking_name'])
-            add_job(f"month{first['tag']}", 'month', text)
+            add_job(f"month{first['tag']}", 'month', text, wallclock=stats_time)
             continue
         # Track jobs: idfeature, tracksingle and gettracks of every period, all at once
         for period in group:
@@ -547,14 +563,18 @@ def main():
                         help='replaces TRACK_DIR of the template (root_path of the outputs): one folder per campaign, never one that already holds '
                              'another run of the same months')
     parser.add_argument('-r', '--run-script', default=DEFAULT_RUN_SCRIPT, help='run script: a path, or a name in runscripts/ (default: %(default)s)')
+    parser.add_argument('--seam-offset-minutes', type=int, default=0,
+                        help='minutes by which the time of a cloudid file is later than the time in the name of its input file (default: %(default)s; '
+                             '30 for the IMERG combined files, whose names say 00:00 and whose data say 00:30): the end date of a month is then the start '
+                             'date of the next one plus this, so that the shared cloudid file is in the window of both months')
     parser.add_argument('--chunk-months', type=int, default=12,
                         help='months per chunk, stitched inside a chunk (default: %(default)s: a year; 1: plain monthly jobs)')
     parser.add_argument('--account', required=True, help='Slurm account')
     parser.add_argument('--qos', default='regular', help='Slurm QOS (default: %(default)s)')
     parser.add_argument('--python-env', default=DEFAULT_PYTHON_ENV, help='conda environment of the jobs (default: %(default)s)')
     parser.add_argument('--mail-user', default=None, help='e-mail address for the job mails (default: none)')
-    parser.add_argument('--track-time', default='03:00:00', help='wallclock of the track jobs, sbatch --time syntax (default: %(default)s)')
-    parser.add_argument('--stats-time', default='06:00:00', help='wallclock of the stats jobs, sbatch --time syntax (default: %(default)s)')
+    parser.add_argument('--track-time', default='01:00:00', help='wallclock of the track jobs, sbatch --time syntax (default: %(default)s)')
+    parser.add_argument('--stats-time', default='06:00:00', help='wallclock of the stats jobs and of the plain job of one month (all steps), sbatch --time syntax (default: %(default)s)')
     parser.add_argument('--stats-nodes', type=int, default=1, help='nodes of a stats job; more than 1 uses the multi-node template (default: %(default)s)')
     parser.add_argument('--workers-per-node', type=int, default=64, help='Dask workers per node of a multi-node stats job (default: %(default)s)')
     parser.add_argument('--worker-memory', default='7GB', help='memory limit of a Dask worker (default: %(default)s)')
@@ -568,7 +588,7 @@ def main():
     if not os.path.isfile(args.config_template):
         parser.error(f'file not found: {args.config_template}')
     overrides = {step: value == 'on' for step, value in (('rainmap', args.rainmap), ('trackpcp', args.trackpcp)) if value is not None}
-    jobs = build_campaign(month_range(args.start, args.end), args.config_template, args.output_dir, args.input_dir, args.root_path, args.run_script,
+    jobs = build_campaign(month_range(args.start, args.end, args.seam_offset_minutes), args.config_template, args.output_dir, args.input_dir, args.root_path, args.run_script,
                           args.chunk_months, args.account, args.qos, args.python_env, args.mail_user, args.track_time, args.stats_time,
                           args.stats_nodes, args.workers_per_node, args.worker_memory, overrides)
     print(f"{len(jobs)} jobs, files in {os.path.abspath(args.output_dir)}:")

@@ -2,7 +2,7 @@
 Stitch the tracknumbers files of consecutive periods into one file, as if gettracks had run over all of them at once
 (pyflextrkr/stitch_tracks.py, docs/stitching.md).
 
-    python runscripts/stitch_tracknumbers.py OUT.nc P1/tracknumbers_A.nc P2/tracknumbers_B.nc ... [--tracking-dirs D1 D2 ...]
+    python runscripts/stitch_tracknumbers.py OUT.nc P1/tracknumbers_A.nc P2/tracknumbers_B.nc ... [--tracking-dirs D1 D2 ...] [--require-seams]
 
 The periods are given in time order. Neighbouring periods share exactly one cloudid file (the seam: the last file of one is the
 first file of the next, which is what the monthly configs give when the end date of a month is the start date of the next) or none
@@ -25,10 +25,14 @@ if __name__ == '__main__':
     parser.add_argument('--tracking-dirs', nargs='+', default=None,
                         help='folder with the cloudid files of every period (same order); compares the seam files')
     parser.add_argument('--featuresize-varname', default='npix_feature', help='feature size variable (default: %(default)s)')
+    parser.add_argument('--require-seams', action='store_true',
+                        help='stop (instead of a warning) when two periods that are closer than timegap share no cloudid file: no pair links '
+                             'them and the tracks would restart there')
     args = parser.parse_args()
 
     setup_logging()
     if args.tracking_dirs is not None and len(args.tracking_dirs) != len(args.tracknumbers):
         sys.exit('--tracking-dirs needs one folder per period')
-    out = stitch_tracknumbers(args.tracknumbers, args.outfile, args.tracking_dirs, args.featuresize_varname)
+    out = stitch_tracknumbers(args.tracknumbers, args.outfile, args.tracking_dirs, args.featuresize_varname,
+                              'error' if args.require_seams else 'warn')
     logging.getLogger(__name__).info(f"Stitched {len(args.tracknumbers)} periods into {out}")

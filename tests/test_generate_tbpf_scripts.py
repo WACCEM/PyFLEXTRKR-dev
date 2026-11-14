@@ -46,6 +46,13 @@ def test_months_share_the_instant_of_their_seam_and_a_year_ends_at_the_next_janu
         G.month_range("2009-05", "2009-04")
 
 
+def test_the_seam_offset_moves_the_end_of_a_month_but_not_the_start_of_the_next():
+    months = G.month_range("2009-12", "2010-01", seam_offset_minutes=30)
+    assert [(m["start"], m["end"]) for m in months] == [("20091201.0000", "20100101.0030"), ("20100101.0000", "20100201.0030")]
+    with pytest.raises(SystemExit):
+        G.month_range("2009-01", "2009-02", seam_offset_minutes=-1)
+
+
 def test_chunks_of_months():
     months = G.month_range("2009-01", "2010-05")
     assert [len(c) for c in G.chunks_of(months, 12)] == [12, 5]
@@ -147,6 +154,29 @@ def _strings(value):
     elif isinstance(value, list):
         for v in value:
             yield from _strings(v)
+
+
+def test_the_stitch_command_stops_the_job_when_a_boundary_has_no_shared_file(tmp_path):
+    jobs = _campaign(tmp_path, stats_nodes=1)
+    stitch = [line for line in _read(jobs[-1]["script"]).splitlines() if "stitch_tracknumbers.py" in line][0]
+    assert stitch.endswith("--require-seams || exit 1")
+    # with a seam offset the names of the monthly track numbers files carry it, and the stitched file runs to the last end
+    periods = G.month_range("2009-01", "2009-03", seam_offset_minutes=30)
+    jobs = G.build_campaign(periods, TEMPLATE, str(tmp_path / "out2"), str(tmp_path / "in"), str(tmp_path / "root2"), account="a")
+    stitch = [line for line in _read(jobs[-1]["script"]).splitlines() if "stitch_tracknumbers.py" in line][0].split()
+    assert stitch[2].endswith("tracknumbers_20090101.0000_20090401.0030.nc") and stitch[3].endswith("tracknumbers_20090101.0000_20090201.0030.nc")
+    assert yaml.safe_load(_read(jobs[0]["config"]))["enddate"] == "20090201.0030"
+    assert yaml.safe_load(_read(jobs[-1]["config"]))["enddate"] == "20090401.0030"
+
+
+def test_the_e3sm_template_has_the_types_of_the_reference_config():
+    # YAML reads 3.6e6 (no sign in the exponent) as a string: the values the code multiplies or compares must be numbers like the reference's
+    template, reference = (yaml.safe_load(_read(p)) for p in (TEMPLATE, os.path.join(REPO, "config", "config_mcs_tbpf_imergv7_mcsmip.yml")))
+    assert isinstance(template["pcp_convert_factor"], float) and template["pcp_convert_factor"] == 3.6e6
+    different = {k: (reference[k], v) for k, v in template.items() if k in reference and isinstance(reference[k], (int, float))
+                 and not isinstance(v, (int, float))}
+    assert different == {}
+    assert all(isinstance(template[k], bool) for k in ("olr2tb", "run_rainmap", "run_trackpcp", "verify_step_outputs", "skip_completed_steps"))
 
 
 def test_no_placeholder_is_left_in_any_file_and_the_configs_load(tmp_path):

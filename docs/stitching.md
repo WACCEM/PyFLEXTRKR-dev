@@ -26,7 +26,7 @@ the file with exactly that time. How a boundary is joined depends on what is bet
 |---|---|---|
 | seam | the last cloudid file of A is the first of B | maps the numbers of B to those of A through the clouds of the seam file and rebuilds the seam column from both sides |
 | gap | no shared file, further apart than timegap | B starts new tracks after the last number of A, as gettracknumbers does after a data gap |
-| restart | no shared file, closer than timegap (no pair links them) | the same as a gap, with a warning, counted in n_chain_breaks (as for a missing track file) |
+| restart | no shared file, closer than timegap (no pair links them) | the same as a gap, with a warning, counted in n_chain_breaks (as for a missing track file); with `--require-seams` (`restart='error'`) an error |
 | error | overlap of more than the seam file, or seam files that differ, or a different number of clouds in the seam file | stops with a message |
 
 Two months that were tracked without a shared file have no pair between the last file of one and the first of the next. The pair
@@ -40,13 +40,15 @@ python runscripts/stitch_tracknumbers.py OUT/tracknumbers_A_B.nc P1/tracknumbers
     --tracking-dirs P1/tracking P2/tracking
 ```
 
-The periods are given in time order. With `--tracking-dirs` (one folder with the cloudid files per period) the seam file is read in
+The periods are given in time order. `--require-seams` stops with an error where two periods that are closer than `timegap` share no cloudid file (a missed seam: for example the cloudid time of the input is later than the time in its file name and the period ends before it), instead of restarting the tracks there with a warning. With `--tracking-dirs` (one folder with the cloudid files per period) the seam file is read in
 both folders and must be identical (feature sizes and feature numbers). In Python: `stitch_tracks.stitch_tracknumbers(paths, outfile)`.
 
 The steps after gettracks (`trackstats`, `identifymcs`, `regionprops`, `mapfeature`) open the cloudid files by the names stored in
 the tracknumbers file, relative to one tracking folder. For periods that kept their files in separate folders, make one folder of
-links (`conus_tracking/scripts/link_period_folders.py`) and run those steps over the stitched range: the whole-track logic (the
+links (`runscripts/link_period_folders.py`) and run those steps over the stitched range: the whole-track logic (the
 duration criterion of the MCS, the folding of merge and split fragments, the lifecycle stages) then sees the complete tracks.
+
+The Tb+PF MCS workflow does this for a campaign of months: `config/generate_tbpf_mcstracking_scripts.py` writes one track job per month (idfeature, tracksingle, gettracks) and one stats job that makes the folder of links, stitches the track numbers and runs the other steps over the whole chunk; tests/test_tbpf_stitch_demo.py checks on the Tb+PF demos that the result equals a continuous run ([tbpf_mcs_workflow.md](tbpf_mcs_workflow.md)).
 
 ## How the numbers are joined
 

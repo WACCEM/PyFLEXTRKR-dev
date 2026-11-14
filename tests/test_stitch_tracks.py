@@ -125,6 +125,24 @@ def test_unlinked_but_close_boundary_restarts_like_a_missing_track_file(tmp_path
     assert int(syn.read_tracknumbers(out)["attrs"]["n_chain_breaks"]) == 1 == int(syn.read_tracknumbers(whole)["attrs"]["n_chain_breaks"])
 
 
+def test_require_seams_refuses_an_unlinked_but_close_boundary_instead_of_restarting_the_tracks(tmp_path):
+    # The same periods as above: with restart='error' the boundary that no pair links is an error, with the default a warning
+    info = syn.write_synthetic_tracking(str(tmp_path / "data"), nframes=40, seed=2, skip_track_files=(6,), symmetric_links=True)
+    pa = _run_period(info, tmp_path, 0, 5, "reqA")
+    pb = _run_period(info, tmp_path, 6, 39, "reqB")
+    with pytest.raises(ValueError, match="share no cloudid file"):
+        stitch_tracks.stitch_tracknumbers([pa, pb], str(tmp_path / "req.nc"), restart="error")
+    assert not (tmp_path / "req.nc").exists()
+    stitch_tracks.stitch_tracknumbers([pa, pb], str(tmp_path / "req.nc"))                      # the default is the warning, as before
+    with pytest.raises(ValueError, match="restart must be"):
+        stitch_tracks.stitch_tracknumbers([pa, pb], str(tmp_path / "req2.nc"), restart="ignore")
+    # a boundary with a seam file is no error, and a data gap (further apart than timegap) is no error either
+    info = syn.write_synthetic_tracking(str(tmp_path / "data2"), nframes=40, seed=2, symmetric_links=True)
+    cut = _valid_cuts(info)[2]
+    paths = [_run_period(info, tmp_path, 0, cut, "seamA"), _run_period(info, tmp_path, cut, 39, "seamB")]
+    stitch_tracks.stitch_tracknumbers(paths, str(tmp_path / "seam.nc"), restart="error")
+
+
 def test_different_maxnclouds_are_padded_including_the_start_flag(tmp_path):
     info = syn.write_synthetic_tracking(str(tmp_path / "data"), nframes=14, seed=1, symmetric_links=True)
     cut = _valid_cuts(info)[3]
