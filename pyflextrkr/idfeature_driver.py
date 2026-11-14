@@ -193,8 +193,8 @@ def idfeature_driver(config):
         else:
             sys.exit('Valid parallelization flag not provided')
 
-        # radar_feature: record the frames that were skipped (miss_thresh), for the output check of the run script
-        if feature_type == "radar_feature":
+        # radar_feature and tb_pf: record the frames that were skipped (miss_thresh), for the output check of the run script
+        if feature_type == "radar_feature" or "tb_pf" in feature_type:
             from pyflextrkr.step_outputs import write_idfeature_manifest
             write_idfeature_manifest(config, nfiles, list(final_result))
 

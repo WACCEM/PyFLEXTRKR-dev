@@ -178,7 +178,7 @@ def test_run_step_skips_completed_steps_runs_later_steps_and_verifies(run):
     assert calls[-1] == "id"
 
 
-def _write_rows_tables(folder, tracks, entries=None, global_attrs=None):
+def _write_rows_tables(folder, tracks, entries=None, global_attrs=None, entries3d=None):
     """
     Write small row tables (three tracks of two entries each) for the checks of stats_format: rows.
 
@@ -191,6 +191,8 @@ def _write_rows_tables(folder, tracks, entries=None, global_attrs=None):
             {name: values [6]} [tracks, times] variables.
         global_attrs: dictionary (default: None)
             Global attributes.
+        entries3d: dictionary (default: None)
+            {name: values [6, n]} small [tracks, times, n] variables (the PF statistics).
     """
     from pyflextrkr.rowstats import TableBuilder, write_rows
     builder = TableBuilder(np.full(3, 2), 2, global_attrs=global_attrs)
@@ -198,6 +200,8 @@ def _write_rows_tables(folder, tracks, entries=None, global_attrs=None):
         builder.add_track_var(name, np.asarray(values))
     for name, values in (entries or {}).items():
         builder.add_entry_var(name, np.asarray(values, dtype=float), fill=np.nan)
+    for name, values in (entries3d or {}).items():
+        builder.add_entry3d_var(name, np.asarray(values, dtype=float), "nmaxpf", fill=np.nan)
     write_rows(builder.build(), folder)
 
 
@@ -298,7 +302,7 @@ def test_an_empty_period_needs_no_dense_trackstats_file(tmp_path):
 
 def test_trackpcp_is_an_optional_step_that_is_off_by_default_and_skipped_for_an_empty_period():
     from pyflextrkr import step_outputs
-    assert step_outputs.STEPS[-1] == "trackpcp" and "trackpcp" in step_outputs.STEPS_AFTER_TRACKSTATS
+    assert "trackpcp" in step_outputs.STEPS and "trackpcp" in step_outputs.STEPS_AFTER_TRACKSTATS
     calls = []
     func = lambda config: calls.append(config.get("tag"))
     # the flag is off: not run
@@ -310,3 +314,127 @@ def test_trackpcp_is_an_optional_step_that_is_off_by_default_and_skipped_for_an_
     # the output check of an unknown step is still an error; the check of this one asks for the files of its steps
     with pytest.raises(ValueError):
         step_outputs.check_step_outputs("nothing", {})
+
+
+########################################################################################################################
+# Tb+PF MCS tracking (feature_type tb_pf): its own checks for identifymcs, matchpf and robustmcs, the idfeature manifest, and the
+# steps that have no check
+########################################################################################################################
+def _tbpf(config, **extra):
+    """
+    The config of a Tb+PF run: the feature type and the file base names of its statistics steps.
+    """
+    return dict(config, feature_type="tb_pf", mcstbstats_filebase="mcs_tracks_", mcspfstats_filebase="mcs_tracks_pf_",
+                mcsrobust_filebase="mcs_tracks_robust_", **extra)
+
+
+def test_tbpf_checks_of_the_dense_statistics_files(run):
+    info, config, _ = run
+    config = _tbpf(config)
+    os.makedirs(config["stats_outpath"], exist_ok=True)
+    dims = {"tracks": 3, "times": 2, "nmaxpf": 2}
+    tk, tt, tp = ("tracks",), ("tracks", "times"), ("tracks", "times", "nmaxpf")
+    # identifymcs: the variables of identifymcs_tb (the radar check of the same step name asks for others)
+    assert "does not exist" in so.check_step_outputs("identifymcs", config)[1]
+    _write_nc(_stats_path(config, "mcs_tracks_"), dims, {"is_mcs": (tk, [1, 0, 0])})
+    assert "variables ['mcs_status', 'ccs_area', 'track_duration'] are missing" in so.check_step_outputs("identifymcs", config)[1]
+    _write_nc(_stats_path(config, "mcs_tracks_"), dims, {"track_duration": (tk, [2, 2, 2]), "mcs_status": (tt, np.ones((3, 2))),
+                                                         "ccs_area": (tt, np.ones((3, 2)))})
+    assert so.check_step_outputs("identifymcs", config) == (True, "3 MCS tracks")
+    assert not so.check_step_outputs("identifymcs", dict(config, feature_type="radar_feature"))[0]
+    # matchpf: the variables, and a non-zero fraction of the entries matched to a cloudid file (total_rain is NaN where nothing matched)
+    pf = _stats_path(config, "mcs_tracks_pf_")
+    assert "does not exist" in so.check_step_outputs("matchpf", config)[1]
+    _write_nc(pf, dims, {"track_duration": (tk, [2, 2, 2]), "pf_area": (tp, np.ones((3, 2, 2)))})
+    assert "variables ['total_rain', 'pf_npf'] are missing" in so.check_step_outputs("matchpf", config)[1]
+    unmatched = {"track_duration": (tk, [2, 2, 2]), "pf_area": (tp, np.ones((3, 2, 2))), "pf_npf": (tt, np.zeros((3, 2))),
+                 "total_rain": (tt, np.full((3, 2), np.nan))}
+    _write_nc(pf, dims, unmatched)
+    ok, message = so.check_step_outputs("matchpf", config)
+    assert not ok and message == "0 of 6 entries (0.0 %) have PF statistics"
+    matched = np.array([[1.0, 0.0], [np.nan, 2.0], [3.0, np.nan]])
+    _write_nc(pf, dims, dict(unmatched, total_rain=(tt, matched)))
+    assert so.check_step_outputs("matchpf", config) == (True, "4 of 6 entries (66.7 %) have PF statistics")
+    # robustmcs
+    robust = _stats_path(config, "mcs_tracks_robust_")
+    assert "does not exist" in so.check_step_outputs("robustmcs", config)[1]
+    _write_nc(robust, dims, {"track_duration": (tk, [2, 2, 2])})
+    assert "variables ['pf_mcsstatus', 'pf_lifetime'] are missing" in so.check_step_outputs("robustmcs", config)[1]
+    _write_nc(robust, dims, {"track_duration": (tk, [2, 2, 2]), "pf_mcsstatus": (tt, np.ones((3, 2))), "pf_lifetime": (tk, [1, 2, 3])})
+    assert so.check_step_outputs("robustmcs", config) == (True, "3 robust MCS tracks")
+    _write_nc(robust, {"tracks": 0, "times": 2, "nmaxpf": 2}, {"track_duration": (tk, []), "pf_mcsstatus": (tt, np.zeros((0, 2))),
+                                                               "pf_lifetime": (tk, [])})
+    assert not so.check_step_outputs("robustmcs", config)[0]                        # no robust MCS is an error, not an empty success
+
+
+def test_tbpf_checks_of_the_row_folders(run):
+    info, config, _ = run
+    config = _tbpf(config, stats_format="rows")
+    os.makedirs(config["stats_outpath"], exist_ok=True)
+    pf3 = np.arange(12, dtype=float).reshape(6, 2)
+    # identifymcs
+    folder = so.stats_output(config, "mcs_tracks_")
+    assert "does not exist" in so.check_step_outputs("identifymcs", config)[1]
+    _write_rows_tables(folder, {"track_duration": [2, 2, 2]}, {"area": np.arange(6)})
+    assert "variables ['mcs_status', 'ccs_area'] are missing" in so.check_step_outputs("identifymcs", config)[1]
+    _write_rows_tables(folder, {"track_duration": [2, 2, 2]}, {"mcs_status": np.ones(6), "ccs_area": np.ones(6)})
+    assert so.check_step_outputs("identifymcs", config) == (True, "3 MCS tracks")
+    # matchpf: pf_area is a small [tracks, times, n] variable of the row folder
+    pf = so.stats_output(config, "mcs_tracks_pf_")
+    _write_rows_tables(pf, {"track_duration": [2, 2, 2]}, {"total_rain": np.full(6, np.nan), "pf_npf": np.zeros(6)}, entries3d={"pf_area": pf3})
+    ok, message = so.check_step_outputs("matchpf", config)
+    assert not ok and message == "0 of 6 entries (0.0 %) have PF statistics"
+    _write_rows_tables(pf, {"track_duration": [2, 2, 2]}, {"total_rain": [1.0, 0, np.nan, 2, 3, np.nan], "pf_npf": np.zeros(6)},
+                       entries3d={"pf_area": pf3})
+    assert so.check_step_outputs("matchpf", config) == (True, "4 of 6 entries (66.7 %) have PF statistics")
+    _write_rows_tables(pf, {"track_duration": [2, 2, 2]}, {"total_rain": np.ones(6), "pf_npf": np.zeros(6)})
+    assert "variables ['pf_area'] are missing" in so.check_step_outputs("matchpf", config)[1]
+    # robustmcs
+    robust = so.stats_output(config, "mcs_tracks_robust_")
+    _write_rows_tables(robust, {"track_duration": [2, 2, 2], "pf_lifetime": [1, 2, 3]}, {"pf_mcsstatus": np.ones(6)})
+    assert so.check_step_outputs("robustmcs", config) == (True, "3 robust MCS tracks")
+    # speed and mapfeature are the checks of the radar pipeline, rows-aware
+    final = so.stats_output(config, "mcs_tracks_final_")
+    _write_rows_tables(final, {"track_duration": [2, 2, 2]}, {"movement_speed": [1.0, np.nan] * 3})
+    assert so.check_step_outputs("speed", config)[0]
+
+
+def test_tbpf_steps_without_a_check_are_never_skipped_and_pass_after_they_ran(run):
+    info, config, _ = run
+    config = _tbpf(config, skip_completed_steps=True)
+    for step in ("preprocess", "remap_healpix", "regrid_mask"):
+        assert so.check_step_outputs(step, config, strict=True)[0] is False               # the skip question: no
+        assert so.check_step_outputs(step, config, strict=False)[0] is True               # the verification after the run: yes
+    calls = []
+    state = {"stale": False}
+    for step in ("preprocess", "remap_healpix", "regrid_mask"):
+        so.run_step(step, dict(config, **{f"run_{step}": True}), state, lambda cfg, step=step: calls.append(step))
+    assert calls == ["preprocess", "remap_healpix", "regrid_mask"]
+    # a radar config does not know these steps
+    with pytest.raises(ValueError):
+        so.check_step_outputs("matchpf", dict(config, feature_type="radar_feature"))
+    # after an empty period the Tb+PF steps are skipped like the radar steps
+    for step in ("matchpf", "robustmcs", "remap_healpix", "regrid_mask"):
+        assert so.run_step(step, dict(config, **{f"run_{step}": True}), {"stale": False, "empty": True}, lambda cfg: calls.append("x")) is None
+    assert "x" not in calls
+
+
+def test_idfeature_driver_writes_the_manifest_for_tbpf_so_that_a_skipped_frame_does_not_fail_the_check(run, monkeypatch):
+    info, config, tmp_path = run
+    names = [info["names"][f] for f in info["frames"]]
+    skipped_frame = 5
+    config = _tbpf(config, run_parallel=0, input_format="netcdf", area_method="fixed")
+    os.remove(f"{config['tracking_outpath']}{names[skipped_frame]}")                 # the skipped frame has no cloudid file
+    # idclouds_tbpf returns the cloudid file name, or None when the frame was skipped (miss_thresh), as the real function does
+    calls = []
+
+    def fake_idclouds(input_file, cfg):
+        calls.append(os.path.basename(input_file))
+        return None if len(calls) == skipped_frame + 1 else input_file
+
+    monkeypatch.setattr("pyflextrkr.idclouds_tbpf.idclouds_tbpf", fake_idclouds)
+    from pyflextrkr.idfeature_driver import idfeature_driver
+    idfeature_driver(config)
+    assert len(calls) == len(names)
+    ok, message = so.check_step_outputs("idfeature", config, strict=True)
+    assert ok and "(1 frames skipped by miss_thresh)" in message

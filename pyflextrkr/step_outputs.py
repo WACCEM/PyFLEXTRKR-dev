@@ -1,5 +1,6 @@
 """
-Are the outputs of a pipeline step complete? Used by run_mcs_radar3d.py in two ways (config keys, both optional):
+Are the outputs of a pipeline step complete? Used by run_mcs_radar3d.py and run_mcs_tbpf_unified.py in two ways (config keys, both
+optional):
 
   verify_step_outputs: True (default)   after every step, its outputs are checked and the run stops with exit code 1 if they are
                                         not complete. A Slurm job whose last step failed without an error message (the speed step
@@ -18,6 +19,11 @@ the number of skipped frames in idfeature_manifest.json (radar_feature), so the 
 them. A period in which no cloudid file has a feature has no tracks: trackstats writes an empty file, the checks pass with a warning
 and the steps after trackstats are skipped (state["empty"]).
 
+Tb+PF MCS tracking (feature_type containing tb_pf) has its own checks for identifymcs (the Tb statistics of the MCS), matchpf (the PF
+statistics, with the fraction of entries that were matched to a cloudid file) and robustmcs (the robust MCS), and writes the same idfeature
+manifest (the all-missing first hour of a model run is a legitimate skipped frame). The steps that only convert or regrid (preprocess,
+remap_healpix, regrid_mask) have no check: they run whenever their flag is on and are never skipped.
+
 Author: Zhe Feng | zhe.feng@pnnl.gov
 """
 import json
@@ -32,7 +38,8 @@ from netCDF4 import Dataset
 from pyflextrkr.ft_utilities import subset_files_timerange
 from pyflextrkr.step_timing import timed_step
 
-STEPS = ("idfeature", "tracksingle", "gettracks", "trackstats", "identifymcs", "regionprops", "mapfeature", "speed", "trackpcp")
+STEPS = ("idfeature", "tracksingle", "gettracks", "trackstats", "identifymcs", "matchpf", "robustmcs", "regionprops", "mapfeature",
+         "speed", "trackpcp", "preprocess", "remap_healpix", "regrid_mask")
 
 
 def track_file_name(new_basetime, filebase="track_"):
@@ -390,6 +397,114 @@ CHECKS = {"idfeature": _check_idfeature, "tracksingle": _check_tracksingle, "get
           "mapfeature": _check_mapfeature, "speed": _check_speed, "trackpcp": _check_trackpcp}
 
 
+########################################################################################################################
+# Tb+PF MCS tracking: the checks of the steps that are specific to it
+########################################################################################################################
+def _variables_and_tracks(config, filebase):
+    """
+    The variable names and the number of tracks of a Tb+PF statistics file (dense netCDF or row folder, as stats_format says).
+
+    Args:
+        config: dictionary
+            Loaded config.
+        filebase: string
+            File base name (mcstbstats_filebase, mcspfstats_filebase or mcsrobust_filebase).
+
+    Returns:
+        names, ntracks, message: set of strings, int, string
+            The variables of the file (the [tracks, times, n] PF variables included) and its number of tracks; (None, 0, message)
+            if the file does not exist or cannot be read.
+    """
+    path = stats_output(config, filebase)
+    if rows_mode(config):
+        rs, message = _open_rows(path)
+        if rs is None:
+            return None, 0, message
+        names = set(rs.meta["vars_1d"]) | set(rs.meta["vars_2d"]) | set(rs.meta.get("vars_entry3d", {}))
+        return names, len(rs.duration), ""
+    ds, message = _open(path)
+    if ds is None:
+        return None, 0, message
+    with ds:
+        return set(ds.variables), ds.dimensions[config.get("tracks_dimname", "tracks")].size, ""
+
+
+def _check_identifymcs_tb(config, strict):
+    """The Tb statistics of the MCS: the variables of identifymcs_tb are there and there is at least one MCS track."""
+    names, ntracks, message = _variables_and_tracks(config, config["mcstbstats_filebase"])
+    if names is None:
+        return False, message
+    missing = [v for v in ("mcs_status", "ccs_area", "track_duration") if v not in names]
+    return (not missing and ntracks > 0), (f"variables {missing} are missing" if missing else f"{ntracks} MCS tracks")
+
+
+def _check_matchpf(config, strict):
+    """
+    The PF statistics of the MCS: the variables of the step are there and some (track, time) entries were matched to a cloudid file.
+
+    total_rain is set (0 or more) for every entry that was matched to a cloud of a cloudid file, so the fraction of entries with a
+    finite total_rain is the matched fraction. A step that found no cloudid file for any entry has made a file that is complete in
+    the variables and empty in the values, and must not pass on its exit code.
+    """
+    names, ntracks, message = _variables_and_tracks(config, config["mcspfstats_filebase"])
+    if names is None:
+        return False, message
+    missing = [v for v in ("pf_area", "total_rain", "pf_npf") if v not in names]
+    if missing:
+        return False, f"variables {missing} are missing"
+    # total_rain of every entry: the flat column of a row folder, or the padded [tracks, times] array of a dense file
+    path = stats_output(config, config["mcspfstats_filebase"])
+    if rows_mode(config):
+        rs, _ = _open_rows(path)
+        total, n_entries = np.asarray(rs["total_rain"].flat, dtype=float), int(rs.duration.sum())
+    else:
+        ds, _ = _open(path)
+        with ds:
+            total = np.ma.filled(ds["total_rain"][:], np.nan).astype(float)
+            n_entries = int(np.ma.filled(ds["track_duration"][:], 0).sum())
+    n_matched = int(np.isfinite(total).sum())
+    return n_matched > 0, f"{n_matched} of {n_entries} entries ({100.0 * n_matched / max(n_entries, 1):.1f} %) have PF statistics"
+
+
+def _check_robustmcs(config, strict):
+    """The robust MCS: the variables of the step are there and there is at least one robust MCS track."""
+    names, ntracks, message = _variables_and_tracks(config, config["mcsrobust_filebase"])
+    if names is None:
+        return False, message
+    missing = [v for v in ("pf_mcsstatus", "pf_lifetime", "track_duration") if v not in names]
+    return (not missing and ntracks > 0), (f"variables {missing} are missing" if missing else f"{ntracks} robust MCS tracks")
+
+
+def _check_unchecked(config, strict):
+    """
+    A step whose outputs are not checked (a conversion or a regridding): it is never skipped (strict: the question "can it be
+    skipped" is no) and its outputs pass the check after it ran.
+    """
+    return (not strict), "its outputs are not checked"
+
+
+CHECKS_TBPF = {"identifymcs": _check_identifymcs_tb, "matchpf": _check_matchpf, "robustmcs": _check_robustmcs,
+               "preprocess": _check_unchecked, "remap_healpix": _check_unchecked, "regrid_mask": _check_unchecked}
+
+
+def _checks_for(config):
+    """
+    The check of every step for the feature type of the config: CHECKS, with the Tb+PF versions for feature_type containing tb_pf.
+
+    Args:
+        config: dictionary
+            Loaded config (feature_type).
+
+    Returns:
+        checks: dictionary
+            {step: check function(config, strict)}.
+    """
+    checks = dict(CHECKS)
+    if "tb_pf" in str(config.get("feature_type", "")):
+        checks.update(CHECKS_TBPF)
+    return checks
+
+
 def check_step_outputs(step, config, strict=True):
     """
     Are the outputs of a step complete?
@@ -407,9 +522,10 @@ def check_step_outputs(step, config, strict=True):
         ok, message: bool, string
             Whether the outputs are complete and what was found.
     """
-    if step not in CHECKS:
+    checks = _checks_for(config)
+    if step not in checks:
         raise ValueError(f"unknown step '{step}', the steps are {STEPS}")
-    return CHECKS[step](config, strict)
+    return checks[step](config, strict)
 
 
 def run_step(step, config, state, func, client=None, **kwargs):
@@ -460,7 +576,8 @@ def run_step(step, config, state, func, client=None, **kwargs):
     return result
 
 
-STEPS_AFTER_TRACKSTATS = ("identifymcs", "regionprops", "mapfeature", "speed", "trackpcp")
+STEPS_AFTER_TRACKSTATS = ("identifymcs", "matchpf", "robustmcs", "regionprops", "mapfeature", "speed", "trackpcp", "remap_healpix",
+                          "regrid_mask")
 
 
 def _note_empty(step, config, state):

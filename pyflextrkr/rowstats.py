@@ -7,7 +7,9 @@ and [tracks, times, slots] arrays that are almost empty: a track lives for `trac
 values. This module stores the same data as three tables:
 
   tracks     one row per track: the 1-D variables (and small 2-D ones such as lifecycle_index as columns name__0, name__1, ...)
-  entries    one row per (track, time index), sorted by track then time index: the [tracks, times] variables
+  entries    one row per (track, time index), sorted by track then time index: the [tracks, times] variables, and the small
+             [tracks, times, n] variables whose third dimension is not the fragment slots (the precipitation-feature
+             statistics of the Tb+PF files, n = nmaxpf) as the columns name__0, name__1, ... (meta "vars_entry3d")
   fragments  one row per attached merge/split fragment: track, k (time index), kind (0 merge, 1 split), slot, cloudnumber,
              status, area
 
@@ -165,6 +167,10 @@ def dense_to_rows(source, tracks_dim="tracks", times_dim="times", slots_dim="mer
     variable must hold one constant fill value, and every fragment field must hold its fill value where the slot is empty;
     otherwise the dense layout could not be rebuilt exactly and a ValueError is raised.
 
+    A variable [tracks, times, n] whose third dimension is not `slots_dim` (the PF statistics [tracks, times, nmaxpf]) is an
+    entry-level 3-D variable: n columns name__0 ... name__{n-1} of the entries table, one value per (track, time index), and
+    meta["vars_entry3d"] = {name: n} (the key is absent when the file has no such variable).
+
     Args:
         source: string or xarray.Dataset
             Dense stats file, or a Dataset opened with mask_and_scale=False, decode_times=False.
@@ -183,7 +189,7 @@ def dense_to_rows(source, tracks_dim="tracks", times_dim="times", slots_dim="mer
     nslots = ds.sizes.get(slots_dim, 0)
 
     # Sort the variables by their dimensions
-    names_1d, names_2d, names_3d, names_tracks2d, coords_small = [], [], [], [], {}
+    names_1d, names_2d, names_3d, names_tracks2d, names_entry3d, coords_small = [], [], [], [], [], {}
     for name, var in ds.variables.items():
         dims = var.dims
         if dims == (tracks_dim,):
@@ -194,6 +200,9 @@ def dense_to_rows(source, tracks_dim="tracks", times_dim="times", slots_dim="mer
             names_3d.append(name)
         elif len(dims) == 2 and dims[0] == tracks_dim:
             names_tracks2d.append(name)
+        elif len(dims) == 3 and dims[0] == tracks_dim and dims[1] == times_dim:
+            # [tracks, times, n] with a third dimension that is not the fragment slots (the PF statistics, n = nmaxpf)
+            names_entry3d.append(name)
         elif tracks_dim not in dims:
             coords_small[name] = {"dims": list(dims), "values": var.values.tolist()}
         else:
@@ -214,6 +223,7 @@ def dense_to_rows(source, tracks_dim="tracks", times_dim="times", slots_dim="mer
     parts_1d = {n: [] for n in names_1d}
     parts_t2d = {n: [] for n in names_tracks2d}
     parts_2d = {n: [] for n in names_2d}
+    parts_e3d = {n: [] for n in names_entry3d}
     parts_frag = []
     fill = {}
     columns = np.arange(ntimes)[None, :]
@@ -229,6 +239,11 @@ def dense_to_rows(source, tracks_dim="tracks", times_dim="times", slots_dim="mer
             block = ds[n].isel(sel).values
             _check_fill(fill, n, block[~valid], ds[n].attrs, block.dtype)
             parts_2d[n].append(block[valid])
+        for n in names_entry3d:
+            # [tracks of the block, times, n]: outside the valid entries one constant fill value, inside n values per entry
+            block = ds[n].isel(sel).values
+            _check_fill(fill, n, block[~valid], ds[n].attrs, block.dtype)
+            parts_e3d[n].append(block[valid])
         rows = {}
         for kind_code, kind in enumerate(FRAGMENT_KINDS):
             if not names_3d or f"{kind}_{FRAGMENT_PRESENCE_FIELD}" not in names_3d:
@@ -253,6 +268,12 @@ def dense_to_rows(source, tracks_dim="tracks", times_dim="times", slots_dim="mer
                "k": (np.arange(duration.sum()) - np.repeat(np.cumsum(duration) - duration, duration)).astype(np.int32)}
     for n in names_2d:
         entries[n] = np.concatenate(parts_2d[n]) if parts_2d[n] else np.array([])
+    for n in names_entry3d:
+        # One entries column for every element of the third dimension (a file without tracks has no block: empty columns)
+        ncol = int(ds.sizes[ds[n].dims[2]])
+        arr = np.concatenate(parts_e3d[n]) if parts_e3d[n] else np.zeros((0, ncol), dtype=ds[n].dtype)
+        for j in range(ncol):
+            entries[f"{n}__{j}"] = np.ascontiguousarray(arr[:, j])
     fragments = {}
     if names_3d:
         cols = ["track", "k", "kind", "slot"] + fields
@@ -265,13 +286,16 @@ def dense_to_rows(source, tracks_dim="tracks", times_dim="times", slots_dim="mer
         "dims": {k: int(v) for k, v in ds.sizes.items()},
         "vars_1d": names_1d, "vars_tracks2d": {n: int(ds.sizes[ds[n].dims[1]]) for n in names_tracks2d},
         "vars_2d": names_2d, "vars_3d": names_3d, "fragment_fields": fields,
-        "dims_of": {n: list(ds[n].dims) for n in names_1d + names_2d + names_3d + names_tracks2d},
-        "dtypes": {n: str(ds[n].dtype) for n in names_1d + names_2d + names_3d + names_tracks2d},
+        "dims_of": {n: list(ds[n].dims) for n in names_1d + names_2d + names_3d + names_tracks2d + names_entry3d},
+        "dtypes": {n: str(ds[n].dtype) for n in names_1d + names_2d + names_3d + names_tracks2d + names_entry3d},
         "fill": {n: ("nan" if isinstance(v, float) and np.isnan(v) else v) for n, v in fill.items()},
         "attrs": {n: {k: _json_value(v) for k, v in ds[n].attrs.items()} for n in list(ds.variables)},
         "global_attrs": {k: _json_value(v) for k, v in ds.attrs.items()},
         "coords": coords_small,
     }
+    # The key exists only for files that have such variables, so the meta data of the other files is as it always was
+    if names_entry3d:
+        meta["vars_entry3d"] = {n: int(ds.sizes[ds[n].dims[2]]) for n in names_entry3d}
     if isinstance(source, str):
         ds.close()
     return RowTables(tracks, entries, fragments, meta)
@@ -330,8 +354,10 @@ def rows_to_dense(tables, tracks=None, width=None):
 
     if len(dur) and int(dur.max()) > width:
         raise ValueError(f"width {width} is smaller than the longest selected track")
-    # Position of every selected entry in the flat columns and in the dense array (only needed for [tracks, times] variables)
-    if meta["vars_2d"]:
+    # Position of every selected entry in the flat columns and in the dense array (only needed for [tracks, times] variables
+    # and the small [tracks, times, n] ones)
+    entry3d = meta.get("vars_entry3d", {})
+    if meta["vars_2d"] or entry3d:
         total = int(dur.sum())
         row = np.repeat(np.arange(len(sel)), dur)
         k = np.arange(total) - np.repeat(np.cumsum(dur) - dur, dur)
@@ -350,6 +376,12 @@ def rows_to_dense(tables, tracks=None, width=None):
         out = np.full((len(sel), width), _fill_value(meta, n), dtype=meta["dtypes"][n])
         out[row, k] = tables.entries[n][flat_index]
         data_vars[n] = ([tdim, kdim], out, meta["attrs"].get(n, {}))
+    for n, ncol in entry3d.items():
+        # The small [tracks, times, n] variables: the n columns of the entries table go to the third dimension
+        out = np.full((len(sel), width, ncol), _fill_value(meta, n), dtype=meta["dtypes"][n])
+        for j in range(ncol):
+            out[row, k, j] = tables.entries[f"{n}__{j}"][flat_index]
+        data_vars[n] = (meta["dims_of"][n], out, meta["attrs"].get(n, {}))
     if meta["vars_3d"]:
         new_index = np.full(ntracks, -1, dtype=np.int64)
         new_index[sel] = np.arange(len(sel))
@@ -418,12 +450,15 @@ class RaggedArray:
 
     a[i] is the series of track i (a view of the flat array), a[i, j] the element j of track i, a[[i, j, ...]] or a[mask] a
     RaggedArray of those tracks; max / min / sum / mean give one value per track; dense() the padded array.
+
+    The flat array may have trailing dimensions ([nentries, n] for the PF statistics, n = nmaxpf): a[i] is then [duration, n],
+    and max / min / sum / mean give [ntracks, n] and dense() [ntracks, width, n].
     """
 
     def __init__(self, flat, offsets, fill=np.nan):
         """
         Args:
-            flat: numpy.ndarray [nentries]
+            flat: numpy.ndarray [nentries] or [nentries, n]
                 Values of all tracks, one track after the other.
             offsets: numpy.ndarray [ntracks + 1]
                 Start of every track in `flat` plus the end of the last.
@@ -464,7 +499,7 @@ class RaggedArray:
         Per-track reduction with a ufunc (np.maximum, np.minimum, np.add); NaN for tracks without entries.
         """
         # reduceat over the starts of the non-empty tracks only: the segments between them are exactly the tracks
-        out = np.full(len(self), np.nan)
+        out = np.full((len(self),) + self.flat.shape[1:], np.nan)
         nonempty = self.lengths > 0
         if nonempty.any():
             out[nonempty] = ufunc.reduceat(self.flat, self.offsets[:-1][nonempty])
@@ -493,7 +528,7 @@ class RaggedArray:
         Mean of every track: float array [ntracks].
         """
         with np.errstate(invalid="ignore", divide="ignore"):
-            return self.sum() / self.lengths
+            return self.sum() / self.lengths.reshape((-1,) + (1,) * (self.flat.ndim - 1))
 
     def dense(self, width=None):
         """
@@ -509,7 +544,7 @@ class RaggedArray:
         """
         lengths = self.lengths
         width = int(lengths.max()) if width is None and len(lengths) else (width or 0)
-        out = np.full((len(self), width), self.fill, dtype=self.flat.dtype)
+        out = np.full((len(self), width) + self.flat.shape[1:], self.fill, dtype=self.flat.dtype)
         row = np.repeat(np.arange(len(self)), lengths)
         out[row, np.arange(len(self.flat)) - np.repeat(self.offsets[:-1], lengths)] = self.flat
         return out
@@ -587,12 +622,33 @@ class RowStats:
         """
         return pq.read_table(os.path.join(self.folder, f"{table}.parquet"), columns=[name]).column(name).to_numpy()
 
+    def _column3d(self, name):
+        """
+        One small [tracks, times, n] variable of the entries table as a numpy array [nentries, n] (its n columns stacked).
+
+        Args:
+            name: string
+                Variable name (a key of meta["vars_entry3d"]).
+
+        Returns:
+            values: numpy.ndarray [nentries, n]
+        """
+        ncol = self.meta["vars_entry3d"][name]
+        names = [f"{name}__{j}" for j in range(ncol)]
+        table = pq.read_table(os.path.join(self.folder, "entries.parquet"), columns=names)
+        return np.stack([table.column(n).to_numpy() for n in names], axis=1)
+
     def __getitem__(self, name):
         if name in self.meta["vars_1d"]:
             return self.tracks[name]
         if name in self.meta["vars_2d"]:
             if name not in self._entries:
                 self._entries[name] = self._column("entries", name)
+            return RaggedArray(self._entries[name], self.offsets, _fill_value(self.meta, name))
+        if name in self.meta.get("vars_entry3d", {}):
+            # A small [tracks, times, n] variable (the PF statistics): a ragged array with the trailing dimension n
+            if name not in self._entries:
+                self._entries[name] = self._column3d(name)
             return RaggedArray(self._entries[name], self.offsets, _fill_value(self.meta, name))
         raise KeyError(name)
 
@@ -602,7 +658,8 @@ class RowStats:
 
         Args:
             variables: list of strings (default: None = all)
-                Variables of the entries table to load; the per-track variables that RowStats.open read are always loaded.
+                Variables of the entries table to load ([tracks, times] ones and the small [tracks, times, n] ones such as the PF
+                statistics); the per-track variables that RowStats.open read are always loaded.
             index_columns: bool (default: True)
                 Also read the entries columns track and k (the track and the time index of every entry). False for a caller
                 that only needs the values of the variables (rows_to_dense builds the layout from the durations).
@@ -613,15 +670,24 @@ class RowStats:
         Returns:
             tables: RowTables
         """
+        # The [tracks, times] variables and the small [tracks, times, n] variables to load (all of them, or those that were named)
         names = self.meta["vars_2d"] if variables is None else [v for v in variables if v in self.meta["vars_2d"]]
+        entry3d_all = self.meta.get("vars_entry3d", {})
+        entry3d = dict(entry3d_all) if variables is None else {v: entry3d_all[v] for v in variables if v in entry3d_all}
         entries = {"track": self._column("entries", "track"), "k": self._column("entries", "k")} if index_columns else {}
         for n in names:
             entries[n] = self._column("entries", n)
+        for n, ncol in entry3d.items():
+            # One column per element of the third dimension
+            for j in range(ncol):
+                entries[f"{n}__{j}"] = self._column("entries", f"{n}__{j}")
         frag = {}
         if fragments and self.meta["vars_3d"]:
             table = pq.read_table(os.path.join(self.folder, "fragments.parquet"))
             frag = {c: table.column(c).to_numpy() for c in table.column_names}
         meta = dict(self.meta, vars_2d=names) if fragments else dict(self.meta, vars_2d=names, vars_3d=[])
+        if "vars_entry3d" in self.meta:
+            meta["vars_entry3d"] = entry3d
         return RowTables(self.tracks, entries, frag, meta)
 
     def to_pandas(self, table="entries", tracks=None, variables=None):
@@ -703,6 +769,52 @@ def gather_index(offsets, keep):
     new_offsets = np.concatenate(([0], np.cumsum(lengths)))
     index = np.arange(new_offsets[-1]) - np.repeat(new_offsets[:-1], lengths) + np.repeat(starts, lengths)
     return index, new_offsets
+
+
+def subset_tracks(tables, keep):
+    """
+    The row tables of some of the tracks, renumbered 0 ... nkeep - 1 in the order of `keep`: what selecting tracks of the dense
+    file and giving them a new tracks coordinate gives (the robust-MCS step keeps the robust tracks of the PF statistics this way).
+
+    Args:
+        tables: RowTables
+            Tables with all the columns that are to be kept (read_tables without a variable list).
+        keep: int array [nkeep]
+            Tracks to keep (0-based, no duplicates), in the order they get in the result.
+
+    Returns:
+        subset: RowTables
+            tracks (the rows of the kept tracks; the tracks coordinate column, if there is one, is the new track index), entries
+            (the entries of the kept tracks, the track column renumbered), fragments (those of the kept tracks, renumbered and
+            sorted again) and the meta data with the new number of tracks.
+    """
+    keep = np.asarray(keep, dtype=np.int64)
+    meta = dict(tables.meta)
+    tdim = meta["tracks_dim"]
+    duration = tables.duration
+    # Positions of the entries of the kept tracks in the flat entries columns
+    index, _ = gather_index(tables.offsets, keep)
+    # Tracks table: the rows of the kept tracks (a stored tracks coordinate is the new track index)
+    tracks = {n: np.asarray(v)[keep] for n, v in tables.tracks.items()}
+    if tdim in tracks:
+        tracks[tdim] = np.arange(len(keep), dtype=tracks[tdim].dtype)
+    # Entries table: the entries of the kept tracks, the track column renumbered
+    entries = {n: np.asarray(v)[index] for n, v in tables.entries.items()}
+    if "track" in entries:
+        entries["track"] = np.repeat(np.arange(len(keep), dtype=np.asarray(tables.entries["track"]).dtype), duration[keep])
+    # Fragments table: the fragments of the kept tracks with the new track index, sorted as TableBuilder.build sorts them
+    fragments = {}
+    if tables.fragments:
+        new_index = np.full(len(duration), -1, dtype=np.int64)
+        new_index[keep] = np.arange(len(keep))
+        frag = tables.fragments
+        use = new_index[frag["track"]] >= 0
+        fragments = {n: np.asarray(v)[use] for n, v in frag.items()}
+        fragments["track"] = new_index[np.asarray(frag["track"])[use]].astype(np.asarray(frag["track"]).dtype)
+        order = np.lexsort((fragments["slot"], fragments["kind"], fragments["k"], fragments["track"]))
+        fragments = {n: v[order] for n, v in fragments.items()}
+    meta["dims"] = dict(meta["dims"], **{tdim: int(len(keep))})
+    return RowTables(tracks, entries, fragments, meta)
 
 
 def load_sparse_entries(statistics_file, tracks_dimname="tracks", times_dimname="times", duration_var="track_duration",
@@ -804,6 +916,7 @@ class TableBuilder:
         self.global_attrs = dict(global_attrs or {})
         self.tracks, self.entries, self.fragment_columns = {}, {}, {}
         self.vars_1d, self.vars_tracks2d, self.vars_2d, self.vars_3d = [], {}, [], []
+        self.vars_entry3d = {}
         self.dtypes, self.fill, self.attrs, self.dims_of, self.coords, self.extra_dims = {}, {}, {}, {}, {}, {}
         if tracks_coord:
             self.add_track_var(tracks_dim, np.arange(len(self.duration)))
@@ -831,6 +944,11 @@ class TableBuilder:
                       global_attrs=meta["global_attrs"], tracks_coord=False)
         builder.tracks = dict(tables.tracks)
         builder.entries = {n: tables.entries[n] for n in meta["vars_2d"]}
+        # The small [tracks, times, n] variables: their n columns each
+        builder.vars_entry3d = dict(meta.get("vars_entry3d", {}))
+        for n, ncol in builder.vars_entry3d.items():
+            for j in range(ncol):
+                builder.entries[f"{n}__{j}"] = tables.entries[f"{n}__{j}"]
         builder.fragment_columns = dict(tables.fragments)
         builder.vars_1d, builder.vars_tracks2d = list(meta["vars_1d"]), dict(meta["vars_tracks2d"])
         builder.vars_2d, builder.vars_3d = list(meta["vars_2d"]), list(meta["vars_3d"])
@@ -919,6 +1037,41 @@ class TableBuilder:
         self.fill[name] = "nan" if isinstance(_json_value(fill), float) and np.isnan(_json_value(fill)) else _json_value(fill)
         self._remember(name, attrs, flat.dtype, [self.tdim, self.kdim])
 
+    def add_entry3d_var(self, name, values, dim3, attrs=None, fill=None):
+        """
+        Add a small [tracks, times, n] variable (the PF statistics, n = nmaxpf) as n flat columns name__0 ... name__{n-1} of the
+        entries table; an existing variable of that name is replaced.
+
+        Args:
+            name: string
+                Variable name.
+            values: array [nentries, n]
+                Values of the valid entries, track after track (nentries = sum of the durations).
+            dim3: string
+                Name of the third dimension (e.g. 'nmaxpf'); a coordinate 0 ... n-1 of that name is added if there is none.
+            attrs: dictionary (default: None)
+                Attributes.
+            fill: int, float or NaN (default: None)
+                Value of the dense variable where the track has no entry; None: the _FillValue attribute.
+        """
+        values = np.asarray(values)
+        if values.ndim != 2 or values.shape[0] != int(self.duration.sum()):
+            raise ValueError(f"{name}: expected shape ({int(self.duration.sum())}, n), got {values.shape}")
+        if fill is None:
+            if "_FillValue" not in (attrs or {}):
+                raise ValueError(f"{name}: no fill value given and no _FillValue attribute")
+            fill = attrs["_FillValue"]
+        # Drop the columns of an earlier variable of the same name (it may have had more elements)
+        for j in range(self.vars_entry3d.get(name, 0)):
+            self.entries.pop(f"{name}__{j}", None)
+        for j in range(values.shape[1]):
+            self.entries[f"{name}__{j}"] = np.ascontiguousarray(values[:, j])
+        self.vars_entry3d[name] = int(values.shape[1])
+        if dim3 not in self.coords:
+            self.add_coord(dim3, np.arange(values.shape[1]))
+        self.fill[name] = "nan" if isinstance(_json_value(fill), float) and np.isnan(_json_value(fill)) else _json_value(fill)
+        self._remember(name, attrs, values.dtype, [self.tdim, self.kdim, dim3])
+
     def add_fragment_vars(self, columns, variables):
         """
         Add the merge / split fragments: the rows, and the attributes and fill value of the <kind>_<field> variables.
@@ -985,11 +1138,16 @@ class TableBuilder:
             "duration_var": self.duration_var, "dims": dims,
             "vars_1d": list(self.vars_1d), "vars_tracks2d": dict(self.vars_tracks2d),
             "vars_2d": list(self.vars_2d), "vars_3d": list(self.vars_3d), "fragment_fields": fields,
-            "dims_of": {n: self.dims_of[n] for n in self.vars_1d + self.vars_2d + self.vars_3d + list(self.vars_tracks2d)},
-            "dtypes": {n: self.dtypes[n] for n in self.vars_1d + self.vars_2d + self.vars_3d + list(self.vars_tracks2d)},
+            "dims_of": {n: self.dims_of[n] for n in
+                        self.vars_1d + self.vars_2d + self.vars_3d + list(self.vars_tracks2d) + list(self.vars_entry3d)},
+            "dtypes": {n: self.dtypes[n] for n in
+                       self.vars_1d + self.vars_2d + self.vars_3d + list(self.vars_tracks2d) + list(self.vars_entry3d)},
             "fill": dict(self.fill), "attrs": dict(self.attrs),
             "global_attrs": {k: _netcdf_attr(v) for k, v in self.global_attrs.items()}, "coords": dict(self.coords),
         }
+        # The key exists only when there is such a variable (the meta data of the other tables is as it always was)
+        if self.vars_entry3d:
+            meta["vars_entry3d"] = dict(self.vars_entry3d)
         return RowTables(dict(self.tracks), entries, fragments, meta)
 
 
@@ -1072,8 +1230,9 @@ def load_trackstats(path, tracks=None, variables=None, width=None, mask_and_scal
             Track indices (0-based) to load, in the given order. For a row folder only these tracks are built, and the times
             dimension is as long as their longest track (pass width to choose another length).
         variables: list of strings (default: None = all)
-            [tracks, times] variables to load; the per-track variables (see track_variables) and the merge / split variables
-            are always loaded.
+            [tracks, times] variables to load; the per-track variables (see track_variables), the merge / split variables and the
+            small [tracks, times, n] variables (the PF statistics: a dense file keeps them, so a row folder does too) are always
+            loaded. RowStats.tables(variables) loads only the named ones.
         width: int (default: None)
             Length of the times dimension of a subset of tracks from a row folder (rows_to_dense).
         mask_and_scale: bool (default: True)
@@ -1101,7 +1260,10 @@ def load_trackstats(path, tracks=None, variables=None, width=None, mask_and_scal
     if folder is None and not os.path.exists(path) and path.endswith(".nc") and os.path.isdir(path[:-3] + ".rows"):
         folder = path[:-3] + ".rows"
     if folder is not None:
-        tables = RowStats.open(folder, track_variables).tables(variables, index_columns=False, fragments=fragments)
+        rs = RowStats.open(folder, track_variables)
+        # The small [tracks, times, n] variables stay when a list of [tracks, times] variables is given (as in a dense file)
+        names = None if variables is None else list(variables) + list(rs.meta.get("vars_entry3d", {}))
+        tables = rs.tables(names, index_columns=False, fragments=fragments)
         ds = rows_to_dense(tables, tracks=tracks, width=width)
         if track_variables is not None:         # the duration column was read for the offsets and is not a result unless asked for
             ds = ds.drop_vars([v for v in ds.data_vars if tracks_dim in ds[v].dims and times_dim not in ds[v].dims

@@ -36,6 +36,13 @@ variable is therefore a flat array plus the offsets: that is what `RowStats` ret
 `meta.json` has what is needed to rebuild the dense layout exactly: dimension sizes, dtypes, fill values, attributes. The tables
 are Parquet files (columnar, compressed, readable by pandas, pyarrow, DuckDB, R, Spark).
 
+The Tb+PF statistics files have small three-dimensional variables, the precipitation-feature statistics `pf_area`, `pf_majoraxis`, ... of
+dimensions `[tracks, times, nmaxpf]`. They are stored as columns of the entries table, one per precipitation feature: `pf_area__0`,
+`pf_area__1`, ... (`meta.json` lists them as `vars_entry3d: {"pf_area": nmaxpf, ...}`; the key is absent in files that have no such
+variable). `rs["pf_area"]` is a ragged array with a trailing dimension (`rs["pf_area"][i]` is `[duration, nmaxpf]`), and `rs.to_xarray()`,
+`load_trackstats` and `write_dense_netcdf` give back the dense `[tracks, times, nmaxpf]` array. `RowStats.tables(variables)` reads only
+the columns of the variables that are named.
+
 ## Reading the files
 
 Three ways, from "my code was written for the dense files" to "I want to learn pandas":
