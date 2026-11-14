@@ -68,6 +68,21 @@ def test_ledger_and_timeline_fields(tmp_path):
     assert all(",demo," in line for line in lines[1:])
 
 
+def test_ledger_line_has_the_slurm_job_id_and_nodes_or_null_outside_slurm(tmp_path, monkeypatch):
+    # the collector assigns the ledger lines to the attempts of a job by the job id
+    monkeypatch.setenv("SLURM_JOB_ID", "61234567")
+    monkeypatch.setenv("SLURM_NNODES", "4")
+    with timed_step("demo", _config(tmp_path)):
+        _busy(100_000)
+    monkeypatch.delenv("SLURM_JOB_ID")
+    monkeypatch.setenv("SLURM_NNODES", "four")
+    with timed_step("demo2", _config(tmp_path)):
+        _busy(100_000)
+    first, second = read_ledger(tmp_path / "prof" / "step_ledger.jsonl")
+    assert first["slurm_job_id"] == "61234567" and first["slurm_nnodes"] == 4
+    assert second["slurm_job_id"] is None and second["slurm_nnodes"] is None
+
+
 def test_steps_append_to_one_ledger_and_one_timeline(tmp_path):
     config = _config(tmp_path)
     with timed_step("first", config):

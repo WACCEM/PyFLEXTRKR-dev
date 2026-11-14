@@ -12,6 +12,7 @@ Always (cheap): one INFO line per step with its wall time.
 When the config key `step_profile_dir` is a path (null = off, the default) the step also writes, into that directory:
   - step_ledger.jsonl      one JSON line per step: wall time, CPU seconds of the process tree (effective cores),
                            bytes read / written, peak memory of the tree, of the node and of the worker processes
+                           and the Slurm job id and number of nodes of the job (null outside Slurm)
   - memory_timeline.csv    node and process-tree memory every `step_sample_seconds` (default 5) seconds
   - dask_report_<step>.html  Dask performance report (task stream, worker profile), if a Dask client is given
   - cprofile_<step>.prof/.txt  cProfile of the main process, for the steps listed in `step_cprofile_steps`
@@ -48,6 +49,24 @@ logger = logging.getLogger(__name__)
 GB = 1.0e9
 # Processes whose peak RSS is below this (Dask nannies, multiprocessing helpers) are not counted as workers
 MIN_WORKER_RSS_BYTES = 100.0e6
+
+
+def _env_int(name):
+    """
+    An integer environment variable.
+
+    Args:
+        name: string
+            Variable name (e.g. 'SLURM_NNODES').
+
+    Returns:
+        value: int or None
+            None if the variable is not set or is not an integer.
+    """
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return None
 
 
 def _utc_now():
@@ -345,6 +364,7 @@ class StepTimer:
         rec = {
             "step": self.step, "status": status, "start": self._iso0, "end": _utc_now(), "wall_s": round(wall, 2),
             "host": socket.gethostname(), "pid": os.getpid(), "git": _git_head(),
+            "slurm_job_id": os.environ.get("SLURM_JOB_ID"), "slurm_nnodes": _env_int("SLURM_NNODES"),
             "root_path": self.config.get("root_path"),
             "startdate": self.config.get("startdate"), "enddate": self.config.get("enddate"),
             "run_parallel": self.config.get("run_parallel"), "nprocesses": self.config.get("nprocesses"),
