@@ -1,0 +1,213 @@
+---
+# Tb+PF MCS tracking of the E3SM ne120 simulation (0.25 degree output regridded to 0.1 x 0.1 degree, global, hourly OLR and precipitation)
+# Template of config/generate_tbpf_mcstracking_scripts.py (one job per month for idfeature, tracksingle and gettracks, one stitched job per year
+# for the other steps); run by runscripts/run_mcs_tbpf_unified.py. Docs: docs/tbpf_mcs_workflow.md
+#
+# The thresholds are those of config_mcs_tbpf_imergv7_mcsmip.yml (IMERGv7 on the same 0.1 degree grid). What differs from it: the input
+# (E3SM files: OLR converted to Tb, precipitation in m/s, one file per hour in one folder per year, clouddatasource not gpmirimerg, so
+# the 30-minute handling of the combined Tb + IMERG files is off), the paths and dates (placeholders of the generator), the statistics format
+# (row tables) and the optional steps.
+#
+# Placeholders that the generator fills: STARTDATE, ENDDATE (the period of the job), YEAR-MONTH (folder of the month), INPUT_DIR, TRACK_DIR
+# (--input-dir, --root-path).
+
+# The MCS definition of the robust (Tb+PF) MCS step: mcsmip or feng21. There is no default: the run stops at the start without it.
+#   mcsmip   MCSMIP / SAAG: PF major axis and duration, maximum rain rate duration, rain volume (keys below)
+#   feng21   Feng et al. (2021): PF area, rain rate, skewness and heavy rain ratio fitted to the duration (see the coefs_pf_* keys below)
+robustmcs_definition: mcsmip
+
+# Processing steps (the generator switches the steps of each job: idfeature, tracksingle, gettracks in the track jobs, the others in the stats job)
+run_idfeature : True         # parallel
+run_tracksingle : True       # parallel
+run_gettracks : True         # serial
+run_trackstats : True        # parallel
+run_identifymcs : True       # serial
+run_matchpf : True           # parallel
+run_robustmcs : True         # serial
+run_mapfeature : True        # parallel
+run_speed : True             # parallel
+# Optional steps after speed. The generator takes them from here (--rainmap on|off, --trackpcp on|off override)
+run_rainmap : True           # monthly maps of the total and the MCS precipitation (stats/monthly/mcs_rainmap_YYYYMM.nc)
+run_trackpcp : False         # precipitation accumulated at every pixel of every MCS over its life (see the trackpcp_* keys below): off
+run_remap_healpix : False
+run_regrid_mask : False
+
+# Output checks and restart (pyflextrkr/step_outputs.py)
+verify_step_outputs: True       # the run stops with exit code 1 if the outputs of a step are not complete
+skip_completed_steps: False     # True: a step whose outputs are complete is not run again (resubmit a failed job without editing the flags)
+
+# Statistics of the MCS steps: rows (Parquet tables, size follows the number of entries) or dense (netCDF files of the old steps)
+stats_format: rows
+
+# Parallel processing set up
+# run_parallel: 1 (local cluster), 2 (Dask scheduler; the generator sets 2 for a stats job on several nodes)
+run_parallel: 1
+nprocesses : 128  # Number of processors to use if run_parallel=1
+dask_tmp_dir: /tmp  # Dask temporary directory if run_parallel=1
+timeout: 3600  # [seconds] Dask timeout limit
+
+# Start/end date and time
+startdate: 'STARTDATE'
+enddate: 'ENDDATE'
+
+# Specify tracking input data date/time string format
+# This file name has one hourly time: ne120_olr_pcp_2009010100.nc --> databasename + yyyymoddhh
+time_format: yyyymoddhh
+databasename: ne120_olr_pcp_
+input_format: netcdf  # zarr or netcdf
+
+# Input files directory, one sub-folder per year (clouddata_subdir_format)
+clouddata_path: INPUT_DIR/
+clouddata_subdir_format: '%Y'
+# Working directory for the tracking data
+root_path: TRACK_DIR/
+# Working sub-directory names: every month has its own folder of cloudid and track files; the stats job links them into one folder
+tracking_path_name: tracking/YEAR-MONTH
+stats_path_name: stats
+pixel_path_name: mcstracking
+
+# Land mask file (the 0.1 degree IMERG land-sea mask: the same grid as the E3SM files)
+landmask_filename: /pscratch/sd/f/feng045/DYAMOND/maps/IMERG_landmask_180W-180E_60S-60N.nc
+landmask_varname: landseamask
+landmask_x_dimname: lon
+landmask_y_dimname: lat
+landmask_x_coordname: lon
+landmask_y_coordname: lat
+landfrac_thresh: [0, 90]  # Define the range of fraction for land (depends on what value is land the landmask file)
+
+# Input dataset structure
+pixel_radius:  10.0  # [km] Spatial resolution of the input data
+area_method: 'latlon'  # 'fixed' (default) or 'latlon' for latitude-dependent grid cell area
+datatimeresolution: 1.0  # [hour] Temporal resolution of the input data
+# Variable names in the input data: OLR (W/m2, converted to Tb) and precipitation (m/s, converted to mm/h)
+olr2tb: True
+olr_varname: FLUT
+pcp_varname: PRECT
+pcp_convert_factor: 3.6e6  # m/s to mm/h
+# Any value other than gpmirimerg: the precipitation is read at the time of the Tb (one time per file), no 30-minute handling
+clouddatasource: e3sm_ne120
+time_dimname: time
+x_dimname: lon
+y_dimname: lat
+time_coordname: time
+x_coordname: lon
+y_coordname: lat
+idclouds_hourly: 0  # 0:  No, 1:  Yes (only for the combined Tb + IMERG files with two times per file)
+
+# Specify types of feature being tracked
+# This adds additional feature-specific statistics to be computed
+feature_type: tb_pf
+
+# Cloud identification parameters
+mincoldcorepix:  4  # Minimum number of pixels for the cold core
+smoothwindowdimensions:  10  # Dimension of the Box2DKernel filter on Tb.
+medfiltsize: 5      # Window size to perform medfilt2d to fill missing Tb pixels, must be an odd number
+geolimits: [-60, -360, 60, 360] # [lat_min, lon_min, lat_max, lon_max] 4-element array to subset domain boundaries
+area_thresh:  800  # [km^2] Minimum area to define a cloud
+miss_thresh:  0.4  # Missing data fraction threshold. If missing data exceeds this, the time frame will be omitted (the first hour of a run that starts from rest has no data)
+core_operator: lt   # a cold pixel is a core
+cloudtb_core:  225.0  # [K]
+cloudtb_cold:  241.0  # [K]
+cloudtb_warm:  261.0  # [K]
+cloudtb_cloud:  261.0  # [K]
+absolutetb_threshs: [160, 330]  # K [min, max] absolute Tb range allowed.
+warmanvilexpansion:  0  # Not working yet, set this to 0 for now
+cloudidmethod: label_grow   # Method to identify clouds. Recommend: label_grow, legacy option: futyan3
+growth_method: edt          # edt: Euclidean distance transform growth (bfs: the original algorithm, slower on large domains)
+# Specific parameters to link cloud objects using PF
+linkpf:  1  # Set to 1 to turn on linkpf option; default: 0
+pf_smooth_window:  5  # Smoothing window for identifying PF
+pf_dbz_thresh:  3  # [dBZ] for reflectivity, or [mm/h] for rainrate
+pf_link_area_thresh:  648.0  # [km^2]
+
+# Periodic boundary conditions
+pbc_direction: x    # (options: x, y, both, none)
+# Fraction to extend the domain to label features at the periodic boundary
+pbc_extended_fraction: 0.1    # (range: 0 to 1)
+# Fraction of the domain to wrap feature position
+# If feature center movement between two time steps > max_domain_fraction * domain size,
+# the feature position will be wrapped to the other side of the domain
+pbc_max_domain_fraction: 0.5    # (range: 0 to 1)
+
+# Tracking parameters
+othresh: 0.5  # overlap fraction threshold. Clouds that overlap more than this between times are tracked.
+timegap: 3.1  # [hour] If missing data duration longer than this, tracking restarts
+nmaxlinks: 50  # Maximum number of clouds that any single cloud can be linked to
+maxnclouds:  3000  # Maximum number of clouds in one snapshot
+duration_range: [2, 400] # A vector [minlength,maxlength] to specify the duration range for the tracks
+duration_range_auto_update: True  # Auto-expand max_trackduration if data exceeds duration_range max
+duration_range_round_base: 10     # Round up to nearest multiple of this value when auto-updating
+# Flag to remove short-lived tracks [< min(duration_range)] that are not mergers/splits with other tracks
+# 0:keep all tracks; 1:remove short tracks
+remove_shorttracks: 1
+# Set this flag to 1 to write a dense (2D) trackstats netCDF file (not needed: the MCS steps read the sparse file; huge for a global year)
+trackstats_dense_netcdf: 0
+# Minimum time difference threshold to match track stats with cloudid files
+match_pixel_dt_thresh: 60.0  # seconds
+
+# MCS Tb parameters
+mcs_tb_area_thresh: 40000  # [km^2] Tb area threshold
+mcs_tb_duration_thresh:  4  # [hour] Tb minimum length of a mcs
+mcs_tb_split_duration:  12  # [hour] Tb tracks smaller or equal to this length will be included with the MCS splits from
+mcs_tb_merge_duration:  12  # [hour] Tb tracks smaller or equal to this length will be included with the MCS merges into
+mcs_tb_gap: 1  # [unitless] Allowable temporal gap in Tb data for MCS area threshold
+# MCS PF parameters
+mcs_pf_majoraxis_thresh:  0  # [km] MCS PF major axis length lower limit
+max_pf_majoraxis_thresh:  100000  # [km] MCS PF major axis length upper limit
+mcs_pf_durationthresh:  4  # [hour] PF minimum length of mcs
+mcs_pf_majoraxis_for_lifetime:  20  # [km] Minimum PF size to count PF lifetime
+mcs_pf_gap:  1  # [unitless] Allowable temporal gap in PF data for MCS characteristics
+
+# Specify rain rate parameters
+pf_rr_thres:  2.0  # [mm/hr] Rain rate threshold
+nmaxpf: 3  # Maximum number of precipitation features that can be within a cloud feature
+nmaxcore: 20  # Maximum number of convective cores that can be within a cloud feature
+pcp_thresh:  1.0  # Pixels with hourly precipitation larger than this will be labeled with track number
+heavy_rainrate_thresh:  10.0  # [mm/hr] Heavy rain rate threshold
+# Keys of robustmcs_definition: mcsmip
+mcs_min_rainvol_thresh: 20000   #  [km^2 mm/h] Min rain volumne threshold
+mcs_volrain_duration_thresh: 1.0   # [hour] Min volume rain threshold
+# Keys of robustmcs_definition: feng21 (uncomment them; the values are those fitted to IMERG, config_imerg_mcs_tbpf_example.yml)
+# coefs_pf_area:  [2874.05, 89.825]
+# coefs_pf_rr:  [3.01657, 0.0144461]
+# coefs_pf_skew:  [0.194462, 0.0100072]
+# coefs_pf_heavyratio:  [3.419024, 0.4387090]
+
+# Define tracked feature variable names
+feature_varname: feature_number
+nfeature_varname: nfeatures
+featuresize_varname: npix_feature
+
+# Track statistics output file dimension names
+tracks_dimname: tracks
+times_dimname: times
+pf_dimname: nmaxpf
+fillval: -9999
+# MCS track stats file base names
+mcstbstats_filebase: mcs_tracks_
+mcspfstats_filebase: mcs_tracks_pf_
+mcsrobust_filebase: mcs_tracks_robust_
+pixeltracking_filebase: mcstrack_
+mcsfinal_filebase: mcs_tracks_final_
+
+# Feature movement speed parameters
+lag_for_speed: 1  # lag intervals between tracked features to calculate movement
+track_number_for_speed: pcptracknumber
+track_field_for_speed: precipitation
+min_size_thresh_for_speed: 20 # [km] Min PF major axis length to calculate movement
+max_speed_thresh: 50  # [m/s]
+max_speed_for_trajectory_smoothing: 40  # [m/s] Max speed for smoothing lat/lon (only for visualization)
+
+# Precipitation accumulated at every pixel of every MCS over its life: the radar trackpcp step 2 (pyflextrkr/trackpcp_driver.py), off
+# (run_trackpcp). The cloud-shield mask is cloudtracknumber of the pixel files, the precipitation is the precipitation of the same files
+# (trackpcp_data_path: null), at the time of the track step (hourly data, hourly tracks: nearest, one hour).
+trackpcp_steps: [2]                       # only the pixel accumulation (1: statistics in the swath, 3: class maps, are not used here)
+trackpcp_data_path: null                  # null: the precipitation of the pixel-level files of the run
+trackpcp_data_varname: precipitation      # mm/h
+trackpcp_time_match: nearest
+trackpcp_window_sec: 3600                 # [s] a record is the rain rate of one hour: depth = rate x 1 h
+trackpcp_class_varname: null              # no class of the MCS tracks, no convective / stratiform split
+trackpcp_convective_varname: null
+trackpcp_box_km: [30, 50, 90]             # [km] boxes of the local depth / rate metrics: 3, 5 and 9 pixels of 0.1 degree
+trackpcp_accum_thresholds_mm: [25, 50, 100]
+trackpcp_cluster_thresh_mm: 50
