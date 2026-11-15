@@ -39,7 +39,7 @@ from pyflextrkr.ft_utilities import subset_files_timerange
 from pyflextrkr.step_timing import timed_step
 
 STEPS = ("idfeature", "tracksingle", "gettracks", "trackstats", "identifymcs", "matchpf", "robustmcs", "regionprops", "mapfeature",
-         "speed", "rainmap", "trackpcp", "preprocess", "remap_healpix", "regrid_mask")
+         "speed", "dense_netcdf", "rainmap", "trackpcp", "preprocess", "remap_healpix", "regrid_mask")
 
 
 def track_file_name(new_basetime, filebase="track_"):
@@ -487,6 +487,45 @@ def _check_rainmap(config, strict):
     return True, f"{len(files)} monthly files"
 
 
+def _check_dense_netcdf(config, strict):
+    """
+    The dense netCDF file of the final statistics (stats_format: rows): it opens, has the tracks and the times of the row folder and the
+    variables that were asked for; for the question "can the step be skipped" (strict) it must also be newer than the row tables, which
+    the speed step changes. With stats_format: dense the final file is the dense file and only has to open.
+    """
+    from pyflextrkr.dense_netcdf_driver import expected_output, source_folder
+    if not rows_mode(config):
+        ds, message = _open(_stats_file(config, config["mcsfinal_filebase"]))
+        if ds is None:
+            return False, message
+        ds.close()
+        return True, "stats_format dense: the final statistics file is the dense file"
+    # The row folder (the source) and the dense file next to it
+    rs, message = _open_rows(source_folder(config))
+    if rs is None:
+        return False, message
+    path = expected_output(config)
+    ds, message = _open(path)
+    if ds is None:
+        return False, message
+    with ds:
+        # The size of the arrays against the row folder, and the variables that the config asked for
+        tracks_dim, times_dim = rs.meta["tracks_dim"], rs.meta["times_dim"]
+        ntracks, width = rs.meta["dims"][tracks_dim], rs.meta["dims"][times_dim]
+        if tracks_dim not in ds.dimensions or times_dim not in ds.dimensions:
+            return False, f"{os.path.basename(path)} has no {tracks_dim} / {times_dim} dimension"
+        if ds.dimensions[tracks_dim].size != ntracks or ds.dimensions[times_dim].size != width:
+            return False, (f"{os.path.basename(path)} has {ds.dimensions[tracks_dim].size} tracks x {ds.dimensions[times_dim].size} times, "
+                           f"the row folder {ntracks} x {width}")
+        missing = [v for v in (config.get("dense_netcdf_variables") or []) if v not in ds.variables]
+        if missing:
+            return False, f"variables {missing} are missing"
+    # A dense file that is older than the row tables was made before the last step that changed them
+    if strict and os.path.getmtime(path) < os.path.getmtime(os.path.join(source_folder(config), "entries.parquet")):
+        return False, f"{os.path.basename(path)} is older than the row tables"
+    return True, f"{ntracks} tracks x {width} times"
+
+
 def _check_unchecked(config, strict):
     """
     A step whose outputs are not checked (a conversion or a regridding): it is never skipped (strict: the question "can it be
@@ -496,7 +535,8 @@ def _check_unchecked(config, strict):
 
 
 CHECKS_TBPF = {"identifymcs": _check_identifymcs_tb, "matchpf": _check_matchpf, "robustmcs": _check_robustmcs, "rainmap": _check_rainmap,
-               "preprocess": _check_unchecked, "remap_healpix": _check_unchecked, "regrid_mask": _check_unchecked}
+               "dense_netcdf": _check_dense_netcdf, "preprocess": _check_unchecked, "remap_healpix": _check_unchecked,
+               "regrid_mask": _check_unchecked}
 
 
 def _checks_for(config):
@@ -588,7 +628,7 @@ def run_step(step, config, state, func, client=None, **kwargs):
     return result
 
 
-STEPS_AFTER_TRACKSTATS = ("identifymcs", "matchpf", "robustmcs", "regionprops", "mapfeature", "speed", "rainmap", "trackpcp",
+STEPS_AFTER_TRACKSTATS = ("identifymcs", "matchpf", "robustmcs", "regionprops", "mapfeature", "speed", "dense_netcdf", "rainmap", "trackpcp",
                           "remap_healpix", "regrid_mask")
 
 

@@ -126,6 +126,8 @@ def test_log_lines_give_the_time_of_the_check_and_of_the_stitching(campaign):
     assert log["stitched"].isoformat() == "2026-11-14T18:33:00+00:00"
     assert log["finished"]["trackstats"][1] == 5.0 and (log["verified"]["trackstats"][0] - log["finished"]["trackstats"][0]).total_seconds() == pytest.approx(0.4)
     assert C.verified_counts("matchpf", "600 of 600 entries (100.0 %) have PF statistics") == {"matched_entries": 600, "entries": 600}
+    assert C.verified_counts("dense_netcdf", "41501 tracks x 400 times") == {"dense_tracks": 41501, "dense_times": 400}
+    assert "dense_netcdf" in C.STATS_STEPS and C.STATS_STEPS.index("dense_netcdf") == C.STATS_STEPS.index("speed") + 1
     assert C.verified_counts("idfeature", "744 cloudid files for 745 input files (1 frames skipped by miss_thresh)") == {
         "cloudid_files": 744, "input_files": 745, "frames_skipped": 1}
     assert C.verified_counts("nostep", "x") == {} and C.read_log(str(folder / "no_such_log"))["finished"] == {}

@@ -56,7 +56,8 @@ Three ways, from "my code was written for the dense files" to "I want to learn p
    tracks table are read (the track maps need 4 of the 13 per-track variables of 2.9 million tracks: 525 MiB and 0.8 s against 1,810 MiB and 1.8 s); `[]` gives none, the tracks index is in the result only if `"tracks"` is listed.
    `stats_exists(path)` is `os.path.isfile` for a file that may be dense or rows.
 2. **`RowStats`** gives numpy access that looks like `a[track, time]`: no dense array is built.
-3. **pandas**: `rs.to_pandas("tracks" | "entries" | "fragments")`.
+3. **pandas**: `rs.to_pandas("tracks" | "entries" | "fragments")`, or `pd.read_parquet` on the files of the folder. [rowstats_pandas.md](rowstats_pandas.md) translates Xarray analyses of the dense file to Pandas on the row tables (cheat sheet, recipes, timings),
+   and the notebook [demo_mcs_track_stats_rows_pandas.ipynb](../Notebooks/demo_mcs_track_stats_rows_pandas.ipynb) repeats the Xarray demo with it.
 
 ## Cookbook
 
@@ -146,7 +147,8 @@ python runscripts/convert_stats.py to-rows  mcs_tracks_robust_X.nc   mcs_tracks_
 ## Dense netCDF from row tables
 
 Everything that was written for the old dense files keeps working through `load_trackstats` (above). If you prefer the dense netCDF file itself, for
-a tool outside Python or to hand a file to someone, write it after the tracking is done: the file has the layout, names, dtypes, fill
+a tool outside Python or to hand a file to someone, write it after the tracking is done (the Tb+PF run script does this for the final statistics: step `dense_netcdf`, on by default,
+[tbpf_mcs_workflow.md](tbpf_mcs_workflow.md#reading-the-outputs)): the file has the layout, names, dtypes, fill
 values, attributes, unlimited tracks dimension and zlib compression of the file the dense step wrote, and the name that step gave it (the row
 folder name with `.rows` replaced by `.nc`, next to it).
 
@@ -162,8 +164,8 @@ python runscripts/convert_stats.py to-dense mcs_tracks_final_X.rows mcs_only.nc 
 ```
 
 The file is written `block_tracks` tracks at a time (4000 by default on the command line), so the memory is that of one block, not of the file; the
-result does not depend on the block size. Even so a month as dense arrays is a 180 GB array in the file (the file is compressed and much smaller) and
-a year does not make sense: use `tracks=` / `--select` and `variables=` / `--variables` to write the tracks and variables that you need. An existing
+result does not depend on the block size. A file of MCS tracks is fine (the IMERG year: 41,501 tracks, 26 GB as arrays, 0.43 GB on disk, written in 2.1 min), but a month of *all* the tracks of the radar pipeline as dense arrays is a 180 GB array in the file (the file is compressed
+and much smaller) and a year of them does not make sense: use `tracks=` / `--select` and `variables=` / `--variables` to write the tracks and variables that you need. An existing
 target is an error unless `overwrite=True` / `--overwrite`. Round trip: `dense_to_rows` followed by `write_dense_netcdf` gives back every
 variable, dtype, fill value and attribute of the original dense file (`tests/test_rowstats.py`).
 

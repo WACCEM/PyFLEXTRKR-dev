@@ -27,6 +27,7 @@ run_robustmcs : True         # serial
 run_mapfeature : True        # parallel
 run_speed : True             # parallel
 # Optional steps after speed. The generator takes them from here (--rainmap on|off, --trackpcp on|off override)
+run_dense_netcdf : True      # stats_format rows: the dense netCDF file of the final statistics, stats/mcs_tracks_final_<dates>.nc (the file the old pipeline wrote; always on by default)
 run_rainmap : True           # monthly maps of the total and the MCS precipitation (stats/monthly/mcs_rainmap_YYYYMM.nc)
 run_trackpcp : False         # precipitation accumulated at every pixel of every MCS over its life (see the trackpcp_* keys below): off
 run_remap_healpix : False
@@ -38,6 +39,10 @@ skip_completed_steps: False     # True: a step whose outputs are complete is not
 
 # Statistics of the MCS steps: rows (Parquet tables, size follows the number of entries) or dense (netCDF files of the old steps)
 stats_format: rows
+# The dense netCDF file of the final statistics (run_dense_netcdf, pyflextrkr/dense_netcdf_driver.py): tracks written at a time (memory of one block) and the
+# [tracks, times] variables to write (null = all)
+dense_netcdf_block_tracks: 4000
+dense_netcdf_variables: null
 
 # Parallel processing set up
 # run_parallel: 1 (local cluster), 2 (Dask scheduler; the generator sets 2 for a stats job on several nodes)

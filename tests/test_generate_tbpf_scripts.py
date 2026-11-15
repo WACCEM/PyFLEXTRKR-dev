@@ -76,12 +76,15 @@ def test_set_key_keeps_the_comment_appends_a_missing_key_and_refuses_a_double_ke
 
 
 def test_run_flags_of_the_three_kinds_of_jobs_and_the_options_for_the_optional_steps():
-    text = "run_rainmap: True\nrun_trackpcp: False\nrun_preprocess: True\nrun_remap_healpix: False\n"
+    text = "run_dense_netcdf: True\nrun_rainmap: True\nrun_trackpcp: False\nrun_preprocess: True\nrun_remap_healpix: False\n"
     track, stats, month = (G.run_flags(kind, text) for kind in ("track", "stats", "month"))
     assert [s for s, v in track.items() if v] == ["idfeature", "tracksingle", "gettracks", "preprocess"]
-    assert [s for s, v in stats.items() if v] == ["trackstats", "identifymcs", "matchpf", "robustmcs", "mapfeature", "speed", "rainmap"]
+    assert [s for s, v in stats.items() if v] == ["trackstats", "identifymcs", "matchpf", "robustmcs", "mapfeature", "speed", "dense_netcdf",
+                                                  "rainmap"]
     assert [s for s, v in month.items() if v] == ["idfeature", "tracksingle", "gettracks", "trackstats", "identifymcs", "matchpf",
-                                                  "robustmcs", "mapfeature", "speed", "preprocess", "rainmap"]
+                                                  "robustmcs", "mapfeature", "speed", "preprocess", "dense_netcdf", "rainmap"]
+    # a track job never writes the dense file, and a template without the flag adds none (the run script decides: rows mode with speed)
+    assert not track["dense_netcdf"] and not G.run_flags("stats", "")["dense_netcdf"]
     # --rainmap off, --trackpcp on replace the flags of the template; a template without the flag has it off
     on = G.run_flags("stats", text, {"rainmap": False, "trackpcp": True})
     assert not on["rainmap"] and on["trackpcp"]
@@ -113,13 +116,15 @@ def test_a_campaign_of_a_year_has_a_track_job_per_month_and_one_stats_job_after_
     feb = yaml.safe_load(_read(jobs[1]["config"]))
     assert (feb["startdate"], feb["enddate"], feb["tracking_path_name"]) == ("20090201.0000", "20090301.0000", "tracking/2009-02")
     assert [k for k in feb if k.startswith("run_") and feb[k] is True] == ["run_idfeature", "run_tracksingle", "run_gettracks"]
+    assert feb["run_dense_netcdf"] is False
     assert feb["clouddata_path"] == str(tmp_path / "input") + "/" and feb["root_path"] == str(tmp_path / "root") + "/"
     assert feb["run_parallel"] == 1 and feb["stats_format"] == "rows" and feb["robustmcs_definition"] == "mcsmip"
     # the stats job: the whole year, the folder of links, the other steps, the rain maps on and the track accumulation off (the template)
     stats = yaml.safe_load(_read(jobs[-1]["config"]))
     assert (stats["startdate"], stats["enddate"], stats["tracking_path_name"]) == ("20090101.0000", "20100101.0000", "tracking/campaign_200901_200912")
     assert [k for k in stats if k.startswith("run_") and stats[k] is True] == [
-        "run_trackstats", "run_identifymcs", "run_matchpf", "run_robustmcs", "run_mapfeature", "run_speed", "run_rainmap"]
+        "run_trackstats", "run_identifymcs", "run_matchpf", "run_robustmcs", "run_mapfeature", "run_speed", "run_dense_netcdf", "run_rainmap"]
+    assert stats["dense_netcdf_block_tracks"] == 4000 and stats["dense_netcdf_variables"] is None
     assert stats["run_parallel"] == 2 and stats["run_trackpcp"] is False
 
 
@@ -235,7 +240,7 @@ def test_one_node_stats_job_and_a_chunk_of_one_month_use_the_single_node_templat
     flags = yaml.safe_load(_read(plain[0]["config"]))
     assert [k for k in flags if k.startswith("run_") and flags[k] is True] == [
         "run_idfeature", "run_tracksingle", "run_gettracks", "run_trackstats", "run_identifymcs", "run_matchpf", "run_robustmcs",
-        "run_mapfeature", "run_speed", "run_rainmap"]
+        "run_mapfeature", "run_speed", "run_dense_netcdf", "run_rainmap"]
     assert "link_period_folders" not in _read(plain[0]["script"])
 
 

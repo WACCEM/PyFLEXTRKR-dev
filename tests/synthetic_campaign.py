@@ -13,7 +13,7 @@ import numpy as np
 SCHEMA = "tbpf_campaign_performance/1"
 
 
-def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, seed=7, tag="synthetic 2009", incident=False, rerun=False):
+def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, seed=7, tag="synthetic 2009", incident=False, rerun=False, dense=True):
     """
     A campaign: n_jobs track jobs (one node each, started over 25 minutes as the queue frees nodes) and a stats job that starts 6 minutes after the last
     track job ends.
@@ -24,7 +24,10 @@ def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, se
         stats_nodes: int (default: 4)
             Nodes of the stats job.
         post: bool (default: True)
-            The stats job also ran the post-processing steps (rainmap, trackpcp).
+            The stats job also ran the post-processing steps rainmap and trackpcp.
+        dense: bool (default: True)
+            The stats job also ran the dense_netcdf step (the dense netCDF file of the final statistics, which the stats job of rows mode runs by
+            default; False: a campaign of stats_format dense).
         failed_node_hours: float (default: 0.0)
             Node-hours of failed attempts that are charged too.
         seed: int (default: 7)
@@ -55,6 +58,9 @@ def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, se
     last_end = max(j["end_h"] for j in jobs)
     stats_start = last_end + 6.0 / 60.0
     steps = {"trackstats": 14.2, "identifymcs": 1.6, "matchpf": 9.3, "robustmcs": 0.2, "mapfeature": 11.0, "speed": 3.4}
+    # The dense netCDF file of the final statistics follows speed in the stats job (also in the one that hung in the rain maps)
+    if dense:
+        steps["dense_netcdf"] = 4.1
     if post and not incident:
         steps.update({"rainmap": 5.2, "trackpcp": 14.8})
     setup = 2.1

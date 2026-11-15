@@ -3,7 +3,7 @@
 Make the three campaign figures of docs/performance_tbpf.md from the JSON of Analysis/collect_campaign_performance.py:
 
   perf_tbpf_<name>_campaign   wall-clock time and node-hours by step: the 12 track jobs, the stats job, and below a dashed line the post-processing
-                              steps (rain maps, accumulation along the tracks) that run in the same allocation. The bars are node-hours (axis at the
+                              steps (dense netCDF file of the final statistics, rain maps, accumulation along the tracks) that run in the same allocation. The bars are node-hours (axis at the
                               top); the axes at the bottom are the wall-clock time of each row
   perf_tbpf_<name>_timeline   the campaign on a wall-clock axis: every track job and the stats job split into their steps
   perf_tbpf_<name>_steps      node-hours of each step, ranked, and the spread of the track-job steps over the months
@@ -12,7 +12,8 @@ PNG files, 24 bit, written to --outdir (not to the repository: the images of the
 docs/docs_assets.md). Everything on the figures comes from the JSON, including the size of the axes, the position of the braces and of the call-outs,
 which are measured from the text. Colors: the eight categorical slots of the CONUS figures (checked with the data-viz validator: lightness band,
 chroma, CVD and normal-vision separation of neighbours), a darker tint of the identifymcs slot for the robust MCS step, a neutral gray for the
-setup, a teal pair for the post-processing; text is always in the ink colors.
+setup, a teal pair for the rain maps and the accumulation along the tracks and a violet (checked between the speed red and the teal) for the dense
+netCDF file; text is always in the ink colors.
 
     python Analysis/make_performance_tbpf_figures.py --data campaign.json [--outdir DIR] [--name SLUG] [--only campaign timeline steps]
 
@@ -43,14 +44,16 @@ SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 # The steps of the jobs: the track jobs, the stats job up to speed, the post-processing inside the stats job
 TRACK_STEPS = ("idfeature", "tracksingle", "gettracks")
 STATS_STEPS = ("trackstats", "identifymcs", "matchpf", "robustmcs", "mapfeature", "speed")
-POST_STEPS = ("rainmap", "trackpcp")
+POST_STEPS = ("dense_netcdf", "rainmap", "trackpcp")
 # The color of a step is the same in every figure: the categorical slots in their validated order (matchpf takes the slot of the regionprops step of
 # the CONUS figures), the robust MCS step a darker tint of the identifymcs slot (the serial MCS steps are one family), the setup neutral gray, the two
-# post-processing steps a teal ramp
+# post-processing steps a teal ramp, the dense netCDF step (between speed and the rain maps) a violet that the validator passes against both neighbours
 STEP_COLOR = {"idfeature": "#2a78d6", "tracksingle": "#eb6834", "gettracks": "#1baf7a", "trackstats": "#eda100", "identifymcs": "#e87ba4",
               "matchpf": "#008300", "robustmcs": "#b8457a", "mapfeature": "#6250d6", "speed": "#e34948", "setup": "#9a9993",
-              "rainmap": "#25a6ad", "trackpcp": "#0e6f78"}
-STEP_LABEL = {"setup": "setup + stitch"}
+              "dense_netcdf": "#8e6bbf", "rainmap": "#25a6ad", "trackpcp": "#0e6f78"}
+STEP_LABEL = {"setup": "setup + stitch", "dense_netcdf": "dense netCDF"}
+# What each post-processing step makes, for the label of the post-processing row
+STEP_WHAT = {"dense_netcdf": "dense netCDF file", "rainmap": "rain maps", "trackpcp": "precipitation accumulated along the tracks"}
 # Texts that stick out of the figure are an error when this is True (the tests), a warning otherwise
 STRICT = False
 
@@ -337,7 +340,7 @@ def campaign_rows(derived):
         c: dictionary
             jobs (track jobs), stats, nodes (stats job), per_month {step: array of minutes of the months}, track {step: (node-hours, wall minutes of
             the mean job)}, stats_rows [(step, node-hours, wall minutes)] (setup, trackstats ... speed), post_rows [(step, node-hours, wall minutes)]
-            (rainmap, trackpcp: the LAST run of each step supplies the numbers, whether it is the stats job's own or a job of its own with the nodes of
+            (dense_netcdf, rainmap, trackpcp: the LAST run of each step supplies the numbers, whether it is the stats job's own or a job of its own with the nodes of
             that job; the earlier runs are superseded), post_nodes (the node counts of the drawn runs), post_source {step: where it ran},
             post_job_of {step: name of the post job that ran it, None for the stats job}, drawn_post_jobs (names of the post jobs that supply a drawn
             step), post_scale (the nodes the post row stands for), post_jobs, totals (track_nh, stats_nh, post_nh, charged_nh = the node-hours of the
@@ -609,14 +612,15 @@ def fig_campaign(data, outdir, name):
     # A dashed line above the post-processing row
     fig.canvas.draw()
     if c["post_rows"]:
+        what = ", ".join(STEP_WHAT[r[0]] for r in c["post_rows"])
         y_line = y_tops[2] + 0.30
         fig.add_artist(Line2D([0.012, 0.99], [y_line / figh] * 2, transform=fig.transFigure, color=INK2, linewidth=0.9, linestyle=(0, (5, 4))))
         if own_jobs:
             why = (", after the stats job was cancelled in the rain maps" if c["stats"].get("incomplete") else
                    ", a re-run with the fixed rain-map step" if c["superseded_nh"] > 0 else "")
-            post_label = f"post-processing (optional steps) in a job of its own{why}: rain maps, precipitation accumulated along the tracks"
+            post_label = f"post-processing (optional steps) in a job of its own{why}: {what}"
         else:
-            post_label = "post-processing in the same allocation, after the steps above (optional steps): rain maps, precipitation accumulated along the tracks"
+            post_label = f"post-processing in the same allocation, after the steps above (optional steps): {what}"
         fig.text(0.012, (y_line + 0.06) / figh, post_label, ha="left", va="bottom", fontsize=9.3, color=INK2, style="italic")
 
     # Braces right of the rows: the tracking campaign (rows 1 and 2), then the cost of the post-processing
@@ -796,10 +800,10 @@ def fig_timeline(data, outdir, name):
     lines = [f"The {nrow} track jobs run side by side from 0; the stats job starts when the longest ends ({c['track_longest_min']:.0f} min). Queue waits are not drawn:",
              f"the stats job waited {d['stats_wait_min']:.0f} min for its {c['nodes']} nodes. {spread}."]
     if stats.get("incomplete"):
-        lines.append(f"The stats job was cancelled in the rain maps (hung for {stats['other_min'] / 60:.1f} h, not drawn); the post steps are the re-run job's. "
+        lines.append(f"The stats job was cancelled in the rain maps (hung for {stats['other_min'] / 60:.1f} h, not drawn); the post steps are those of jobs of their own. "
                      f"{c['compute_min'] / 60:.2f} h of compute, {nh['total']:.1f} node-hours charged.")
     elif lay["post_span"]:
-        lines.append(f"The post steps are the re-run job's (the stats job's first run of them is not drawn). {c['compute_min'] / 60:.2f} h of compute, "
+        lines.append(f"The post steps are those of jobs of their own (a step that the stats job ran too is drawn once, as its last run). {c['compute_min'] / 60:.2f} h of compute, "
                      f"{nh['total']:.1f} node-hours charged.")
     else:
         lines.append(f"{c['compute_min'] / 60:.2f} h of compute, {nh['total']:.1f} node-hours charged.")

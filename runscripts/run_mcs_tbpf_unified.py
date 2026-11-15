@@ -16,8 +16,9 @@ grid (run_regrid_mask) are optional steps; the remapping to HEALPix (run_remap_h
 added to the paths is clouddata_subdir_format (e.g. '%Y') and a root_path per year.
 
 Steps, each with its run_<step> flag: [preprocess] idfeature, tracksingle, gettracks, trackstats, identifymcs, matchpf, robustmcs, mapfeature,
-speed, and the optional [rainmap] (monthly maps of the total and the MCS precipitation), [trackpcp] (precipitation accumulated at every pixel of
-every MCS), [remap_healpix], [regrid_mask]. Every step runs through run_step (pyflextrkr/step_outputs.py): its wall time is logged (with
+speed, and the optional [dense_netcdf] (the dense netCDF file of the final statistics, from the row tables of stats_format: rows; on by default in
+the run that does the speed step, pyflextrkr/dense_netcdf_driver.py), [rainmap] (monthly maps of the total and the MCS precipitation), [trackpcp]
+(precipitation accumulated at every pixel of every MCS), [remap_healpix], [regrid_mask]. Every step runs through run_step (pyflextrkr/step_outputs.py): its wall time is logged (with
 step_profile_dir also the step ledger), its outputs are verified afterwards (verify_step_outputs, default True: the run stops with exit code 1
 if they are not complete), and with skip_completed_steps a step whose outputs are complete is not run again (the later steps then run in any
 case). A step that ends the run with sys.exit() without a message (the old modules do that when they find nothing, e.g. no MCS) ends it with
@@ -131,6 +132,26 @@ def check_config(config):
         logger.info(f"Robust MCS definition: {definition}; statistics format: {stats_format}")
 
 
+def set_dense_netcdf_flag(config):
+    """
+    Decide run_dense_netcdf (the dense netCDF file of the final statistics) and put the decision in the config: a config without the key
+    gets dense_netcdf_driver.default_run_flag (on for stats_format: rows in the run that does the speed step, so that the file that most
+    users expect is always made, and off in track jobs and post-processing jobs); with stats_format: dense the old step writes that file
+    already, so the step is off there whatever the config says.
+
+    Args:
+        config: dictionary
+            Loaded config (stats_format, run_speed, run_dense_netcdf); run_dense_netcdf is set.
+    """
+    logger = logging.getLogger(__name__)
+    from pyflextrkr.dense_netcdf_driver import default_run_flag
+    if "run_dense_netcdf" not in config:
+        config["run_dense_netcdf"] = default_run_flag(config)
+    if config["run_dense_netcdf"] and not rows_mode(config):
+        logger.info("run_dense_netcdf has no effect with stats_format: dense, the final statistics file is the dense file already")
+        config["run_dense_netcdf"] = False
+
+
 def build_steps(config):
     """
     The steps of the pipeline, in order, with the function of each: the old modules for stats_format: dense, the row modules for
@@ -142,8 +163,8 @@ def build_steps(config):
 
     Returns:
         steps: list of tuples
-            (step name, function, keyword arguments of the function) for idfeature ... speed and the optional steps rainmap, trackpcp,
-            remap_healpix and regrid_mask. Whether a step runs is decided by its run_<step> flag in run_step.
+            (step name, function, keyword arguments of the function) for idfeature ... speed and the optional steps dense_netcdf, rainmap,
+            trackpcp, remap_healpix and regrid_mask. Whether a step runs is decided by its run_<step> flag in run_step.
     """
     definition = config.get("robustmcs_definition")
     # The functions of the MCS steps. The row modules are imported here, not at the top: the Dask workers import this file too
@@ -170,6 +191,10 @@ def build_steps(config):
         ("speed", speed_step, {}),
     ]
     # The optional steps are imported only when their flag is on, so that a run without them is unchanged (and needs nothing of them)
+    # The dense file of the final statistics follows the speed step, the last one that changes them (the row tables: stats_format dense has it)
+    if config.get("run_dense_netcdf", False):
+        from pyflextrkr.dense_netcdf_driver import dense_netcdf_driver
+        steps.append(("dense_netcdf", dense_netcdf_driver, {}))
     if config.get("run_rainmap", False):
         from pyflextrkr.rainmap_driver import rainmap_driver
         steps.append(("rainmap", rainmap_driver, {}))
@@ -289,6 +314,7 @@ def main(argv=None):
     config = load_config(argv[1])
     # Everything that can be wrong with the config is reported now
     check_config(config)
+    set_dense_netcdf_flag(config)
     steps = build_steps(config)
     state = {'stale': False}
 

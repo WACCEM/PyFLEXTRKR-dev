@@ -11,8 +11,8 @@ of all steps. For a chunk of several months:
                        of a month is the start date of the next one, so neighbouring months share the cloudid file of that instant.
   stats<first>_<last>  one job per chunk, after all the track jobs of the chunk: first the links to the cloudid / track files of the months in
                        one folder (runscripts/link_period_folders.py) and the stitched track numbers (runscripts/stitch_tracknumbers.py),
-                       then trackstats, identifymcs, matchpf, robustmcs, mapfeature and speed, and the optional rainmap and trackpcp over the
-                       whole chunk. The stitching is a few minutes inside this job, not a job of its own (a job costs a further queue wait).
+                       then trackstats, identifymcs, matchpf, robustmcs, mapfeature and speed, the dense netCDF file of the final statistics
+                       (dense_netcdf) and the optional rainmap and trackpcp over the whole chunk. The stitching is a few minutes inside this job, not a job of its own (a job costs a further queue wait).
 
 Neighbouring months share the cloudid file of the seam instant, which both must include (--seam-offset-minutes: for input whose cloudid time is not
 the time in the name of the input file; the stitching command is run with --require-seams, so a missed seam stops the stats job instead of cutting
@@ -24,8 +24,8 @@ list is printed.
         --input-dir /pscratch/.../olr_pcp --root-path /pscratch/.../mcs_tbpf/2009 --account <account> [--stats-nodes 4] [--submit]
 
 The config template has the placeholders STARTDATE, ENDDATE and YEAR-MONTH (the period and the folder of the month) and INPUT_DIR, TRACK_DIR
-(--input-dir, --root-path); the template decides whether the optional steps rainmap and trackpcp run (run_rainmap, run_trackpcp), --rainmap and
---trackpcp override it. A job that failed is written again (the same command) and only what is needed is submitted; a job that is not
+(--input-dir, --root-path); the template decides whether the optional steps dense_netcdf, rainmap and trackpcp run (run_dense_netcdf, run_rainmap,
+run_trackpcp), --rainmap and --trackpcp override the last two. A job that failed is written again (the same command) and only what is needed is submitted; a job that is not
 submitted in that call is taken as finished:
 
     python generate_tbpf_mcstracking_scripts.py ... --submit --jobs track200906 stats200901_200912
@@ -54,7 +54,7 @@ DEFAULT_PYTHON_ENV = '/global/common/software/m1867/python/pyflex26.3'
 CORE_TRACK_STEPS = ('idfeature', 'tracksingle', 'gettracks')
 CORE_STATS_STEPS = ('trackstats', 'identifymcs', 'matchpf', 'robustmcs', 'mapfeature', 'speed')
 OPTIONAL_TRACK_STEPS = ('preprocess',)
-OPTIONAL_STATS_STEPS = ('rainmap', 'trackpcp', 'remap_healpix', 'regrid_mask')
+OPTIONAL_STATS_STEPS = ('dense_netcdf', 'rainmap', 'trackpcp', 'remap_healpix', 'regrid_mask')
 # CPUs (hardware threads) of a Dask worker: one core with its hyperthread for a worker of one thread (a Perlmutter CPU node has 256 of them)
 CPUS_PER_WORKER = 2
 

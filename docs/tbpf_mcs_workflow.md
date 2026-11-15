@@ -4,7 +4,7 @@ How to run MCS tracking from brightness temperature (Tb) and precipitation (PF),
 [run_mcs_tbpf_unified.py](../runscripts/run_mcs_tbpf_unified.py): for one period, for a campaign of months or a year (one job per month for the
 first three steps, one stitched job for the rest), with row-table statistics, output checks, optional monthly rain maps and optional per-track
 precipitation accumulation. It is the Tb+PF version of the workflow of the radar pipeline (`run_mcs_radar3d.py`); the stitching is described in
-[stitching.md](stitching.md), the row tables in [rowstats.md](rowstats.md), the precipitation along the tracks in
+[stitching.md](stitching.md), the row tables in [rowstats.md](rowstats.md) and their analysis with Pandas in [rowstats_pandas.md](rowstats_pandas.md), the precipitation along the tracks in
 [track_precipitation.md](track_precipitation.md). The worked example is the E3SM ne120 simulation on a 0.1 degree global grid
 ([The E3SM example](#the-e3sm-example-01-degree-global-hourly)).
 
@@ -50,6 +50,7 @@ start with a message that names both options, the old scripts each one replaces 
 | MCS definition | **explicit**: `robustmcs_definition` is required (`mcsmip` or `feng21`), no default | [Which script, which MCS definition](#which-script-which-mcs-definition) |
 | statistics format | **`stats_format: rows`** in the templates of this workflow: the files of identifymcs, matchpf, robustmcs and speed are row tables (`mcs_tracks_*.rows`, Parquet folders). The code default stays `dense` (the old netCDF files, bit-identical to the old scripts) | [config_mcs_tbpf_e3sm_0p1deg_template.yml](../config/config_mcs_tbpf_e3sm_0p1deg_template.yml), [Reading the outputs](#reading-the-outputs) |
 | many months | **stitched campaigns**: the months are tracked at once and their track numbers are joined, so a track or MCS that crosses a month boundary stays one track | [generate_tbpf_mcstracking_scripts.py](../config/generate_tbpf_mcstracking_scripts.py), [A campaign](#a-campaign-months-or-a-year) |
+| dense netCDF file of the final statistics | **on** (`run_dense_netcdf: True` in the template; a config without the key: on in the run that does `speed` with `stats_format: rows`): `stats/mcs_tracks_final_<dates>.nc`, the file that the old pipeline wrote and most users expect | [Reading the outputs](#reading-the-outputs), [performance_tbpf.md](performance_tbpf.md) |
 | monthly rain maps | **on** (`run_rainmap: True` in the template) | [Rain maps and the accumulation along the tracks](#rain-maps-and-the-accumulation-along-the-tracks) |
 | per-track pixel accumulation | **off** (`run_trackpcp: False` in the template) | [the same section](#rain-maps-and-the-accumulation-along-the-tracks) |
 | continuation | **no automatic continuation**: a job that failed or ran out of time is submitted again by hand (`skip_completed_steps: True` continues it from the step that was not finished) | [Restarting a job](#restarting-a-job-that-ran-out-of-time-or-failed) |
@@ -63,8 +64,8 @@ flowchart TD
   B --> C["stats job per chunk of months<br/>links, stitch track numbers"]
   C --> D["trackstats, identifymcs, matchpf, robustmcs<br/>(row tables)"]
   D --> E["mapfeature, speed<br/>pixel files, movement"]
-  E --> F["optional: rainmap (on), trackpcp (off)"]
-  F --> G["stats/*.rows, mcstracking/*.nc, stats/monthly/*.nc"]
+  E --> F["optional: dense_netcdf (on), rainmap (on), trackpcp (off)"]
+  F --> G["stats/*.rows, stats/mcs_tracks_final_*.nc, mcstracking/*.nc, stats/monthly/*.nc"]
 ```
 
 A chunk of one month is the plain job: all steps in one job on one node, with the same file names. `run_mcs_tbpf_unified.py config.yml` on its own runs
@@ -136,13 +137,15 @@ One root per campaign (`root_path`); everything inside is named by date:
 <root_path>/tracking/YYYY-MM/                    cloudid_YYYYMMDD_hhmmss.nc, track_*.nc   (feature identification and pairwise tracks, one folder per month)
 <root_path>/tracking/campaign_<first>_<last>/    links to the cloudid and track files of the months of a chunk (made by the stats job)
 <root_path>/stats/                               tracknumbers_*, trackstats_sparse_*, mcs_tracks_*.rows, mcs_tracks_pf_*.rows, mcs_tracks_robust_*.rows, mcs_tracks_final_*.rows
+<root_path>/stats/mcs_tracks_final_*.nc          the dense netCDF file of the final statistics, next to its .rows folder   (run_dense_netcdf)
 <root_path>/stats/monthly/                       mcs_rainmap_YYYYMM.nc   (run_rainmap)
 <root_path>/stats/trackpcp_*                     trackpcp_pixels_*.parquet, trackpcp_metrics_*.parquet, trackpcp_grid.nc   (run_trackpcp)
 <root_path>/mcstracking/<START>_<END>/           mcstrack_*.nc   (the pixel-level files of the MCSs, one folder per run)
 ```
 
 The four MCS files are the successive stages of one table: `mcs_tracks_` (the Tb MCS), `mcs_tracks_pf_` (plus the PF statistics), `mcs_tracks_robust_` (the robust MCSs, renumbered) and
-`mcs_tracks_final_` (plus the movement). With `stats_format: dense` they are netCDF files of the same names (`.nc`).
+`mcs_tracks_final_` (plus the movement). With `stats_format: dense` they are netCDF files of the same names (`.nc`); with `stats_format: rows` the final one is also written as the netCDF file
+`mcs_tracks_final_<dates>.nc` (step `dense_netcdf`, below), the other three can be converted ([Dense netCDF files of the other statistics](#dense-netcdf-files-of-the-other-statistics)).
 
 ## One period
 
@@ -171,13 +174,13 @@ python generate_tbpf_mcstracking_scripts.py ... --submit --jobs track200906 stat
 | job | does | nodes |
 |---|---|---|
 | `track<YYYYMM>` (one per month, all start together) | idfeature, tracksingle, gettracks of that month | 1 |
-| `stats<first>_<last>` (one per chunk, after all the track jobs of the chunk, `afterok`) | links to the cloudid and track files of the months, stitch of the track numbers, then trackstats, identifymcs, matchpf, robustmcs, mapfeature, speed, and rainmap / trackpcp if on | `--stats-nodes` |
+| `stats<first>_<last>` (one per chunk, after all the track jobs of the chunk, `afterok`) | links to the cloudid and track files of the months, stitch of the track numbers, then trackstats, identifymcs, matchpf, robustmcs, mapfeature, speed, the dense netCDF file of the final statistics, and rainmap / trackpcp if on | `--stats-nodes` |
 
 ```
 months of a chunk, all at once:   track200901   track200902   track200903   ...        idfeature > tracksingle > gettracks   (one node each)
                                        \             |             /
 one job after all of them:                  stats200901_200912                         links + stitch (minutes), then
-                                                                                       trackstats > identifymcs > matchpf > robustmcs > mapfeature > speed > rainmap
+                                                                                       trackstats > identifymcs > matchpf > robustmcs > mapfeature > speed > dense_netcdf > rainmap
 ```
 
 How it is set up (the same design as the radar workflow):
@@ -250,7 +253,8 @@ pair, as in the old scripts. Look at `n_calls_skipped` in the manifest of each m
 ## Reading the outputs
 
 `pyflextrkr.rowstats.load_trackstats` is a drop-in for `xarray.open_dataset` on the statistics files: the same call reads a dense netCDF file and a row folder (and the `.nc` name of a
-file that only exists as a row folder). The format, the pandas cookbook and the guarantees are in [rowstats.md](rowstats.md).
+file that only exists as a row folder). The format and the guarantees are in [rowstats.md](rowstats.md); the translation of Xarray analyses to Pandas on the row tables (a cheat sheet, recipes, and a notebook that repeats
+the Xarray demo with Pandas) is [rowstats_pandas.md](rowstats_pandas.md).
 
 ```python
 from pyflextrkr.rowstats import load_trackstats, RowStats, stats_exists
@@ -265,8 +269,45 @@ rs.to_pandas("entries", variables=["ccs_area", "total_rain"])              # one
 
 The PF statistics ([tracks, times, nmaxpf]: `pf_area`, `pf_majoraxis`, `pf_rainrate`, ...) are stored as the columns `pf_area__0`, `pf_area__1`, ... of the entries table, one per
 precipitation feature (`vars_entry3d` in `meta.json`); `rs["pf_area"]` is a ragged array with the trailing dimension, `load_trackstats` and `write_dense_netcdf` give the dense array back.
-**The old dense file:** `pyflextrkr.rowstats.write_dense_netcdf("mcs_tracks_robust_<dates>.rows")` writes the netCDF file of the old step (same dimensions, names, dtypes, fill values,
-attributes) next to the folder; select tracks or variables for a year (`tracks=`, `variables=`, `block_tracks=`).
+**The dense file of the final statistics is written by the run** (step `dense_netcdf`, after `speed`, on by default with `stats_format: rows`): `stats/mcs_tracks_final_<dates>.nc`, the file of the old pipeline (same dimensions, variable names, dtypes,
+fill values and attributes; [rowstats.md](rowstats.md#dense-netcdf-from-row-tables)). `run_dense_netcdf: False` leaves it out; `dense_netcdf_block_tracks` and `dense_netcdf_variables` are the memory of the conversion and the variables to write
+([config keys](#config-keys-of-this-work)). It is written under a temporary name and renamed when complete, so a job that is killed never leaves a file that looks finished. It is a serial step (one process, one core): the other nodes of a stats job
+wait for it, and it took 26 s for the E3SM year and 128 s for the IMERG year ([performance_tbpf.md](performance_tbpf.md)).
+
+### Dense netCDF files of the other statistics
+
+The other statistics files (`mcs_tracks_`, `mcs_tracks_pf_`, `mcs_tracks_robust_`) stay row folders; write a dense netCDF file of any of them with the function that the step uses. The file gets the name of the old step (the folder
+name with `.rows` replaced by `.nc`, next to it), or the name you give, and has the layout of the old file:
+
+```python
+import numpy as np
+from pyflextrkr.rowstats import RowStats, write_dense_netcdf
+
+stats = "/path/to/root_path/stats"                  # the stats folder of the run
+
+# The robust MCSs (the same tracks as the final file, without the speed): mcs_tracks_robust_<dates>.nc next to the folder, 4000 tracks built at a time
+write_dense_netcdf(f"{stats}/mcs_tracks_robust_20090101.0000_20100101.0000.rows", block_tracks=4000)
+
+# A file with many tracks (mcs_tracks_ and mcs_tracks_pf_ hold every Tb MCS): write the tracks and the variables that you need, to a file of your own
+rs = RowStats.open(f"{stats}/mcs_tracks_pf_20090101.0000_20100101.0000.rows")
+long_lived = np.nonzero(rs["track_duration"] >= 12)[0]                       # track numbers (0-based row of the track)
+write_dense_netcdf(f"{stats}/mcs_tracks_pf_20090101.0000_20100101.0000.rows", outfile=f"{stats}/mcs_pf_long_lived.nc",
+                   tracks=long_lived, variables=["total_rain", "pf_area"], block_tracks=4000, overwrite=True)
+```
+
+The command line does the same (`python runscripts/convert_stats.py to-dense mcs_tracks_robust_X.rows`, `--select is_mcs=1 --variables area majoraxis`). The result does not depend on the block size, and an existing file is an error unless
+`overwrite=True`. **The size follows the arrays, not the data**: tracks x 400 times (x 50 merge / split slots for those variables) of every variable.
+Measured on the E3SM 2009 files (one Perlmutter CPU node, one Python process, `block_tracks=4000`; [performance_tbpf.md](performance_tbpf.md) has the IMERG year and where the time goes):
+
+| statistics file | tracks | time | dense file | peak memory |
+|---|---|---|---|---|
+| `mcs_tracks_robust_` | 7,608 | 24 s | 0.09 GB | 4.2 GB |
+| `mcs_tracks_final_` (the step) | 7,608 | 26 s | 0.10 GB | 4.4 GB |
+| `mcs_tracks_` (every Tb MCS) | 89,464 | 165 s | 0.28 GB | 6.7 GB |
+| `mcs_tracks_pf_` (every Tb MCS with the PF statistics) | 89,464 | 245 s | 0.61 GB | 6.7 GB |
+| the example above: `mcs_tracks_pf_`, 48,117 tracks of 12 hours or more, `total_rain` and `pf_area` | 48,117 | 60 s | 0.07 GB | |
+
+The time follows the dense arrays that are written (tracks x 400 times, and 50 merge / split slots for the merge and split variables), which are mostly empty: it is the compression and writing, not the reading of the rows.
 
 ## Rain maps and the accumulation along the tracks
 
@@ -418,6 +459,8 @@ the year of the pixel table is 0.015 % above the sum of the 12 monthly maps unti
 | `step_profile_dir` | `null` | a folder: ledger of wall time, CPU and memory per step |
 | `trackstats_dense_netcdf` | `0` | `1` also writes the dense `trackstats_*.nc` (not needed by the MCS steps) |
 | `run_idfeature` ... `run_speed` | all `True` | which steps run (the generator sets them per job) |
+| `run_dense_netcdf` | `True` (a config without the key: on for `stats_format: rows` in the run that does `speed`) | the dense netCDF file of the final statistics, `stats/mcs_tracks_final_<dates>.nc`: the file that most users and the old pipeline expect; the step after `speed` |
+| `dense_netcdf_block_tracks`, `dense_netcdf_variables` | `4000`, `null` | tracks built and written at a time (the memory of the step: 6.5 GB for the IMERG year; the time does not depend on it) and the `[tracks, times]` variables to write (`null` = all) |
 | `run_rainmap`, `run_trackpcp` | `True`, `False` | the optional steps after `speed` |
 | `run_preprocess`, `run_remap_healpix`, `run_regrid_mask` | `False` | the optional steps of the WRF and HEALPix workflows (no output check: they run when their flag is on and are never skipped) |
 | `miss_thresh` | `0.4` | frames with a missing fraction above it are skipped (no cloudid file) |
@@ -447,6 +490,7 @@ to skip it):
 | robustmcs | `pf_mcsstatus`, `pf_lifetime`, `track_duration` exist, at least one robust MCS track |
 | mapfeature | one pixel file per cloudid file |
 | speed | `movement_speed` has at least one finite value |
+| dense_netcdf | the dense file opens and has the tracks and the times of the row folder (and the variables of `dense_netcdf_variables`); for the skip decision it must also be newer than the row tables |
 | rainmap, trackpcp | the files of the step exist and are not empty (one rain map for every calendar month of the period that has pixel files) |
 
 A frame skipped by `miss_thresh` has no cloudid file; `idfeature_driver` writes `idfeature_manifest.json` with the number of skipped frames (for `tb_pf` as for the radar pipeline), so the
@@ -461,6 +505,8 @@ Everything is tested against what the old scripts give, and the stitched run aga
 | [test_identifymcs_tb_rows.py](../tests/test_identifymcs_tb_rows.py), [test_matchtbpf_rows.py](../tests/test_matchtbpf_rows.py), [test_robustmcs_rows.py](../tests/test_robustmcs_rows.py) | the row tables of each step equal what `dense_to_rows` makes of the dense file of the old step, on random tracks (merge and split slots including overflow, periodic boundary, missing PF, a 0 / 0 heavy rain ratio, a PF major axis exactly at the lifetime threshold), for both definitions |
 | [test_rowstats_entry3d.py](../tests/test_rowstats_entry3d.py) | the [tracks, times, nmaxpf] variables round-trip exactly through the row tables |
 | [test_run_mcs_tbpf_unified.py](../tests/test_run_mcs_tbpf_unified.py) | the wiring of the run script, the start-up checks (the definition is required), exit codes |
+| [test_dense_netcdf_driver.py](../tests/test_dense_netcdf_driver.py) | the dense file equals the dense file the rows were made from (every variable, dtype, fill value and attribute), the temporary name, the output check, the default of the flag and the place of the step |
+| [test_rowstats_pandas_doc.py](../tests/test_rowstats_pandas_doc.py) | the code of [rowstats_pandas.md](rowstats_pandas.md) runs, and each Pandas command of its cheat sheet gives what the Xarray command gives on the dense file |
 | [test_generate_tbpf_scripts.py](../tests/test_generate_tbpf_scripts.py) | the generator: months, seams, flags per job, links and stitching, tokens, dependencies, a stand-in `sbatch` |
 | [test_rainmap_driver.py](../tests/test_rainmap_driver.py), [test_trackpcp_tbpf.py](../tests/test_trackpcp_tbpf.py) | the rain maps equal plain sums and the files of the old analysis script; the accumulation along the tracks equals a sum over the hours with plain loops |
 | [test_tbpf_unified_demo.py](../tests/test_tbpf_unified_demo.py) | on four demo data sets (IMERG Tb + precipitation, IMERG V07B over the Sahel with both definitions, global IMERG with periodic boundaries): every cloudid, track, statistics and pixel file of the unified script equals that of the old script, for `stats_format: dense` and, as tables, for `rows`: 95 cloudid and track files, 7 statistics files and 48 pixel files per data set, no difference |
@@ -497,7 +543,7 @@ a node has 512 GB. The largest worker needs less than 2 GB, so the 128 workers o
 
 **Measured for a year (2026-11-14/15).** Two campaigns, E3SM ne120 2009 and IMERG V07B 2019 (8,760 hourly files of 1200 x 3600 each): 12 track jobs of one node, one stats job on 4 nodes (`--stats-nodes 4`, the multi-node
 template) up to speed, and a post-processing job on 4 nodes for the rain maps and trackpcp. The track job took 8.9 - 11.8 min (E3SM) and 14.5 - 16.9 min (IMERG). The compute time of a year (the longest track job, then the stats job, then the
-post-processing job; queue waits are not counted) is 0.94 h for E3SM and 1.32 h for IMERG, 4.6 and 7.0 node-hours of work, and the stats job with its post steps takes 0.74 h and 1.04 h (the projection below for one node: 2.1 h); the files are 211 and 251 GB.
+post-processing job, the dense netCDF file; queue waits are not counted) is 0.95 h for E3SM and 1.36 h for IMERG, 4.6 and 7.0 node-hours of work, and the stats job with its post steps and the dense file takes 0.75 h and 1.07 h (the projection below for one node: 2.1 h); the files are 211 and 251 GB.
 [performance_tbpf.md](performance_tbpf.md) has the numbers of every step, the figures, and the hang of the rain-map step that the IMERG campaign found and that is fixed here.
 
 **Projected for a year, before those campaigns.** A linear scaling of the measured times by the number of files (a month is 10 times, a year 122 times these 3 days) gives about 10 min per month for
@@ -514,8 +560,9 @@ few GB of statistics, rain maps and `trackpcp` tables (the 3 days have 0.9 milli
 | `nprocesses` | 128 (the template) | one worker per core of a CPU node; the largest worker needs 1.8 GB |
 | `--stats-nodes` | 4 for a year | measured on E3SM: 0.51 h up to speed on 4 nodes (multi-node template, `run_parallel: 2`) and 0.22 h for the rain maps and trackpcp, against a projected 2.1 h for all on one node; mapfeature, speed and matchpf gain most from the nodes, trackstats, identifymcs, robustmcs and trackpcp little. The queue made the 4-node job wait 53 - 56 min: with one node the job starts earlier and takes longer |
 | `--track-time` | `01:00:00` (default) | measured 8.9 - 11.8 min per month for E3SM and 14.5 - 16.9 min for IMERG; the default leaves a factor of 5 and 3.5 |
-| `--stats-time` | `02:00:00` with `--stats-nodes 4` (the campaigns asked 4 h; the default `06:00:00` is for one node) | the stats steps with the rain maps and trackpcp took 0.74 h (E3SM) and 1.04 h (IMERG): 2 h leaves a factor of 2.7 and 1.9 |
+| `--stats-time` | `02:00:00` with `--stats-nodes 4` (the campaigns asked 4 h; the default `06:00:00` is for one node) | the stats steps with the rain maps, trackpcp and the dense file took 0.75 h (E3SM) and 1.07 h (IMERG): 2 h leaves a factor of 2.7 and 1.9 |
 | `--chunk-months` | 12 | one stats job per year; with row tables the length is not limited by memory |
+| `run_dense_netcdf` | on (always, by default) | the dense file of the final statistics takes 0.4 min (E3SM) and 2.1 min (IMERG) on one core, 4.4 and 6.5 GB of memory with `dense_netcdf_block_tracks: 4000`; it is serial, so inside a 4-node stats job the other nodes wait for it (0.03 and 0.14 node-hours) |
 | `run_rainmap` / `run_trackpcp` | on / off | the rain maps take 2.1 - 2.2 min for a year on 4 nodes (9 - 10 s a month) and about 3 min on one node; the accumulation along the tracks took 10.0 min (E3SM, 103 million (MCS, pixel) rows, 0.9 GB) and 20.8 min (IMERG, 243 million rows, 2.4 GB; the main process held 34 GB) on 4 nodes, and the same on one node (9.7 and 20.1 min): more nodes do not help, the main process is the bottleneck. It is off because its table grows with the number of MCS pixels (switch it on for a study of the rain of the tracks) |
 | `skip_completed_steps` | `True` for a job that is submitted again | it continues from the step that did not finish ([Restarting a job](#restarting-a-job-that-ran-out-of-time-or-failed)) |
 | `step_profile_dir` | a folder of your campaign | records the wall time, the CPU time and the memory of every step: the numbers for the next campaign's settings |
@@ -549,5 +596,7 @@ few GB of statistics, rain maps and `trackpcp` tables (the 3 days have 0.9 milli
 | [pyflextrkr/step_outputs.py](../pyflextrkr/step_outputs.py) | the checks of the step outputs, `run_step` |
 | [pyflextrkr/identifymcs_tb_rows.py](../pyflextrkr/identifymcs_tb_rows.py), [pyflextrkr/matchtbpf_rows.py](../pyflextrkr/matchtbpf_rows.py), [pyflextrkr/robustmcs_rows.py](../pyflextrkr/robustmcs_rows.py) | the row-table versions of the Tb MCS, PF matching and robust MCS steps |
 | [pyflextrkr/rowstats.py](../pyflextrkr/rowstats.py) | the row tables (with the small [tracks, times, n] variables) |
+| [pyflextrkr/dense_netcdf_driver.py](../pyflextrkr/dense_netcdf_driver.py) | the step that writes the dense netCDF file of the final statistics |
+| [rowstats_pandas.md](rowstats_pandas.md), [Notebooks/demo_mcs_track_stats_rows_pandas.ipynb](../Notebooks/demo_mcs_track_stats_rows_pandas.ipynb) | Xarray to Pandas on the row tables: cheat sheet, recipes, and the notebook that repeats the Xarray demo |
 | [pyflextrkr/rainmap_driver.py](../pyflextrkr/rainmap_driver.py), [pyflextrkr/trackpcp_driver.py](../pyflextrkr/trackpcp_driver.py) | the monthly rain maps, the accumulation along the tracks |
 | [pyflextrkr/stitch_tracks.py](../pyflextrkr/stitch_tracks.py) | the stitching of the track numbers |

@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 SCHEMA = "tbpf_campaign_performance/1"
 # The steps of a track job and of a stats job, in the order they run (the optional ones last)
 TRACK_STEPS = ("idfeature", "tracksingle", "gettracks")
-STATS_STEPS = ("trackstats", "identifymcs", "matchpf", "robustmcs", "mapfeature", "speed", "rainmap", "trackpcp")
+STATS_STEPS = ("trackstats", "identifymcs", "matchpf", "robustmcs", "mapfeature", "speed", "dense_netcdf", "rainmap", "trackpcp")
 # The fields of sacct (one text line per job, step of a job: <id>, <id>.batch, <id>.extern, <id>.0)
 SACCT_FIELDS = ("JobIDRaw", "JobName", "State", "ExitCode", "Submit", "Eligible", "Start", "End", "ElapsedRaw", "TimelimitRaw", "NNodes",
                 "NodeList", "WorkDir", "MaxRSS", "MaxRSSNode", "MaxRSSTask", "AveRSS", "TotalCPU")
@@ -61,6 +61,7 @@ VERIFIED_COUNTS = {
     "robustmcs": r"(?P<mcs_robust>\d+) robust MCS tracks",
     "mapfeature": r"(?P<pixel_files>\d+) pixel files for (?P<cloudid_files>\d+) cloudid files",
     "speed": r"(?P<finite_speeds>\d+) finite speeds",
+    "dense_netcdf": r"(?P<dense_tracks>\d+) tracks x (?P<dense_times>\d+) times",
     "rainmap": r"(?P<monthly_files>\d+) monthly files",
     "trackpcp": r"(?P<files>\d+) files",
 }

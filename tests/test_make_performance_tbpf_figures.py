@@ -56,12 +56,14 @@ def test_the_nodes_hours_that_are_drawn_add_up_to_the_node_hours_charged():
     assert 0 < c["other_nh"] < 0.1 * c["totals"]["charged_nh"] and c["totals"]["charged_nh"] == pytest.approx(drawn + c["other_nh"])
     # rows: the track steps (x the jobs), the stats job (setup, the steps up to speed), the post-processing
     assert [r[0] for r in c["stats_rows"]] == ["setup", "trackstats", "identifymcs", "matchpf", "robustmcs", "mapfeature", "speed"]
-    assert [r[0] for r in c["post_rows"]] == ["rainmap", "trackpcp"]
+    assert [r[0] for r in c["post_rows"]] == ["dense_netcdf", "rainmap", "trackpcp"]
     assert c["track"]["idfeature"][0] == pytest.approx(sum(j["steps_min"]["idfeature"] for j in data["derived"]["track_jobs"]) / 60.0)
     # four nodes: a stats step of 14.2 minutes costs 14.2 x 4 / 60 node-hours
     assert dict((r[0], r[1]) for r in c["stats_rows"])["trackstats"] == pytest.approx(14.2 * 4 / 60.0)
-    # the campaign without the post-processing has no third row
-    assert F.campaign_rows(campaign_json(post=False)["derived"])["post_rows"] == []
+    # the dense netCDF step is a post step too: without the rain maps and the accumulation the third row holds it alone, and a campaign without
+    # any of the three (stats_format dense) has no third row
+    assert [r[0] for r in F.campaign_rows(campaign_json(post=False)["derived"])["post_rows"]] == ["dense_netcdf"]
+    assert F.campaign_rows(campaign_json(post=False, dense=False)["derived"])["post_rows"] == []
 
 
 def test_the_json_is_checked_before_a_figure_is_made(tmp_path):
@@ -97,10 +99,13 @@ def test_a_campaign_with_a_hung_stats_job_and_post_jobs_of_their_own_renders_and
     # last run supplies the numbers, the 1-node run is superseded (charged, not drawn)
     data = campaign_json(incident=True)
     c = F.campaign_rows(data["derived"])
-    assert [r[0] for r in c["post_rows"]] == ["rainmap", "trackpcp"] and c["post_nodes"] == [4] and c["post_scale"] == pytest.approx(4.0)
-    assert c["post_source"] == {"rainmap": "post job, 4 nodes", "trackpcp": "post job, 4 nodes"} and c["drawn_post_jobs"] == ["post_tail4"]
-    # node-hours of the post row: the steps of the 4-node job; the 1-node run is superseded; the hung time and the debug job are 'failed', not drawn
-    assert c["totals"]["post_nh"] == pytest.approx((1.5 + 11.3) * 4 / 60.0)
+    assert [r[0] for r in c["post_rows"]] == ["dense_netcdf", "rainmap", "trackpcp"] and c["post_nodes"] == [4] and c["post_scale"] == pytest.approx(4.0)
+    # the dense file was written by the stats job before it hung; the two steps that hung are the 4-node job's
+    assert c["post_source"] == {"dense_netcdf": "stats job, 4 nodes", "rainmap": "post job, 4 nodes", "trackpcp": "post job, 4 nodes"}
+    assert c["drawn_post_jobs"] == ["post_tail4"]
+    # node-hours of the post row: the dense step of the stats job and the steps of the 4-node job; the 1-node run is superseded; the hung time and
+    # the debug job are 'failed', not drawn
+    assert c["totals"]["post_nh"] == pytest.approx((4.1 + 1.5 + 11.3) * 4 / 60.0)
     assert c["superseded_nh"] == pytest.approx((3.0 + 8.6) / 60.0)
     nh = data["derived"]["node_hours"]
     assert nh["failed"] > 10 and c["totals"]["charged_nh"] == pytest.approx(nh["track"] + nh["stats"] + nh["post"])
@@ -114,8 +119,9 @@ def test_post_steps_that_a_post_job_ran_again_replace_those_of_the_stats_job():
     c = F.campaign_rows(data["derived"])
     stats = data["derived"]["stats_job"]
     # the stats job's own rainmap and trackpcp (5.2 and 14.8 min on 4 nodes) are superseded by the 4-node job's
-    assert dict((r[0], r[2]) for r in c["post_rows"]) == {"rainmap": 1.6, "trackpcp": 20.3}
-    assert c["post_source"] == {"rainmap": "post job, 4 nodes", "trackpcp": "post job, 4 nodes"}
+    # (the dense netCDF step of the stats job is not run again: it stays the stats job's)
+    assert dict((r[0], r[2]) for r in c["post_rows"]) == {"dense_netcdf": 4.1, "rainmap": 1.6, "trackpcp": 20.3}
+    assert c["post_source"] == {"dense_netcdf": "stats job, 4 nodes", "rainmap": "post job, 4 nodes", "trackpcp": "post job, 4 nodes"}
     assert c["superseded_nh"] == pytest.approx((5.2 + 14.8) * 4 / 60.0)
     # the node-hours charged are the stats job's (all its steps) and the post job's; what is drawn plus what is superseded plus the rest is that
     assert c["totals"]["charged_nh"] == pytest.approx(data["derived"]["node_hours"]["track"] + data["derived"]["node_hours"]["stats"] + data["derived"]["node_hours"]["post"])
@@ -156,7 +162,8 @@ def test_the_timeline_has_no_queue_wait_the_stats_job_starts_when_the_longest_tr
 
 def test_a_campaign_with_post_steps_in_the_stats_job_still_says_so():
     c = F.campaign_rows(campaign_json()["derived"])
-    assert c["post_nodes"] == [4] and c["post_source"] == {"rainmap": "stats job, 4 nodes", "trackpcp": "stats job, 4 nodes"} and c["post_scale"] == pytest.approx(4.0)
+    assert c["post_nodes"] == [4] and c["post_scale"] == pytest.approx(4.0)
+    assert c["post_source"] == {s: "stats job, 4 nodes" for s in ("dense_netcdf", "rainmap", "trackpcp")}
 
 
 def test_the_figures_leave_the_matplotlib_settings_of_the_session_alone(tmp_path):
