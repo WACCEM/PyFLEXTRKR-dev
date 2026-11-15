@@ -301,8 +301,106 @@ table = pq.read_table(f"{stats}/trackpcp_pixels_20090101.0000_20100101.0000.parq
 accum = track_pixels_to_map(table.to_pandas(), 123, 1200, 3600)            # a [ny, nx] map of the accumulated rain of MCS 123 (NaN outside its swath)
 ```
 
-The pixel table has one row per (MCS, pixel); it is why the step is off by default. The accumulated rain of all the MCSs at a pixel equals `mcs_precipitation` of the rain map of the same
-period (every pixel has one track number per hour), which is a check of both.
+The pixel table has one row per (MCS, pixel); it is why the step is off by default. The accumulated rain of all the MCSs at a pixel equals `mcs_precipitation` of the rain maps of the same
+period (every pixel has one track number per hour), which is a check of both; [how to read the tables](#reading-the-trackpcp-tables) has the check (the year of E3SM 2009 agrees to 5e-8 of the total).
+
+### Reading the trackpcp tables
+
+`track_number` in the two tables is the number of the robust MCS: its row (+ 1) in the robust-MCS statistics `mcs_tracks_robust_<dates>.rows` and the value of `cloudtracknumber` in the pixel-level files; both tables
+are sorted by it. The numbers here are those of the E3SM ne120 year 2009 (7,608 MCSs, 102.9 million pixel rows, 0.86 GB); the IMERG 2019 year has 41,501 MCSs and 243 million rows (2.4 GB).
+
+**The pixel table** (`trackpcp_pixels_<dates>.parquet`): one row per MCS and pixel; zstd, row groups of 1 million rows.
+
+| column | type | meaning |
+|---|---|---|
+| `track_number` | int32 | the robust MCS |
+| `pix_index` | int32 | `iy * nx + ix` on the tracking grid (row-major); `grid_ny` and `grid_nx` are in the metadata of the file, the latitude and longitude of the pixels in `trackpcp_grid.nc` (`latitude[y, x]`, `longitude[y, x]`) |
+| `accum_mm` | float32 | the rain at the pixel over the life of the MCS [mm]: the sum, over the hours in which the pixel is in the cloud-shield mask of the MCS (one owner per pixel and hour), of the rain rate times the window (`trackpcp_window_sec`, 1 h) |
+| `rate_mm_day` | float32 | `accum_mm` divided by the life of the MCS in days |
+| `max_1h_mm` | float32 | the largest depth of one window at the pixel |
+| `n_windows` | int16 | the number of windows in which the pixel was in the mask of the MCS |
+
+**The metrics table** (`trackpcp_metrics_<dates>.parquet`) is the summary of the pixel map of each MCS: one row per MCS, 20 columns, 1 MB. Use it to find the MCSs you want (the largest, the most intense, a region and a season), then read only their pixels.
+
+| column | unit | meaning |
+|---|---|---|
+| `track_number` | | the robust MCS |
+| `accum_max_mm` | mm | the largest `accum_mm` of the MCS |
+| `accum_vol_1e6m3` | 10^6 m3 | the rain volume over its life: the sum of `accum_mm` x pixel area |
+| `swath_area_km2` | km2 | the area the MCS covered (all its pixels) |
+| `area_ge25mm_km2`, `area_ge50mm_km2`, `area_ge100mm_km2` | km2 | the area with `accum_mm` of at least 25, 50 and 100 mm (`trackpcp_accum_thresholds_mm`) |
+| `local_depth_mm_30km`, `_50km`, `_90km` | mm | the largest mean `accum_mm` in a box of 3 x 3, 5 x 5 and 9 x 9 pixels (`trackpcp_box_km`, 0.1 degree pixels; pixels of the box outside the swath count as 0) |
+| `local_rate_mm_h_30km`, `_50km`, `_90km` | mm/h | the largest box mean of the hourly rain rate in any hour of the life (the same boxes) |
+| `cluster_area_km2`, `cluster_vol_1e6m3` | km2, 10^6 m3 | of the connected regions with `accum_mm` of at least `trackpcp_cluster_thresh_mm` (50 mm), the one with the largest volume: its area and its volume (0 if no pixel reaches it) |
+| `start_time`, `end_time` | s | the first and the last time of the track (seconds since 1970-01-01 UTC) |
+| `duration_h` | h | `end_time` minus `start_time`, plus one data interval |
+| `start_lon`, `start_lat` | degree | the mean position (`meanlon`, `meanlat` of the statistics) at the first time |
+
+**Loading them quickly.** Parquet is columnar and the pixel table is sorted by `track_number` with the minimum and maximum of every row group in the footer: read only the columns you need (`columns=`), ask for the MCSs you need
+(`filters=`: the row groups that cannot hold them are not read), and add up with `np.bincount`. The snippet is the one that was run on the E3SM files on a compute node (the whole file takes 10 s; the times in its comments are measured there):
+
+```python
+import glob
+
+import numpy as np
+import pandas as pd
+import pyarrow.parquet as pq
+import xarray as xr
+
+root = "/pscratch/sd/f/feng045/E3SM_polun/ne120_remap_0.1deg/mcs_tbpf/2009"      # root_path of the run
+stats = f"{root}/stats"                                                         # trackpcp_outdir (default: stats_outpath)
+tag = "20090101.0000_20100101.0000"                                             # <startdate>_<enddate> of the run
+pix_file = f"{stats}/trackpcp_pixels_{tag}.parquet"
+met_file = f"{stats}/trackpcp_metrics_{tag}.parquet"
+
+# The metrics: one row per robust MCS (7,608 rows x 20 columns, 1 MB): read the whole file
+metrics = pd.read_parquet(met_file)
+top = metrics.nlargest(10, "accum_vol_1e6m3")             # the ten MCSs with the largest rain volume [10^6 m3]
+
+# The pixels of one MCS. The file is sorted by track_number in row groups of 1 million rows with the minimum and maximum in the footer, so
+# a filter reads only the row groups that can hold the track (0.05 s)
+track = int(top["track_number"].iloc[0])                  # track_number: the robust MCS (row + 1 of the robust-MCS statistics)
+rows = pd.read_parquet(pix_file, filters=[("track_number", "==", track)])
+
+# pix_index = iy * nx + ix on the tracking grid: the shape of the grid is in the metadata of the file, latitude and longitude in trackpcp_grid.nc
+meta = pq.ParquetFile(pix_file).schema_arrow.metadata
+ny, nx = int(meta[b"grid_ny"]), int(meta[b"grid_nx"])
+iy, ix = np.divmod(rows["pix_index"].to_numpy(), nx)
+grid = xr.open_dataset(f"{stats}/trackpcp_grid.nc")
+rows["lat"], rows["lon"] = grid["latitude"].values[iy, ix], grid["longitude"].values[iy, ix]
+accum = np.full(ny * nx, np.nan, dtype=np.float32)
+accum[rows["pix_index"].to_numpy()] = rows["accum_mm"].to_numpy()
+accum = accum.reshape(ny, nx)                             # [ny, nx] map of the rain of this MCS over its life [mm], NaN outside its swath
+
+# Select MCSs with the metrics (small), then read only their pixels (42 MCSs, 2.4 million rows: 1.2 s)
+ids = metrics.loc[metrics["accum_max_mm"] > 500, "track_number"].tolist()
+selected = pd.read_parquet(pix_file, filters=[("track_number", "in", ids)])
+
+# All rows, only the two columns that are needed (the other four are not read: 102.9 million rows, 0.8 GB, 1.4 s), and the rain of all the MCSs at
+# every pixel over the year [mm] (0.4 s)
+pix = pd.read_parquet(pix_file, columns=["pix_index", "accum_mm"])
+year = np.bincount(pix["pix_index"].to_numpy(), weights=pix["accum_mm"].to_numpy(), minlength=ny * nx).reshape(ny, nx)
+
+# The same without holding the table in memory (the IMERG file has 243 million rows): add up batch by batch
+year_batches = np.zeros(ny * nx)
+for batch in pq.ParquetFile(pix_file).iter_batches(columns=["pix_index", "accum_mm"], batch_size=5_000_000):
+    year_batches += np.bincount(batch["pix_index"].to_numpy(), weights=batch["accum_mm"].to_numpy(), minlength=ny * nx)
+
+# The statistics of the same MCSs from the robust-MCS row tables (tracks = 0-based rows = track_number - 1; only these tracks are built)
+from pyflextrkr.rowstats import load_trackstats
+robust = load_trackstats(f"{stats}/mcs_tracks_robust_{tag}.nc", tracks=np.array(ids) - 1, variables=["base_time", "meanlon", "meanlat"],
+                         fragments=False, mask_and_scale=False, decode_times=False)
+
+# A check: the rain of all the MCSs equals mcs_precipitation of the rain maps. The period of the run ends with the first hour of the next year
+# (the last pixel-level file), which the monthly maps of the year do not hold: add it
+maps = sum(xr.open_dataset(f)["mcs_precipitation"].values[0] for f in sorted(glob.glob(f"{stats}/monthly/mcs_rainmap_2009*.nc")))
+with xr.open_dataset(sorted(glob.glob(f"{root}/mcstracking/*/mcstrack_*.nc"))[-1]) as last_hour:
+    maps = maps + np.nan_to_num(last_hour["precipitation"].where(last_hour["cloudtracknumber"] > 0).values[0])
+print("largest difference between the rain of the MCSs and the maps [mm]:", float(np.abs(year - maps).max()))
+```
+
+The metrics table is small enough to read whole; the pixel table of the IMERG year has 243 million rows (about 2 GB for two columns), so read it by filter or by batch there. The rain of the MCSs and the rain maps differ in the one hour that the check adds:
+the year of the pixel table is 0.015 % above the sum of the 12 monthly maps until the last pixel-level file of the period (the first hour of the next year) is added, and then the two agree to 5e-8 of the total (0.0014 mm at most, float32 rounding).
 
 ## Config keys of this work
 
