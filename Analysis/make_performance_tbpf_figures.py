@@ -812,9 +812,12 @@ def make_figures(data, outdir, name=None, only=None):
     """
     check_schema(data)
     os.makedirs(outdir, exist_ok=True)
-    setup()
     name = name or slug(data["campaign"]["tag"])
-    return [FIGURES[key](data, outdir, name) for key in (only or FIGURES)]
+    # The look of these figures (surface and ink colors, fonts, grid) is set for the figures only: a program that calls this function (a test session,
+    # a notebook) keeps its own matplotlib settings
+    with plt.rc_context():
+        setup()
+        return [FIGURES[key](data, outdir, name) for key in (only or FIGURES)]
 
 
 def main(argv=None):

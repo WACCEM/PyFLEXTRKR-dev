@@ -109,3 +109,11 @@ def test_a_campaign_with_a_hung_stats_job_and_post_jobs_of_their_own_renders_and
 def test_a_campaign_with_post_steps_in_the_stats_job_still_says_so():
     c = F.campaign_rows(campaign_json()["derived"])
     assert c["post_nodes"] == [4] and c["post_source"] == {"rainmap": "stats job, 4 nodes", "trackpcp": "stats job, 4 nodes"} and c["post_scale"] == pytest.approx(4.0)
+
+
+def test_the_figures_leave_the_matplotlib_settings_of_the_session_alone(tmp_path):
+    # the look of the figures was set for the whole session: the pictures of a later test of the same session (test_viz_frames) changed
+    import matplotlib.pyplot as plt
+    before = dict(plt.rcParams)
+    F.make_figures(campaign_json(n_jobs=2), str(tmp_path), only=["steps"])
+    assert dict(plt.rcParams) == before
