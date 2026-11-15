@@ -508,9 +508,15 @@ def fig_campaign(data, outdir, name):
     label_in = {}
     for key, (big, small) in labels.items():
         label_in[key] = max(text_size_in(fig, big, fontsize=10.5, fontweight="bold")[0], text_size_in(fig, small, fontsize=9)[0])
+    # The texts right of the braces (their widths set the room that the bars may take): the tracking compute time and node-hours, the post-processing cost
+    tracking_nh = c["totals"]["track_nh"] + c["totals"]["stats_nh"]
+    with_them = f"with them: {c['compute_min'] / 60.0:.1f} h of compute, {tracking_nh + c['totals']['post_nh']:.1f} node-hours"
     brace_text_in = max(text_size_in(fig, f"{tracking_compute_h:.1f} h of compute", fontsize=13.5, fontweight="bold")[0],
+                        text_size_in(fig, "longest track job + stats job up to speed", fontsize=9)[0],
                         text_size_in(fig, "tracking: all jobs, hours × nodes", fontsize=9)[0],
-                        text_size_in(fig, f"+ {wall_post_h:.2f} h, + {c['totals']['post_nh']:.1f} node-hours", fontsize=11.5, fontweight="bold")[0])
+                        text_size_in(fig, f"{tracking_nh:.1f} node-hours", fontsize=13.5)[0],
+                        text_size_in(fig, f"+ {wall_post_h:.2f} h, + {c['totals']['post_nh']:.1f} node-hours", fontsize=11.5, fontweight="bold")[0] if c["post_rows"] else 0.0,
+                        (text_size_in(fig, with_them, fontsize=9)[0] - 0.18) if c["post_rows"] else 0.0)
     # The axis: every row (its bars + whisker + label) and the brace with its text fit; node-hours per inch follow from that
     need_in = max(row_totals[i] * 0 + label_in[k] + 0.3 for i, (k, _) in enumerate(rows)) + 0.55 + brace_text_in + 0.35
     xmax = max(row_totals) * width_in / max(width_in - need_in, 4.0)
@@ -621,7 +627,6 @@ def fig_campaign(data, outdir, name):
     tip_x = curly_brace(fig, top_pt[0], bot_pt[1], top_pt[1], 0.34, INK2)
     mid_y = 0.5 * (top_pt[1] + bot_pt[1])
     t = fig.dpi_scale_trans
-    tracking_nh = c["totals"]["track_nh"] + c["totals"]["stats_nh"]
     for dy, text, kwargs in ((0.22, f"{tracking_compute_h:.1f} h of compute", dict(fontsize=13.5, fontweight="bold", color=INK)),
                              (-0.06, "longest track job + stats job up to speed", dict(fontsize=9, color=INK2)),
                              (-0.40, f"{tracking_nh:.1f} node-hours", dict(fontsize=13.5, color=INK)),
@@ -634,7 +639,6 @@ def fig_campaign(data, outdir, name):
         mid3 = 0.5 * (top3[1] + bot3[1])
         fig.add_artist(matplotlib.text.Text(tip3 + 0.18, mid3 + 0.10, f"+ {wall_post_h:.2f} h, + {c['totals']['post_nh']:.1f} node-hours", transform=t, ha="left",
                                             va="center", fontsize=11.5, fontweight="bold", color=INK))
-        with_them = f"with them: {c['compute_min'] / 60.0:.1f} h of compute, {tracking_nh + c['totals']['post_nh']:.1f} node-hours"
         fig.add_artist(matplotlib.text.Text(tip3 + 0.18, mid3 - 0.17, with_them, transform=t, ha="left", va="center", fontsize=9, color=INK2))
 
     all_steps = [s for s in (*TRACK_STEPS, "setup", *STATS_STEPS) if any(s == r[0] for _, segs in rows[:2] for r in segs)]
