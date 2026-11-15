@@ -618,8 +618,10 @@ def fig_campaign(data, outdir, name):
             "Wall-clock hours are the physical time the jobs took; node-hours count every node of a job during every step, also the serial ones of the stats job.",
             f"The step times drawn add to {c['totals']['track_nh'] + c['totals']['stats_nh'] + c['totals']['post_nh']:.1f} of the {c['totals']['charged_nh']:.1f} node-hours charged; "
             f"the rest ({c['other_nh']:.1f}) is the start and shutdown of the jobs and the checks between the steps. node-h = node-hours."]
+    started = (f"the {njobs} track jobs started over {d['track_start_spread_min']:.0f} min as nodes became free" if d["track_start_spread_min"] >= 1.0
+               else f"the {njobs} track jobs all started at the same time")
     note.append(f"The wall-clock time of the campaign includes the {d['stats_wait_min']:.0f} min that the stats job waited in the queue for its {nodes} nodes after "
-                f"the last track job ended; the {njobs} track jobs started over {d['track_start_spread_min']:.0f} min as nodes became free.")
+                f"the last track job ended; {started}.")
     if c["stats"].get("incomplete"):
         s_ = c["stats"]
         note.append(f"The stats job was cancelled after {s_['elapsed_min'] / 60:.2f} h in a hung step: the {s_['other_min'] / 60:.2f} h after its last finished step are not drawn "
@@ -700,12 +702,14 @@ def fig_timeline(data, outdir, name):
     legend_steps = [s for s in all_steps if s in {*TRACK_STEPS, "setup"} or s in stats["steps_min"]]
     step_legend(fig, 1.25 / figw, 1 - 1.05 / figh, legend_steps, ncol=min(len(legend_steps), 7))
     nh = d["node_hours"]
+    spread = (f"The queue spread the start of the track jobs over {d['track_start_spread_min']:.0f} min" if d["track_start_spread_min"] >= 1.0
+              else "The track jobs all started at the same time")
     if stats.get("incomplete"):
-        sub = (f"The queue spread the start of the track jobs over {d['track_start_spread_min']:.0f} min; the last track job ends at {last_end:.2f} h, the stats job starts "
-               f"{d['stats_wait_min']:.0f} min later at {stats['start_h']:.2f} h\nand was cancelled at {stats['end_h']:.2f} h, hung in a step; the steps it did not finish ran afterwards "
-               f"in jobs of their own (Figure 2). {nh['total']:.1f} node-hours charged in all.")
+        sub = (f"{spread}; the last track job ends at {last_end:.2f} h, the stats job starts {d['stats_wait_min']:.0f} min later at {stats['start_h']:.2f} h\n"
+               f"and was cancelled at {stats['end_h']:.2f} h, hung in a step. The steps it did not finish ran afterwards in jobs of their own (third row of the campaign\n"
+               f"figure). {nh['total']:.1f} node-hours charged in all.")
     else:
-        sub = (f"{d['wall_h']:.1f} h from the first start to the last end, {nh['total']:.1f} node-hours. The queue spread the start of the track jobs over {d['track_start_spread_min']:.0f} min; the last "
+        sub = (f"{d['wall_h']:.1f} h from the first start to the last end, {nh['total']:.1f} node-hours. {spread}; the last "
                f"track job ends at {last_end:.2f} h,\nthe stats job starts {d['stats_wait_min']:.0f} min later at {stats['start_h']:.2f} h and ends at {stats['end_h']:.2f} h.")
     title(fig, f"MCS tracking, {data['campaign']['tag']}, on the clock: {nrow} track jobs, then one stats job", sub)
     return save(fig, outdir, f"perf_tbpf_{name}_timeline")
