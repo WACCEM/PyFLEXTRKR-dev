@@ -392,8 +392,13 @@ along the tracks on. All steps in one job (`--chunk-months 1`) took 2.1 min; as 
 "Cores in use" is the CPU time of the step divided by its wall time. The memory of the job is that of its processes (the main process and the 128 workers, which hold about 0.3 GB each before they work);
 a node has 512 GB. The largest worker needs less than 2 GB, so the 128 workers of the template fit with a large margin.
 
-**Projected for a year (not measured at this size).** A linear scaling of the measured times by the number of files (a month is 10 times, a year 122 times these 3 days) gives about 10 min per month for
-the track job (idfeature, tracksingle, gettracks) and about 2.1 h for the stats job of a year on one node (trackstats to trackpcp, 63 s measured for 3 days). The steps that depend on the number of tracks
+**Measured for a year (2026-11-14).** Two campaigns, E3SM ne120 2009 and IMERG V07B 2019 (8,760 hourly files of 1200 x 3600 each), with 12 track jobs of one node and one stats job on 4 nodes
+(`--stats-nodes 4`, the multi-node template): the track job took 8.9 - 11.8 min (E3SM) and 14.5 - 16.9 min (IMERG); the stats job of E3SM (trackstats to trackpcp) 51 min, 3.4 node-hours (the projection below for one
+node: 2.1 h); a year is 5.4 (E3SM) and 6.1 (IMERG) node-hours of work and 211 and 251 GB. [performance_tbpf.md](performance_tbpf.md) has the numbers of every step, the figures, and the hang of the rain-map step
+that the IMERG campaign found and that is fixed here.
+
+**Projected for a year, before those campaigns.** A linear scaling of the measured times by the number of files (a month is 10 times, a year 122 times these 3 days) gives about 10 min per month for
+the track job (idfeature, tracksingle, gettracks; measured: within 3 % for E3SM, 16 % faster for IMERG) and about 2.1 h for the stats job of a year on one node (trackstats to trackpcp, 63 s measured for 3 days; not run on one node at that size). The steps that depend on the number of tracks
 rather than on the number of files do not grow faster: for a million tracks (the size of a global year, about 1.2 million) the benchmark
 [benchmark_tbpf_rows_scale.py](../tests/benchmark_tbpf_rows_scale.py) measured `identifymcs_tb_rows` at 17 s and 1.1 GB, `robustmcs_rows` at 1 s per definition, where the dense `identifymcs_tb` needs 576 s and 15.2 GB
 (the dense arrays are [MCS, longest track, `nmaxlinks`] and every MCS scans all tracks); the Tb row tables of that size are 12 MB. The files of a year: about 96 GB of cloudid and track files, 99 GB of pixel-level files and a
@@ -404,11 +409,11 @@ few GB of statistics, rain maps and `trackpcp` tables (the 3 days have 0.9 milli
 | setting | recommended | why |
 |---|---|---|
 | `nprocesses` | 128 (the template) | one worker per core of a CPU node; the largest worker needs 1.8 GB |
-| `--stats-nodes` | 1 | the stats job of a year is projected at 2.1 h on one node, and the one-node path is the one that was run; use more nodes (`run_parallel: 2`, multi-node template, not run on Slurm yet) only when the projection of your campaign is longer than its wallclock |
-| `--track-time` | `01:00:00` (default) | the projection is 10 min per month; the default leaves a factor of 6 |
-| `--stats-time` | `06:00:00` (default) | the projection is 2.1 h for a year on one node; the default leaves a factor of nearly 3, the least certain number here: look at the step ledger and the `Step ... finished in` lines of the first campaign and set it |
+| `--stats-nodes` | 4 for a year | measured on E3SM: 0.86 h and 3.4 node-hours on 4 nodes (multi-node template, `run_parallel: 2`) against a projected 2.1 h on one node; mapfeature, speed and matchpf gain most from the nodes, trackstats, identifymcs, robustmcs and trackpcp little. The queue made the 4-node job wait 53 - 56 min: with one node the job starts earlier and takes longer |
+| `--track-time` | `01:00:00` (default) | measured 8.9 - 11.8 min per month for E3SM and 14.5 - 16.9 min for IMERG; the default leaves a factor of 5 and 3.5 |
+| `--stats-time` | `02:00:00` with `--stats-nodes 4` (the default `06:00:00` is for one node) | E3SM 0.86 h on 4 nodes; IMERG: 0.63 h for trackstats to speed and 23 min for the two last steps on one node |
 | `--chunk-months` | 12 | one stats job per year; with row tables the length is not limited by memory |
-| `run_rainmap` / `run_trackpcp` | on / off | the rain maps cost 10 s per 3 days; the accumulation along the tracks 6 s and 0.9 GB per year, it is off because its table grows with the number of MCS pixels (switch it on for a study of the rain of the tracks) |
+| `run_rainmap` / `run_trackpcp` | on / off | the rain maps take about 3 min for a year on one node (13 - 15 s a month); the accumulation along the tracks took 10 min on 4 nodes for E3SM (103 million (MCS, pixel) rows, 0.9 GB) and 20 min on one node for IMERG (243 million rows, 2.4 GB; the main process held 34 GB): it is off because its table grows with the number of MCS pixels (switch it on for a study of the rain of the tracks) |
 | `skip_completed_steps` | `True` for a job that is submitted again | it continues from the step that did not finish ([Restarting a job](#restarting-a-job-that-ran-out-of-time-or-failed)) |
 | `step_profile_dir` | a folder of your campaign | records the wall time, the CPU time and the memory of every step: the numbers for the next campaign's settings |
 
