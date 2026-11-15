@@ -15,7 +15,10 @@ job) into one JSON file, from what the jobs left behind:
 
 The job ids come from submissions.jsonl of the campaign folder (written by generate_tbpf_mcstracking_scripts.py --submit); a job that was
 submitted again has several attempts, and the figures use the last one that completed (the steps it skipped come from the attempt that ran
-them). The output is the input of Analysis/make_performance_tbpf_figures.py, whose three figures need only the 'derived' part. The sacct text
+them). A run that was made by hand on an interactive allocation (a step that a campaign job did not finish) is a line of submissions.jsonl too,
+with "interactive": true and its own "start", "end" (ISO with the offset), "nodes", "state" and, if its log has another name than
+log_<job name>_<job id>.log, "log": sacct is not asked about it (the allocation lives longer than the run). An entry of jobs.json can name
+the ledger folder of another job ("ledger_dir"): a run that used the config of the stats job writes its ledger there. The output is the input of Analysis/make_performance_tbpf_figures.py, whose three figures need only the 'derived' part. The sacct text
 of a finished campaign can be kept (--save-sacct) and read again (--sacct-file), so the numbers can be made again once the job records have aged
 out of sacct.
 
@@ -209,9 +212,16 @@ def verified_counts(step, text):
     return {k: int(v) for k, v in m.groupdict().items() if v is not None} if m else {}
 
 
+SHUTDOWN_MARKER = "Dask client shutdown complete"
+
+
 def count_dask_warnings(paths):
     """
-    How often the logs of the Dask scheduler and workers show the signs of a cluster in trouble.
+    How often the logs of the Dask scheduler and workers (and of the jobs) show the signs of a cluster in trouble.
+
+    The log of a job ends with a traceback or two (a worker that sends its heartbeat to the scheduler that was just closed, a timeout of the
+    shutdown) after the run script has logged that the client was shut down: they are noise of the end of a finished run and are counted apart
+    (after_shutdown), not as signs of trouble.
 
     Args:
         paths: list of strings
@@ -219,23 +229,31 @@ def count_dask_warnings(paths):
 
     Returns:
         counts: dictionary
-            {DASK_WARNINGS key: number of lines}.
+            {DASK_WARNINGS key: number of lines before the shutdown message, 'after_shutdown': number of lines with a sign after it}.
     """
     counts = {key: 0 for key in DASK_WARNINGS}
+    counts["after_shutdown"] = 0
     for path in paths:
         if not os.path.isfile(path):
             continue
+        finished = False
         with open(path, errors="replace") as f:
             for line in f:
-                for key, pattern in DASK_WARNINGS.items():
-                    if re.search(pattern, line):
+                if SHUTDOWN_MARKER in line:
+                    finished = True
+                hits = [key for key, pattern in DASK_WARNINGS.items() if re.search(pattern, line)]
+                if finished and hits:
+                    counts["after_shutdown"] += 1
+                else:
+                    for key in hits:
                         counts[key] += 1
     return counts
 
 
 def folder_size_gb(path):
     """
-    Size and number of files of a folder tree.
+    Size and number of files of a folder tree (a symbolic link is not a file: the folder of links that the stats job makes for the stitching
+    would count every cloudid and track file a second time).
 
     Args:
         path: string
@@ -248,9 +266,11 @@ def folder_size_gb(path):
     total, files = 0, 0
     for root, _, names in os.walk(path):
         for name in names:
+            full = os.path.join(root, name)
             try:
-                total += os.path.getsize(os.path.join(root, name))
-                files += 1
+                if not os.path.islink(full):
+                    total += os.path.getsize(full)
+                    files += 1
             except OSError:
                 pass
     return {"gb": round(total / 1e9, 3), "files": files}
@@ -356,7 +376,8 @@ def attempt_of(name, job_id, sacct_job, ledger, log, expected_steps):
 
 def final_attempt(attempts):
     """
-    The attempt the figures use: the last one that completed, else the last one.
+    The attempt the figures use: the last one that completed, else the last one that started (a job that was cancelled while it waited in the
+    queue never started), else the last one.
 
     Args:
         attempts: list of dictionaries
@@ -366,7 +387,10 @@ def final_attempt(attempts):
         index: int
     """
     done = [i for i, a in enumerate(attempts) if a["state"] == "COMPLETED"]
-    return done[-1] if done else len(attempts) - 1
+    if done:
+        return done[-1]
+    started = [i for i, a in enumerate(attempts) if parse_time(a["start"])]
+    return started[-1] if started else len(attempts) - 1
 
 
 def merged_steps(attempts, final):
@@ -411,9 +435,36 @@ def hours_since(t0, text):
     return None if t is None else round((t - t0).total_seconds() / 3600.0, 4)
 
 
+def useful_hours(attempt):
+    """
+    The hours of an attempt that were real work: all of it for an attempt that completed; for one that did not (a timeout, a job that was cancelled in
+    a step that never ended) the setup and the steps that ran through and passed their output check, which later jobs used.
+
+    Args:
+        attempt: dictionary
+            attempt_of result.
+
+    Returns:
+        hours: float
+            At most the elapsed time of the attempt.
+    """
+    elapsed = (attempt["elapsed_s"] or 0) / 3600.0
+    if attempt["state"] == "COMPLETED":
+        return elapsed
+    done = [r["wall_s"] for r in attempt["steps"].values() if r.get("status") == "ok" and r.get("wall_s") is not None]
+    if not done:
+        return 0.0
+    return min(elapsed, ((attempt["phases"]["setup_s"] or 0.0) + sum(done)) / 3600.0)
+
+
 def derive(jobs):
     """
     The numbers the three figures draw (campaign wall-clock, node-hours, the minutes of every step of every job).
+
+    A job that was submitted again has its steps merged over its attempts. A stats job whose last attempt did not complete (it was cancelled in a
+    step that never ended) is 'incomplete': its steps are those that passed their check, and the time after the last of them is 'other_min' (the
+    time the job hung). The steps that it never ran can be run by jobs of the kind 'post' (a job of its own, e.g. the rain maps on 2 nodes in the debug
+    QOS), which are listed apart with their own nodes.
 
     Args:
         jobs: list of dictionaries
@@ -422,45 +473,51 @@ def derive(jobs):
     Returns:
         derived: dictionary
             t0 (ISO), track_jobs [{name, month, start_h, end_h, elapsed_min, nodes, steps_min, setup_min, other_min}], stats_job {name, start_h,
-            end_h, elapsed_min, nodes, steps_min (setup + stitch, the steps), other_min}, node_hours {track, stats, failed, total}, wall_h,
-            track_start_spread_min, stats_wait_min (from the last track job's end to the stats job's start), check_s_total.
+            end_h, elapsed_min, nodes, steps_min, setup_min, other_min, state, incomplete}, post_jobs [{name, start_h, end_h, elapsed_min, nodes,
+            steps_min, setup_min, other_min, state}], node_hours {track, stats, post, failed (the hours of attempts that were not work: a hung or
+            failed job), total}, wall_h, track_start_spread_min, stats_wait_min (from the last track job's end to the stats job's start),
+            check_s_total.
     """
-    finals = []
-    for job in jobs:
-        attempt = job["attempts"][job["final"]]
-        finals.append((job, attempt))
-    starts = [parse_time(a["start"]) for _, a in finals if a["start"]]
+    finals = [(job, job["attempts"][job["final"]]) for job in jobs]
+    starts = [parse_time(a["start"]) for _, a in finals if parse_time(a["start"])]
     t0 = min(starts)
-    track_jobs, stats_job = [], None
+    track_jobs, post_jobs, stats_job = [], [], None
     for job, a in finals:
         steps = merged_steps(job["attempts"], job["final"])
         minutes = {s: round(r["wall_s"] / 60.0, 3) for s, r in steps.items() if r.get("wall_s") is not None}
-        elapsed = a["elapsed_s"] / 60.0
         if job["kind"] == "stats":
+            # Only the steps of this job's own attempts (a stats job never takes steps of a post job)
+            elapsed = a["elapsed_s"] / 60.0
             setup = (a["phases"]["setup_s"] or 0.0) / 60.0
             stats_job = {"name": job["name"], "start_h": hours_since(t0, a["start"]), "end_h": hours_since(t0, a["end"]), "elapsed_min": round(elapsed, 2),
-                         "nodes": a["nodes"], "setup_min": round(setup, 3), "steps_min": minutes, "other_min": round(elapsed - setup - sum(minutes.values()), 3)}
+                         "nodes": a["nodes"], "setup_min": round(setup, 3), "steps_min": minutes, "other_min": round(elapsed - setup - sum(minutes.values()), 3),
+                         "state": a["state"], "incomplete": a["state"] != "COMPLETED"}
+        elif job["kind"] == "post":
+            elapsed = a["elapsed_s"] / 60.0
+            setup = (a["phases"]["setup_s"] or 0.0) / 60.0
+            post_jobs.append({"name": job["name"], "start_h": hours_since(t0, a["start"]), "end_h": hours_since(t0, a["end"]), "elapsed_min": round(elapsed, 2),
+                              "nodes": a["nodes"], "setup_min": round(setup, 3), "steps_min": minutes, "other_min": round(elapsed - setup - sum(minutes.values()), 3),
+                              "state": a["state"], "interactive": bool(a.get("interactive"))})
         else:
+            elapsed = a["elapsed_s"] / 60.0
             track_jobs.append({"name": job["name"], "month": job.get("month"), "start_h": hours_since(t0, a["start"]), "end_h": hours_since(t0, a["end"]),
                                "elapsed_min": round(elapsed, 2), "nodes": a["nodes"], "steps_min": minutes,
                                "setup_min": round((a["phases"]["setup_s"] or 0.0) / 60.0, 3), "other_min": round(elapsed - sum(minutes.values()), 3)})
-    # Node-hours: every attempt of every job counts (a failed attempt is paid for too), the failed ones are listed apart
-    track_nh = stats_nh = failed_nh = 0.0
+    # Node-hours: every attempt of every job is charged; the part of an attempt that was work goes to its kind of job, the rest (a hung or failed
+    # attempt) to 'failed'
+    nh = {"track": 0.0, "stats": 0.0, "post": 0.0, "failed": 0.0}
     for job in jobs:
-        for i, a in enumerate(job["attempts"]):
-            nh = (a["elapsed_s"] or 0) * (a["nodes"] or 0) / 3600.0
-            if i != job["final"]:
-                failed_nh += nh
-            elif job["kind"] == "stats":
-                stats_nh += nh
-            else:
-                track_nh += nh
+        bucket = job["kind"] if job["kind"] in ("stats", "post") else "track"
+        for a in job["attempts"]:
+            elapsed_h, useful = (a["elapsed_s"] or 0) / 3600.0, useful_hours(a)
+            nh[bucket] += useful * (a["nodes"] or 0)
+            nh["failed"] += (elapsed_h - useful) * (a["nodes"] or 0)
     last_track_end = max((j["end_h"] for j in track_jobs), default=0.0)
+    ends = [j["end_h"] for j in track_jobs + post_jobs + ([stats_job] if stats_job else []) if j["end_h"] is not None]
     return {
-        "t0": t0.isoformat(), "track_jobs": track_jobs, "stats_job": stats_job,
-        "node_hours": {"track": round(track_nh, 3), "stats": round(stats_nh, 3), "failed": round(failed_nh, 3),
-                       "total": round(track_nh + stats_nh + failed_nh, 3)},
-        "wall_h": round(max((j["end_h"] for j in track_jobs + ([stats_job] if stats_job else [])), default=0.0), 4),
+        "t0": t0.isoformat(), "track_jobs": track_jobs, "stats_job": stats_job, "post_jobs": post_jobs,
+        "node_hours": {**{k: round(v, 3) for k, v in nh.items()}, "total": round(sum(nh.values()), 3)},
+        "wall_h": round(max(ends, default=0.0), 4),
         "track_start_spread_min": round(max((j["start_h"] for j in track_jobs), default=0.0) * 60.0, 1),
         "stats_wait_min": round(((stats_job["start_h"] if stats_job else 0.0) - last_track_end) * 60.0, 1),
         "check_s_total": round(sum(a["phases"]["check_s_total"] for j in jobs for a in [j["attempts"][j["final"]]]), 1),
@@ -514,6 +571,49 @@ def campaign_counts(jobs):
     return out
 
 
+def read_submissions(campaign_dir):
+    """
+    The records of submissions.jsonl of a campaign folder.
+
+    Args:
+        campaign_dir: string
+            Folder of the generated scripts.
+
+    Returns:
+        records: list of dictionaries
+            In submission order (name, job_id, and for a run on an interactive allocation interactive, start, end, nodes, state, log).
+
+    Raises:
+        SystemExit: no submissions.jsonl.
+    """
+    path = os.path.join(campaign_dir, "submissions.jsonl")
+    if not os.path.isfile(path):
+        raise SystemExit(f"ERROR: {path} not found: the job ids come from it (generate_tbpf_mcstracking_scripts.py --submit writes it)")
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def interactive_job(rec):
+    """
+    The sacct entry of a run on an interactive allocation: the times and the nodes of the run come from its record (the allocation lives longer than
+    the run and holds other work).
+
+    Args:
+        rec: dictionary
+            Record of submissions.jsonl with start, end (ISO with the offset), nodes (default: 1), state (default: COMPLETED), exit_code
+            (default: 0:0), nodelist (default: '').
+
+    Returns:
+        entry: dictionary
+            As parse_sacct makes it: {'job': {field: value}, 'steps': {}}.
+    """
+    elapsed = int((parse_time(rec["end"]) - parse_time(rec["start"])).total_seconds())
+    row = {"JobIDRaw": str(rec["job_id"]), "JobName": rec["name"], "State": rec.get("state", "COMPLETED"), "ExitCode": rec.get("exit_code", "0:0"),
+           "Submit": rec["start"], "Eligible": rec["start"], "Start": rec["start"], "End": rec["end"], "ElapsedRaw": str(elapsed),
+           "TimelimitRaw": "", "NNodes": str(rec.get("nodes", 1)), "NodeList": rec.get("nodelist", "")}
+    return {"job": row, "steps": {}}
+
+
 def find_job_ids(campaign_dir, names, sacct_text=None):
     """
     The job ids of the campaign by job name, in submission order, from submissions.jsonl.
@@ -533,19 +633,13 @@ def find_job_ids(campaign_dir, names, sacct_text=None):
     Raises:
         SystemExit: no submissions.jsonl, or a job of jobs.json was never submitted.
     """
-    path = os.path.join(campaign_dir, "submissions.jsonl")
-    if not os.path.isfile(path):
-        raise SystemExit(f"ERROR: {path} not found: the job ids come from it (generate_tbpf_mcstracking_scripts.py --submit writes it)")
     ids = {name: [] for name in names}
-    with open(path) as f:
-        for line in f:
-            if line.strip():
-                rec = json.loads(line)
-                if rec["name"] in ids:
-                    ids[rec["name"]].append(str(rec["job_id"]))
+    for rec in read_submissions(campaign_dir):
+        if rec["name"] in ids:
+            ids[rec["name"]].append(str(rec["job_id"]))
     missing = [n for n, v in ids.items() if not v]
     if missing:
-        raise SystemExit(f"ERROR: no submission of {', '.join(missing)} in {path}")
+        raise SystemExit(f"ERROR: no submission of {', '.join(missing)} in {os.path.join(campaign_dir, 'submissions.jsonl')}")
     return ids
 
 
@@ -593,21 +687,26 @@ def collect(campaign_dir, root, tag, sacct_text=None, profile_dir=None, tz="Amer
     with open(os.path.join(campaign_dir, "jobs.json")) as f:
         job_defs = json.load(f)
     ids = find_job_ids(campaign_dir, [j["name"] for j in job_defs])
+    # The runs on an interactive allocation are not in sacct as runs
+    records = {str(r["job_id"]): r for r in read_submissions(campaign_dir)}
     if sacct_text is None:
-        sacct_text = run_sacct([i for v in ids.values() for i in v])
+        sacct_text = run_sacct([i for v in ids.values() for i in v if not records[i].get("interactive")])
     sacct = parse_sacct(sacct_text)
     profile_dir = profile_dir or os.path.join(root, "profile")
     jobs = []
     for job_def in job_defs:
         name, kind = job_def["name"], job_def["kind"]
         expected = TRACK_STEPS if kind == "track" else (TRACK_STEPS + STATS_STEPS if kind == "month" else STATS_STEPS)
-        ledger = read_ledger(os.path.join(profile_dir, name, "step_ledger.jsonl"))
+        ledger = read_ledger(os.path.join(profile_dir, job_def.get("ledger_dir", name), "step_ledger.jsonl"))
         attempts = []
         for job_id in ids[name]:
-            log_path = os.path.join(campaign_dir, "logs", f"log_{name}_{job_id}.log")
+            rec = records[job_id]
+            log_path = rec.get("log") or os.path.join(campaign_dir, "logs", f"log_{name}_{job_id}.log")
             if not os.path.isfile(log_path):
                 log_path = os.path.join(campaign_dir, "logs", f"log_{name}.log")
-            attempts.append(attempt_of(name, job_id, sacct.get(job_id), ledger, read_log(log_path, tz), expected))
+            attempts.append(attempt_of(name, job_id, interactive_job(rec) if rec.get("interactive") else sacct.get(job_id), ledger,
+                                       read_log(log_path, tz), expected))
+            attempts[-1]["interactive"] = bool(rec.get("interactive"))
         final = final_attempt(attempts)
         month = re.search(r"(\d{4})(\d{2})$", name)
         jobs.append({"name": name, "kind": kind, "month": f"{month.group(1)}-{month.group(2)}" if month and kind == "track" else None,
@@ -617,10 +716,11 @@ def collect(campaign_dir, root, tag, sacct_text=None, profile_dir=None, tz="Amer
     for job in jobs:
         logs = []
         for a in job["attempts"]:
-            logs += glob.glob(os.path.join(campaign_dir, "logs", f"log_{job['name']}_{a['job_id']}.log"))
+            logs += glob.glob(records[a["job_id"]].get("log") or os.path.join(campaign_dir, "logs", f"log_{job['name']}_{a['job_id']}.log"))
             logs += glob.glob(os.path.join(campaign_dir, "logs", f"dask_*_{a['job_id']}.log"))
         dask[job["name"]] = count_dask_warnings(logs)
-    commits = sorted({r.get("git") for j in job_defs for r in read_ledger(os.path.join(profile_dir, j["name"], "step_ledger.jsonl")) if r.get("git")})
+    commits = sorted({r.get("git") for j in job_defs for r in read_ledger(os.path.join(profile_dir, j.get("ledger_dir", j["name"]), "step_ledger.jsonl"))
+                      if r.get("git")})
     return {
         "schema": SCHEMA, "campaign": {"tag": tag, "campaign_dir": os.path.abspath(campaign_dir), "root": root, "git": commits,
                                        "collected": datetime.now(timezone.utc).isoformat(timespec="seconds"), "argv": sys.argv[1:]},
@@ -656,7 +756,8 @@ def main(argv=None):
     if args.save_sacct and sacct_text is None:
         with open(os.path.join(args.campaign_dir, "jobs.json")) as f:
             names = [j["name"] for j in json.load(f)]
-        sacct_text = run_sacct([i for v in find_job_ids(args.campaign_dir, names).values() for i in v])
+        interactive = {str(r["job_id"]) for r in read_submissions(args.campaign_dir) if r.get("interactive")}
+        sacct_text = run_sacct([i for v in find_job_ids(args.campaign_dir, names).values() for i in v if i not in interactive])
         with open(args.save_sacct, "w") as f:
             f.write(sacct_text)
     result = collect(args.campaign_dir, args.root, args.tag or os.path.basename(os.path.abspath(args.campaign_dir)), sacct_text, args.profile_dir,

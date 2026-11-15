@@ -90,3 +90,22 @@ def test_small_helpers():
     assert F.slug("E3SM ne120 2009") == "e3sm_ne120_2009" and F.slug("IMERG V07B (2019)") == "imerg_v07b_2019"
     assert F.counts_text(campaign_json()) == "8,760 frames, 1.18 million tracks, 41,000 Tb MCS, 7,600 robust MCS" and F.counts_text({}) == ""
     assert F.text_color("#2a78d6") == "#ffffff" and F.text_color("#eda100") == "#0b0b0b"
+
+
+def test_a_campaign_with_a_hung_stats_job_and_post_jobs_of_their_own_renders_and_adds_up(tmp_path):
+    # the stats job (4 nodes) hung in the rain maps; a debug job (2 nodes) timed out; the two steps ran on one interactive node
+    data = campaign_json(incident=True)
+    c = F.campaign_rows(data["derived"])
+    assert [r[0] for r in c["post_rows"]] == ["rainmap", "trackpcp"] and c["post_nodes"] == [1] and c["post_scale"] == pytest.approx(1.0)
+    assert c["post_source"] == {"rainmap": "1 node, interactive", "trackpcp": "1 node, interactive"}
+    # node-hours of the post row: the steps of the interactive run on 1 node; the hung time and the debug job are 'failed', not drawn
+    assert c["totals"]["post_nh"] == pytest.approx((3.0 + 8.6) / 60.0)
+    nh = data["derived"]["node_hours"]
+    assert nh["failed"] > 10 and c["totals"]["charged_nh"] == pytest.approx(nh["track"] + nh["stats"] + nh["post"])
+    paths = F.make_figures(data, str(tmp_path), name="incident")
+    assert len(paths) == 3 and all(os.path.getsize(p) > 5000 for p in paths)
+
+
+def test_a_campaign_with_post_steps_in_the_stats_job_still_says_so():
+    c = F.campaign_rows(campaign_json()["derived"])
+    assert c["post_nodes"] == [4] and c["post_source"] == {"rainmap": "stats job, 4 nodes", "trackpcp": "stats job, 4 nodes"} and c["post_scale"] == pytest.approx(4.0)

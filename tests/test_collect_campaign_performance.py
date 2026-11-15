@@ -187,10 +187,14 @@ def test_the_derived_numbers_of_the_figures(campaign):
     s = d["stats_job"]
     assert (s["start_h"], s["end_h"], s["elapsed_min"], s["nodes"]) == (1.0, 1.6667, 40.0, 4)
     assert s["steps_min"]["trackstats"] == 5.0 and s["steps_min"]["trackpcp"] == pytest.approx(6.667, abs=1e-3) and s["setup_min"] == 3.0
-    # node-hours: 1 x 20 min + 1 x 25 min (track), 4 x 40 min (stats), the failed attempts 1 x 5 min and 4 x 30 min are listed apart
+    # node-hours: 1 x 20 min + 1 x 25 min (track), 4 x 40 min (the stats job that completed). The failed attempt of the stats job (30 min on 4 nodes) did
+    # real work before it failed: its setup (5 min) and the two steps that passed their check (5 min + 40 s) are work (they were not run again), the
+    # other 19 min 20 s and the 5 min of the failed track attempt (it did no step) are 'failed'
     nh = d["node_hours"]
-    assert nh["track"] == pytest.approx(45 / 60, abs=1e-3) and nh["stats"] == pytest.approx(160 / 60, abs=1e-3) and nh["failed"] == pytest.approx((5 + 120) / 60, abs=1e-3)
-    assert nh["total"] == pytest.approx(nh["track"] + nh["stats"] + nh["failed"], abs=1e-3)
+    useful = (300 + 300 + 40) * 4 / 3600.0
+    assert nh["track"] == pytest.approx(45 / 60, abs=1e-3) and nh["stats"] == pytest.approx(160 / 60 + useful, abs=1e-3)
+    assert nh["failed"] == pytest.approx(300 / 3600.0 + (1800 - 640) * 4 / 3600.0, abs=1e-3) and nh["post"] == 0.0
+    assert nh["total"] == pytest.approx(nh["track"] + nh["stats"] + nh["failed"], abs=1e-3) and d["post_jobs"] == []
     assert d["wall_h"] == pytest.approx(1.6667, abs=1e-3) and d["track_start_spread_min"] == 25.0
     assert d["stats_wait_min"] == pytest.approx(10.0, abs=0.1)          # the last track job ends 10:50, the stats job starts 11:00
 
@@ -199,6 +203,9 @@ def test_counts_of_the_campaign_and_the_dask_warnings(campaign):
     folder, root, sacct = campaign
     (root / "tracking").mkdir()
     (root / "tracking" / "a.nc").write_bytes(b"x" * 1000)
+    # the folder of links of a stitched campaign: a link is not a file (it would count the cloudid and track files twice)
+    os.makedirs(root / "tracking" / "campaign_links")
+    os.symlink(root / "tracking" / "a.nc", root / "tracking" / "campaign_links" / "a.nc")
     result = C.collect(str(folder), str(root), "synthetic", sacct.read_text())
     c = result["counts"]
     # two months share one input file and one cloudid file: 745 + 673 - 1 and 744 + 672 - 1
@@ -207,10 +214,19 @@ def test_counts_of_the_campaign_and_the_dask_warnings(campaign):
     assert c["trackstats_tracks"] == 9000 and c["identifymcs_mcs_tb"] == 300
     assert c["robustmcs_mcs_robust"] == 40 and c["matchpf_matched_entries"] == 600 and c["mapfeature_pixel_files"] == 1417
     assert result["dask"]["stats202001_202002"] == {"event_loop_unresponsive": 1, "unresponsive": 1, "gather_failed": 1, "worker_removed": 1,
-                                                    "killed_worker": 0, "memory_95": 0, "comm_closed": 1, "timeout": 0, "lease_timeout": 0}
+                                                    "killed_worker": 0, "memory_95": 0, "comm_closed": 1, "timeout": 0, "lease_timeout": 0,
+                                                    "after_shutdown": 0}
     # a track job's own log counts too: the LocalCluster logs there
     assert result["dask"]["track202001"]["lease_timeout"] == 1 and result["dask"]["track202002"]["lease_timeout"] == 0
     assert result["outputs"]["tracking"] == {"gb": 0.0, "files": 1} and result["outputs"]["stats"] == {"gb": 0.0, "files": 0}
+
+
+def test_the_traceback_after_the_shutdown_of_the_client_is_counted_apart(tmp_path):
+    log = tmp_path / "log.txt"
+    log.write_text("INFO - Couldn't gather 2 keys\nINFO - Dask client shutdown complete.\n"
+                   "distributed.comm.core.CommClosedError: in <TCP (closed)>: Stream is closed\ntornado.application - ERROR - TimeoutError\n")
+    counts = C.count_dask_warnings([str(log), str(tmp_path / "missing.log")])
+    assert counts["gather_failed"] == 1 and counts["comm_closed"] == 0 and counts["timeout"] == 0 and counts["after_shutdown"] == 2
 
 
 def test_the_job_ids_come_from_submissions_jsonl(campaign, tmp_path):
@@ -229,3 +245,85 @@ def test_the_command_line_writes_the_json_from_a_saved_sacct_text(campaign, tmp_
     result = json.loads(out.read_text())
     assert result["schema"] == C.SCHEMA and result["campaign"]["tag"] == "synthetic" and result["campaign"]["git"] == ["abc1234"]
     assert "3 jobs" in capsys.readouterr().out and len(result["jobs"]) == 3
+
+
+def test_a_stats_job_cancelled_in_a_hung_step_and_a_post_job_that_ran_the_rest(tmp_path):
+    # the incident of the IMERG campaign: the stats job (4 nodes) ran trackstats ... speed, then hung in the rain maps and was cancelled after 3 h; a resumed
+    # job was cancelled while it waited in the queue (never started); the rain maps then ran as a job of their own on 2 nodes (kind post)
+    folder, root = tmp_path / "campaign", tmp_path / "root"
+    (folder / "logs").mkdir(parents=True)
+    (root / "profile" / "stats201901_201912").mkdir(parents=True)
+    (root / "profile" / "post_rainmap").mkdir(parents=True)
+    (root / "profile" / "track201901").mkdir(parents=True)
+    kinds = [("track201901", "track"), ("stats201901_201912", "stats"), ("post_rainmap", "post")]
+    (folder / "jobs.json").write_text(json.dumps([{"name": n, "kind": k, "script": f"{n}.sh", "needs": [], "config": "c.yml"} for n, k in kinds]))
+    subs = [("track201901", "301"), ("stats201901_201912", "302"), ("stats201901_201912", "303"), ("post_rainmap", "304")]
+    (folder / "submissions.jsonl").write_text("".join(json.dumps({"name": n, "job_id": i}) + "\n" for n, i in subs))
+    t = lambda clock: f"2026-11-14T{clock}-0800"
+    rows = [f"301|track201901|COMPLETED|0:0|{t('09:50:00')}|{t('09:50:00')}|{t('10:00:00')}|{t('10:10:00')}|600|60|1|nid1|/wd||||||1:00:00",
+            f"302|stats201901_201912|CANCELLED by 1|0:0|{t('10:20:00')}|{t('10:20:00')}|{t('10:30:00')}|{t('13:50:00')}|12000|240|4|nid[1-4]|/wd||||||1:00:00",
+            f"302.batch|batch|CANCELLED|0:0|{t('10:30:00')}|{t('10:30:00')}|{t('10:30:00')}|{t('13:50:00')}|12000||1|nid1||3000M|nid1|0|1000M|1:00:00",
+            f"303|stats201901_201912|CANCELLED by 1|0:0|{t('13:55:00')}|Unknown|Unknown|{t('13:56:00')}|0|120|4|None assigned|/wd||||||0:00:00",
+            f"304|post_rainmap|COMPLETED|0:0|{t('14:00:00')}|{t('14:00:00')}|{t('14:05:00')}|{t('14:20:00')}|900|30|2|nid[5-6]|/wd||||||1:00:00"]
+    (tmp_path / "sacct.txt").write_text("\n".join(rows) + "\n")
+    # ledgers (UTC = PST + 8 h): track steps; the stats attempt: 2 min of setup, trackstats 20 min, identifymcs 2 min, speed 5 min; the post job: rainmap 10 min
+    (root / "profile" / "track201901" / "step_ledger.jsonl").write_text("\n".join(_ledger_line(s, "301", c, w) for s, c, w in
+                                                                              [("idfeature", "18:00:30", 400.0), ("tracksingle", "18:07:12", 60.0), ("gettracks", "18:08:14", 30.0)]) + "\n")
+    (root / "profile" / "stats201901_201912" / "step_ledger.jsonl").write_text("\n".join(_ledger_line(s, "302", c, w, 4) for s, c, w in
+                                                                                       [("trackstats", "18:32:00", 1200.0), ("identifymcs", "18:52:02", 120.0), ("speed", "18:54:04", 300.0)]) + "\n")
+    (root / "profile" / "post_rainmap" / "step_ledger.jsonl").write_text(_ledger_line("rainmap", "304", "22:06:00", 600.0, 2) + "\n")
+    result = C.collect(str(folder), str(root), "incident", (tmp_path / "sacct.txt").read_text(), with_sizes=False)
+    stats = [j for j in result["jobs"] if j["kind"] == "stats"][0]
+    # the final attempt: no attempt completed, the one that never started is not the final one
+    assert [a["state"] for a in stats["attempts"]] == ["CANCELLED by 1", "CANCELLED by 1"] and stats["final"] == 0
+    d = result["derived"]
+    s = d["stats_job"]
+    assert s["incomplete"] is True and s["nodes"] == 4 and set(s["steps_min"]) == {"trackstats", "identifymcs", "speed"} and s["setup_min"] == 2.0
+    # the time after the last verified step (speed ended 14 min after 18:54 + 5 min): the job hung until it was cancelled
+    assert s["elapsed_min"] == pytest.approx(200.0) and s["other_min"] == pytest.approx(200.0 - 2.0 - 27.0)
+    p = d["post_jobs"][0]
+    assert (p["name"], p["nodes"], p["steps_min"], p["elapsed_min"], p["state"]) == ("post_rainmap", 2, {"rainmap": 10.0}, 15.0, "COMPLETED")
+    # node-hours: the useful part of the stats attempt (setup + 27 min of steps on 4 nodes), the post job (15 min on 2 nodes), the hung time is 'failed'
+    nh = d["node_hours"]
+    assert nh["stats"] == pytest.approx(29 * 4 / 60.0, abs=1e-3) and nh["post"] == pytest.approx(0.5, abs=1e-3) and nh["track"] == pytest.approx(10 / 60.0, abs=1e-3)
+    assert nh["failed"] == pytest.approx((200 - 29) * 4 / 60.0, abs=1e-3) and nh["total"] == pytest.approx(sum(nh[k] for k in ("track", "stats", "post", "failed")))
+    # the campaign ends with the post job
+    assert d["wall_h"] == pytest.approx(4.3333, abs=1e-3)
+
+
+def test_a_run_on_an_interactive_allocation_is_an_attempt_with_the_times_of_its_record(tmp_path):
+    # the tail of the IMERG campaign: the stats job (4 nodes) hung in the rain maps and was cancelled; its last two steps then ran by hand on an
+    # interactive node (1 node, the config of the stats job, so its ledger lines are in the folder of the stats job and carry no Slurm job id)
+    folder, root = tmp_path / "campaign", tmp_path / "root"
+    (folder / "logs").mkdir(parents=True)
+    (root / "profile" / "stats201901_201912").mkdir(parents=True)
+    defs = [{"name": "stats201901_201912", "kind": "stats", "script": "s.sh", "needs": [], "config": "c.yml"},
+            {"name": "post_tail", "kind": "post", "script": "p.sh", "needs": [], "config": "c.yml", "ledger_dir": "stats201901_201912"}]
+    (folder / "jobs.json").write_text(json.dumps(defs))
+    tail_log = tmp_path / "somewhere" / "tail.log"
+    tail_log.parent.mkdir()
+    records = [{"name": "stats201901_201912", "job_id": "302"},
+               {"name": "post_tail", "job_id": "999", "interactive": True, "start": "2026-11-14T14:30:00-0800", "end": "2026-11-14T14:45:00-0800", "nodes": 1,
+                "state": "COMPLETED", "log": str(tail_log)}]
+    (folder / "submissions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
+    # sacct knows the stats job only: the allocation of the interactive node (999) is not asked about and would be wrong (it lives for hours)
+    t = lambda clock: f"2026-11-14T{clock}-0800"
+    row = f"302|stats201901_201912|CANCELLED by 1|0:0|{t('10:20:00')}|{t('10:20:00')}|{t('10:30:00')}|{t('13:50:00')}|12000|240|4|nid[1-4]|/wd||||||1:00:00"
+    # the ledger: the steps of the stats attempt (job id 302, 4 nodes), then the tail (no job id, 14:31 PST = 22:31 UTC, 1 node)
+    lines = [_ledger_line(s, "302", c, w, 4) for s, c, w in [("trackstats", "18:32:00", 1200.0), ("speed", "18:52:02", 300.0)]]
+    lines += [_ledger_line("rainmap", None, "22:31:00", 180.0, 1), _ledger_line("trackpcp", None, "22:34:05", 600.0, 1)]
+    (root / "profile" / "stats201901_201912" / "step_ledger.jsonl").write_text("\n".join(lines) + "\n")
+    _log(tail_log, [("14:34:03,000", "Step rainmap finished in 3.00 min"), ("14:34:03,100", "Step rainmap outputs verified: 12 monthly files"),
+                    ("14:44:08,000", "Step trackpcp finished in 10.00 min"), ("14:44:08,100", "Step trackpcp outputs verified: 3 files")])
+    result = C.collect(str(folder), str(root), "tail", row + "\n", with_sizes=False)
+    post = [j for j in result["jobs"] if j["kind"] == "post"][0]["attempts"][0]
+    assert post["interactive"] is True and post["nodes"] == 1 and post["elapsed_s"] == 900 and post["state"] == "COMPLETED"
+    assert {s: r["wall_s"] for s, r in post["steps"].items()} == {"rainmap": 180.0, "trackpcp": 600.0}
+    assert post["counts"]["rainmap"] == {"monthly_files": 12} and post["steps"]["trackpcp"]["check_s"] == pytest.approx(0.1)
+    # the stats attempt keeps its own lines and does not take those of the tail
+    stats = [j for j in result["jobs"] if j["kind"] == "stats"][0]["attempts"][0]
+    assert set(stats["steps"]) == {"trackstats", "speed"} and stats["nodes"] == 4
+    d = result["derived"]
+    assert d["post_jobs"][0]["interactive"] is True and d["post_jobs"][0]["nodes"] == 1 and d["post_jobs"][0]["steps_min"] == {"rainmap": 3.0, "trackpcp": 10.0}
+    # the node-hours of the tail are its 15 minutes on one node
+    assert d["node_hours"]["post"] == pytest.approx(0.25, abs=1e-3)

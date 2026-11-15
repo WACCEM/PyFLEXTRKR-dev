@@ -121,9 +121,9 @@ def text_color(hex_color):
     return "#0b0b0b" if luminance > 0.30 else "#ffffff"
 
 
-def bar(ax, y, left, length, height, color):
+def bar(ax, y, left, length, height, color, hatch=None):
     """
-    A horizontal bar segment with a surface-colored gap around it.
+    A horizontal bar segment with a surface-colored gap around it (a hatched one, with a gray outline, is time that was not work).
 
     Args:
         ax: matplotlib Axes
@@ -137,7 +137,12 @@ def bar(ax, y, left, length, height, color):
             Its thickness in data units.
         color: string
             Fill color.
+        hatch: string (default: None)
+            Hatch pattern ('///'): the bar is drawn in the surface color with this pattern in the ink, not filled.
     """
+    if hatch:
+        ax.barh(y, length, height=height, left=left, facecolor=SURFACE, edgecolor=INK2, hatch=hatch, linewidth=0.9, zorder=3)
+        return
     ax.barh(y, length, height=height, left=left, facecolor=color, edgecolor=SURFACE, linewidth=1.2, zorder=3)
 
 
@@ -332,8 +337,10 @@ def campaign_rows(derived):
         c: dictionary
             jobs (track jobs), stats, nodes (stats job), per_month {step: array of minutes of the months}, track {step: (node-hours, wall minutes of
             the mean job)}, stats_rows [(step, node-hours, wall minutes)] (setup, trackstats ... speed), post_rows [(step, node-hours, wall minutes)]
-            (rainmap, trackpcp: only those the job ran), totals (track_nh, stats_nh, post_nh, charged_nh), job_min_mean/sd (the three track steps
-            together), speed_end_h (when the last step before the post-processing ended, hours since the first start), other_nh (charged minus drawn).
+            (rainmap, trackpcp: those the stats job ran and those of jobs of their own, each with the nodes of the job that ran it), post_nodes (the
+            node counts of those jobs), post_source {step: where it ran}, post_scale (the nodes the row stands for), post_jobs, totals (track_nh, stats_nh, post_nh, charged_nh = the node-hours of the work), job_min_mean/sd (the
+            three track steps together), speed_end_h (when the last step before the post-processing ended, hours since the first start), other_nh
+            (charged minus drawn).
     """
     jobs, stats = derived["track_jobs"], derived["stats_job"]
     steps = [s for s in TRACK_STEPS if any(s in j["steps_min"] for j in jobs)]
@@ -344,14 +351,44 @@ def campaign_rows(derived):
     nodes = stats["nodes"]
     stats_rows = [("setup", stats["setup_min"] * nodes / 60.0, stats["setup_min"])]
     stats_rows += [(s, stats["steps_min"][s] * nodes / 60.0, stats["steps_min"][s]) for s in STATS_STEPS if s in stats["steps_min"]]
+    # The post-processing: the steps the stats job ran (its nodes), and those of jobs of their own (their nodes: e.g. the rain maps on 2 nodes)
     post_rows = [(s, stats["steps_min"][s] * nodes / 60.0, stats["steps_min"][s]) for s in POST_STEPS if s in stats["steps_min"]]
+    post_nodes = {nodes} if post_rows else set()
+    post_source = {r[0]: f"stats job, {nodes} nodes" for r in post_rows}
+    for job in derived.get("post_jobs") or []:
+        for s in (*STATS_STEPS, *POST_STEPS):
+            if s in job["steps_min"]:
+                post_rows.append((s, job["steps_min"][s] * job["nodes"] / 60.0, job["steps_min"][s]))
+                post_nodes.add(job["nodes"])
+                post_source[s] = f"{nodes_text([job['nodes']])}{', interactive' if job.get('interactive') else ''}"
+    post_rows.sort(key=lambda r: POST_STEPS.index(r[0]) if r[0] in POST_STEPS else len(POST_STEPS))
+    # The nodes the post row stands for on the wall-clock axis: node-hours over hours (the count itself if every step ran on the same number)
+    post_wall_h = sum(r[2] for r in post_rows) / 60.0
+    post_scale = sum(r[1] for r in post_rows) / post_wall_h if post_wall_h > 0 else float(nodes)
     totals = {"track_nh": sum(v[0] for v in track.values()), "stats_nh": sum(r[1] for r in stats_rows), "post_nh": sum(r[1] for r in post_rows)}
-    charged = derived["node_hours"]["track"] + derived["node_hours"]["stats"]
+    nh = derived["node_hours"]
+    charged = nh["track"] + nh["stats"] + nh.get("post", 0.0)
     drawn = totals["track_nh"] + totals["stats_nh"] + totals["post_nh"]
     speed_end_h = stats["start_h"] + sum(r[2] for r in stats_rows) / 60.0
     return {"jobs": jobs, "stats": stats, "nodes": nodes, "per_month": per_month, "track": track, "stats_rows": stats_rows, "post_rows": post_rows,
             "totals": dict(totals, charged_nh=charged), "job_min_mean": float(together.mean()), "job_min_sd": float(together.std(ddof=1)) if len(jobs) > 1 else 0.0,
-            "speed_end_h": speed_end_h, "other_nh": charged - drawn}
+            "speed_end_h": speed_end_h, "other_nh": charged - drawn, "post_nodes": sorted(post_nodes), "post_jobs": derived.get("post_jobs") or [],
+            "post_source": post_source, "post_scale": post_scale}
+
+
+def nodes_text(nodes):
+    """
+    The node counts of a row as text.
+
+    Args:
+        nodes: list of int
+            Node counts (sorted).
+
+    Returns:
+        text: string
+            '4 nodes', '2 nodes', '2 and 4 nodes'.
+    """
+    return " and ".join(str(n) for n in nodes) + (" node" if nodes == [1] else " nodes")
 
 
 def counts_text(data):
@@ -422,7 +459,7 @@ def fig_campaign(data, outdir, name):
     figw, row_in, gap_in = 14.0, 1.24, 1.12
     left_in, right_in = 1.75, 0.3
     width_in = figw - left_in - right_in
-    top_in, bottom_in = 2.05, 1.2
+    top_in, bottom_in = 2.05, 1.4
     # The gaps below the rows (the wall-clock axis of the row); the one above the post-processing row also holds the dashed line and its label
     gaps = [gap_in] * (nrow - 1) + [gap_in - 0.5]
     if nrow == 3:
@@ -434,9 +471,9 @@ def fig_campaign(data, outdir, name):
     # Right-hand labels of the rows: measured, so that the axis is as long as the bars and these texts need
     wall_stats_h = sum(seg[2] for seg in c["stats_rows"]) / 60.0
     wall_post_h = sum(seg[2] for seg in c["post_rows"]) / 60.0
-    labels = {"track": (f"{c['job_min_mean']:.0f} min per job", f"({c['totals']['track_nh']:.1f} node-hours: {njobs} jobs × {track_nodes} node)"),
+    labels = {"track": (f"{c['job_min_mean']:.1f} min of steps per job", f"({c['totals']['track_nh']:.1f} node-hours: {njobs} jobs × {track_nodes} node)"),
               "stats": (f"{wall_stats_h:.2f} h", f"({c['totals']['stats_nh']:.1f} node-hours: {nodes} nodes)"),
-              "post": (f"{wall_post_h:.2f} h", f"({c['totals']['post_nh']:.1f} node-hours: {nodes} nodes)")}
+              "post": (f"{wall_post_h:.2f} h", f"({c['totals']['post_nh']:.1f} node-hours: {nodes_text(c['post_nodes'])})")}
     sd_nh = njobs * c["job_min_sd"] / 60.0 * track_nodes
     label_in = {}
     for key, (big, small) in labels.items():
@@ -489,7 +526,9 @@ def fig_campaign(data, outdir, name):
             ax.text(xl + w_units / 2, -0.7, f"{t1}\n{t2}", ha="center", va="top", fontsize=8.0, color=INK, linespacing=1.25)
             right_edge = xl + w_units
     # The whisker of the track row: the SD of the monthly total x the jobs
-    axes[0].errorbar([ends[0]], [0], xerr=[sd_nh], fmt="none", ecolor=INK, elinewidth=1.3, capsize=4, capthick=1.3, zorder=6)
+    if njobs > 1:
+        axes[0].errorbar([ends[0]], [0.42], xerr=[sd_nh], fmt="none", ecolor=INK, elinewidth=1.3, capsize=4, capthick=1.3, zorder=6)
+        axes[0].text(ends[0] - sd_nh - 0.1 / inch_per_unit, 0.42, f"whisker: {njobs} × the SD of the monthly total", ha="right", va="center", fontsize=8, color=INK2)
     for ax, (key, _), end in zip(axes, rows, ends):
         x0 = end + (sd_nh if key == "track" else 0.0) + 0.25 / inch_per_unit
         ax.text(x0, 0.1, labels[key][0], ha="left", va="center", fontsize=10.5, color=INK, fontweight="bold")
@@ -505,7 +544,8 @@ def fig_campaign(data, outdir, name):
         ax.spines["bottom"].set_visible(False)
         ax.tick_params(axis="y", length=0)
         ax.tick_params(axis="x", bottom=False, labelbottom=False)
-    row_names = {"track": f"{njobs} track jobs\n{track_nodes} node each", "stats": f"stats job\n{nodes} nodes", "post": f"post-\nprocessing\n{nodes} nodes"}
+    row_names = {"track": f"{njobs} track jobs\n{track_nodes} node each", "stats": f"stats job\n{nodes} nodes",
+                 "post": f"post-\nprocessing\n{nodes_text(c['post_nodes'])}"}
     for ax, (key, _) in zip(axes, rows):
         ax.set_yticklabels([row_names[key]], fontsize=10)
     # The node-hour axis at the top of the first row
@@ -515,14 +555,15 @@ def fig_campaign(data, outdir, name):
     axes[0].set_xlabel("node-hours (hours × nodes: what the jobs are charged)", color=INK2)
     axes[0].set_xticks([t for t in nice_ticks(xmax, 8) if t <= xmax])
     # The wall-clock axis of every row at its bottom: the hours (minutes below 1.5 h) of one job / of the allocation
-    scales = {"track": njobs * track_nodes, "stats": nodes, "post": nodes}
+    scales = {"track": njobs * track_nodes, "stats": nodes, "post": c["post_scale"]}
     clock_names = {"track": f"of one track job (the {njobs} jobs run side by side)", "stats": f"of the stats job ({nodes} nodes)",
-                   "post": f"of the post-processing ({nodes} nodes, after the steps above)"}
+                   "post": f"of the post-processing ({nodes_text(c['post_nodes'])}, after the steps above)"}
     for ax, (key, _), end in zip(axes, rows, ends):
         total_h = end / scales[key]
         unit, factor = ("minutes", 60.0) if total_h < 1.5 else ("hours", 1.0)
         sec = ax.secondary_xaxis("bottom", functions=(lambda x, s=scales[key], f=factor: x / s * f, lambda h, s=scales[key], f=factor: h * s / f))
-        ticks = nice_ticks(total_h * factor, 5)
+        # At most one tick per 0.6 inch of the row's own length (a short row, e.g. a few minutes of post-processing, has two or three ticks)
+        ticks = nice_ticks(total_h * factor, int(min(5, max(1, end * inch_per_unit / 0.6))))
         sec.set_xticks(ticks)
         sec.set_xlabel(f"wall-clock {unit} {clock_names[key]}", color=INK2, loc="left")
         sec.spines["bottom"].set_color("#c9c8c3")
@@ -534,7 +575,11 @@ def fig_campaign(data, outdir, name):
     if c["post_rows"]:
         y_line = y_tops[2] + 0.30
         fig.add_artist(Line2D([0.012, 0.99], [y_line / figh] * 2, transform=fig.transFigure, color=INK2, linewidth=0.9, linestyle=(0, (5, 4))))
-        fig.text(0.012, (y_line + 0.06) / figh, "post-processing in the same allocation, after the steps above (optional steps): rain maps, precipitation accumulated along the tracks",
+        own_jobs = any(src != f"stats job, {nodes} nodes" for src in c["post_source"].values())
+        fig.text(0.012, (y_line + 0.06) / figh,
+                 ("post-processing (optional steps) in jobs of their own, after the stats job was cancelled in the rain maps: rain maps, precipitation accumulated along the tracks"
+                  if own_jobs else
+                  "post-processing in the same allocation, after the steps above (optional steps): rain maps, precipitation accumulated along the tracks"),
                  ha="left", va="bottom", fontsize=9.3, color=INK2, style="italic")
 
     # Braces right of the rows: the tracking campaign (rows 1 and 2), then the cost of the post-processing
@@ -559,8 +604,9 @@ def fig_campaign(data, outdir, name):
         mid3 = 0.5 * (top3[1] + bot3[1])
         fig.add_artist(matplotlib.text.Text(tip3 + 0.18, mid3 + 0.10, f"+ {wall_post_h:.2f} h, + {c['totals']['post_nh']:.1f} node-hours", transform=t, ha="left",
                                             va="center", fontsize=11.5, fontweight="bold", color=INK))
-        fig.add_artist(matplotlib.text.Text(tip3 + 0.18, mid3 - 0.17, f"with them: {d['wall_h']:.1f} h, {tracking_nh + c['totals']['post_nh']:.1f} node-hours",
-                                            transform=t, ha="left", va="center", fontsize=9, color=INK2))
+        with_them = (f"with them: {tracking_nh + c['totals']['post_nh']:.1f} node-hours" if c["stats"].get("incomplete") else
+                     f"with them: {d['wall_h']:.1f} h, {tracking_nh + c['totals']['post_nh']:.1f} node-hours")
+        fig.add_artist(matplotlib.text.Text(tip3 + 0.18, mid3 - 0.17, with_them, transform=t, ha="left", va="center", fontsize=9, color=INK2))
 
     all_steps = [s for s in (*TRACK_STEPS, "setup", *STATS_STEPS) if any(s == r[0] for _, segs in rows[:2] for r in segs)]
     step_legend(fig, left_in / figw, 1 - 1.1 / figh, all_steps, ncol=len(all_steps))
@@ -572,13 +618,20 @@ def fig_campaign(data, outdir, name):
             "Wall-clock hours are the physical time the jobs took; node-hours count every node of a job during every step, also the serial ones of the stats job.",
             f"The step times drawn add to {c['totals']['track_nh'] + c['totals']['stats_nh'] + c['totals']['post_nh']:.1f} of the {c['totals']['charged_nh']:.1f} node-hours charged; "
             f"the rest ({c['other_nh']:.1f}) is the start and shutdown of the jobs and the checks between the steps. node-h = node-hours."]
+    note.append(f"The wall-clock time of the campaign includes the {d['stats_wait_min']:.0f} min that the stats job waited in the queue for its {nodes} nodes after "
+                f"the last track job ended; the {njobs} track jobs started over {d['track_start_spread_min']:.0f} min as nodes became free.")
+    if c["stats"].get("incomplete"):
+        s_ = c["stats"]
+        note.append(f"The stats job was cancelled after {s_['elapsed_min'] / 60:.2f} h in a hung step: the {s_['other_min'] / 60:.2f} h after its last finished step are not drawn "
+                    f"({s_['other_min'] * nodes / 60:.1f} node-hours, charged as failed); the steps it did not finish ran afterwards in jobs of their own.")
     if shorts:
         note.append("Steps under a minute are not labeled: " + ", ".join(shorts) + ".")
     fig.text(0.012, 0.15 / figh, "\n".join(note), ha="left", va="bottom", fontsize=8.3, color=INK2, linespacing=1.45)
     sub = counts_text(data)
     nh = d["node_hours"]
     title(fig, f"MCS tracking, {data['campaign']['tag']}: wall-clock time and node-hours by step",
-          f"{sub + '. ' if sub else ''}{njobs} track jobs and one stats job on {nodes} nodes; {nh['total']:.1f} node-hours charged in all"
+          f"{sub + '. ' if sub else ''}{njobs} track jobs and one stats job on {nodes} nodes"
+          f"{' (cancelled after ' + format(c['stats']['elapsed_min'] / 60, '.2f') + ' h)' if c['stats'].get('incomplete') else ''}; {nh['total']:.1f} node-hours charged in all"
           f"{' (' + format(nh['failed'], '.1f') + ' of them in failed attempts)' if nh['failed'] > 0 else ''}.\n"
           "In the segments: the wall-clock minutes of the step and (its node-hours).")
     return save(fig, outdir, f"perf_tbpf_{name}_campaign")
@@ -627,6 +680,12 @@ def fig_timeline(data, outdir, name):
             ax.text(left + v / 2, 0, f"{STEP_LABEL.get(step, step)}\n{minutes:.0f} min", ha="center", va="center", fontsize=7.4, color=text_color(STEP_COLOR[step]),
                     linespacing=1.15)
         left += v
+    # A stats job that was cancelled in a hung step: the time after its last finished step, hatched
+    if stats.get("incomplete") and stats["end_h"] > left:
+        bar(ax, 0, left, stats["end_h"] - left, 0.9, SURFACE, hatch="////")
+        ax.text((left + stats["end_h"]) / 2, 0, f"hung in a step, cancelled\n{(stats['end_h'] - left) * 60:.0f} min", ha="center", va="center", fontsize=8.2, color=INK,
+                linespacing=1.15, bbox=dict(boxstyle="round,pad=0.25", facecolor=SURFACE, edgecolor="none"), zorder=6)
+        left = stats["end_h"]
     ax.text(max(left, stats["end_h"]) + 0.01 * stats["end_h"], 0, f"{stats['elapsed_min'] / 60:.2f} h\n{c['nodes']} nodes", ha="left", va="center", fontsize=9.5,
             color=INK, fontweight="semibold")
     last_end = max(j["end_h"] for j in jobs)
@@ -641,9 +700,14 @@ def fig_timeline(data, outdir, name):
     legend_steps = [s for s in all_steps if s in {*TRACK_STEPS, "setup"} or s in stats["steps_min"]]
     step_legend(fig, 1.25 / figw, 1 - 1.05 / figh, legend_steps, ncol=min(len(legend_steps), 7))
     nh = d["node_hours"]
-    title(fig, f"MCS tracking, {data['campaign']['tag']}, on the clock: {nrow} track jobs, then one stats job",
-          f"{d['wall_h']:.1f} h from the first start to the last end, {nh['total']:.1f} node-hours. The queue spread the start of the track jobs over {d['track_start_spread_min']:.0f} min; the last "
-          f"track job ends at {last_end:.2f} h,\nthe stats job starts {d['stats_wait_min']:.0f} min later at {stats['start_h']:.2f} h and ends at {stats['end_h']:.2f} h.")
+    if stats.get("incomplete"):
+        sub = (f"The queue spread the start of the track jobs over {d['track_start_spread_min']:.0f} min; the last track job ends at {last_end:.2f} h, the stats job starts "
+               f"{d['stats_wait_min']:.0f} min later at {stats['start_h']:.2f} h\nand was cancelled at {stats['end_h']:.2f} h, hung in a step; the steps it did not finish ran afterwards "
+               f"in jobs of their own (Figure 2). {nh['total']:.1f} node-hours charged in all.")
+    else:
+        sub = (f"{d['wall_h']:.1f} h from the first start to the last end, {nh['total']:.1f} node-hours. The queue spread the start of the track jobs over {d['track_start_spread_min']:.0f} min; the last "
+               f"track job ends at {last_end:.2f} h,\nthe stats job starts {d['stats_wait_min']:.0f} min later at {stats['start_h']:.2f} h and ends at {stats['end_h']:.2f} h.")
+    title(fig, f"MCS tracking, {data['campaign']['tag']}, on the clock: {nrow} track jobs, then one stats job", sub)
     return save(fig, outdir, f"perf_tbpf_{name}_timeline")
 
 
@@ -671,7 +735,8 @@ def fig_steps(data, outdir, name):
     where = {s: f"{len(c['jobs'])} track jobs" for s in c["track"]}
     for step, nh, minutes in c["stats_rows"] + c["post_rows"]:
         cost[step] = nh
-        where[step] = f"stats job, {minutes:.0f} min wall" if minutes >= 1 else f"stats job, {minutes * 60:.0f} s wall"
+        place = c["post_source"].get(step, "stats job")
+        where[step] = f"{place}, {minutes:.0f} min wall" if minutes >= 1 else f"{place}, {minutes * 60:.0f} s wall"
     total = sum(cost.values())
     order = sorted(cost, key=lambda s: -cost[s])
     figw, figh = 11.8, 3.2 + 0.22 * len(order)
@@ -711,7 +776,9 @@ def fig_steps(data, outdir, name):
     style(axm, grid="x")
     axm.spines["left"].set_visible(False)
     title(fig, f"MCS tracking, {data['campaign']['tag']}: cost by step and its spread over the months",
-          f"Node-hours: the track jobs {c['jobs'][0]['nodes']} node each, the stats job its wall time × {c['nodes']} nodes.\nRight: the dots are the months, the diamond is the mean ± SD.")
+          f"Node-hours: the track jobs {c['jobs'][0]['nodes']} node each, the stats job its wall time × {c['nodes']} nodes"
+          f"{', the steps of jobs of their own the nodes of their job' if any(not v.startswith('stats job') for v in c['post_source'].values()) else ''}."
+          "\nRight: the dots are the months, the diamond is the mean ± SD.")
     return save(fig, outdir, f"perf_tbpf_{name}_steps")
 
 

@@ -13,7 +13,7 @@ import numpy as np
 SCHEMA = "tbpf_campaign_performance/1"
 
 
-def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, seed=7, tag="synthetic 2009"):
+def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, seed=7, tag="synthetic 2009", incident=False):
     """
     A campaign: n_jobs track jobs (one node each, started over 25 minutes as the queue frees nodes) and a stats job that starts 6 minutes after the last
     track job ends.
@@ -31,6 +31,9 @@ def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, se
             Random seed of the month-to-month variation.
         tag: string (default: 'synthetic 2009')
             Name of the campaign.
+        incident: bool (default: False)
+            The stats job hung in the rain maps and was cancelled after 3 h; a debug job (2 nodes) for the rain maps timed out, and the two steps then ran
+            on one interactive node (post jobs of their own; post is ignored).
 
     Returns:
         data: dictionary
@@ -50,18 +53,32 @@ def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, se
     last_end = max(j["end_h"] for j in jobs)
     stats_start = last_end + 6.0 / 60.0
     steps = {"trackstats": 14.2, "identifymcs": 1.6, "matchpf": 9.3, "robustmcs": 0.2, "mapfeature": 11.0, "speed": 3.4}
-    if post:
+    if post and not incident:
         steps.update({"rainmap": 5.2, "trackpcp": 14.8})
     setup = 2.1
-    elapsed = setup + sum(steps.values()) + 0.9
+    hung = 160.0 if incident else 0.0
+    elapsed = setup + sum(steps.values()) + 0.9 + hung
     stats = {"name": "stats200901_200912", "start_h": round(stats_start, 4), "end_h": round(stats_start + elapsed / 60.0, 4), "elapsed_min": round(elapsed, 2),
-             "nodes": stats_nodes, "setup_min": setup, "steps_min": steps, "other_min": 0.9}
+             "nodes": stats_nodes, "setup_min": setup, "steps_min": steps, "other_min": round(0.9 + hung, 2)}
     track_nh = sum(j["elapsed_min"] * j["nodes"] for j in jobs) / 60.0
     stats_nh = stats["elapsed_min"] * stats_nodes / 60.0
-    derived = {"t0": "2026-11-20T10:00:00-08:00", "track_jobs": jobs, "stats_job": stats,
-               "node_hours": {"track": round(track_nh, 3), "stats": round(stats_nh, 3), "failed": failed_node_hours,
-                              "total": round(track_nh + stats_nh + failed_node_hours, 3)},
-               "wall_h": stats["end_h"], "track_start_spread_min": round(float(starts[-1]) * 60, 1), "stats_wait_min": 6.0, "check_s_total": 12.0}
+    post_jobs, post_nh = [], 0.0
+    if incident:
+        # the useful part of the stats attempt is its setup and finished steps; the hung time is charged as failed, and so is the debug job
+        stats.update(state="CANCELLED by 1", incomplete=True)
+        stats_nh = (setup + sum(steps.values())) * stats_nodes / 60.0
+        failed_node_hours = hung * stats_nodes / 60.0 + 0.9 * stats_nodes / 60.0 + 30.0 * 2 / 60.0
+        debug_start = stats["end_h"] + 2.0
+        post_jobs = [{"name": "post_rainmap", "start_h": round(debug_start, 4), "end_h": round(debug_start + 0.5, 4), "elapsed_min": 30.0, "nodes": 2,
+                      "steps_min": {}, "setup_min": 1.5, "other_min": 28.5, "state": "TIMEOUT", "interactive": False},
+                     {"name": "post_tail", "start_h": round(debug_start + 1.0, 4), "end_h": round(debug_start + 1.2, 4), "elapsed_min": 12.0, "nodes": 1,
+                      "steps_min": {"rainmap": 3.0, "trackpcp": 8.6}, "setup_min": 0.2, "other_min": 0.2, "state": "COMPLETED", "interactive": True}]
+        post_nh = 12.0 / 60.0
+    derived = {"t0": "2026-11-20T10:00:00-08:00", "track_jobs": jobs, "stats_job": stats, "post_jobs": post_jobs,
+               "node_hours": {"track": round(track_nh, 3), "stats": round(stats_nh, 3), "post": round(post_nh, 3), "failed": round(failed_node_hours, 3),
+                              "total": round(track_nh + stats_nh + post_nh + failed_node_hours, 3)},
+               "wall_h": post_jobs[-1]["end_h"] if post_jobs else stats["end_h"], "track_start_spread_min": round(float(starts[-1]) * 60, 1), "stats_wait_min": 6.0,
+               "check_s_total": 12.0}
     counts = {"input_files": 8761, "cloudid_files": 8760, "frames_skipped": 1, "trackstats_tracks": 1180000, "identifymcs_mcs_tb": 41000,
               "robustmcs_mcs_robust": 7600}
     return {"schema": SCHEMA, "campaign": {"tag": tag}, "derived": derived, "counts": counts}
