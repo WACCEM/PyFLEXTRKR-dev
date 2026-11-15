@@ -7,6 +7,14 @@ feature (PF) are present at every pixel. It is the calculation of Analysis/calc_
 file names, so the scripts that read those files keep working), as a step of the run: the stitched stats job of a campaign runs it after speed,
 and with a Dask client the computation of a month is done by the workers.
 
+The files are read INSIDE the Dask tasks (one task per file opens the file, reads what the maps need and closes it), and the maps are written
+by the main process from the computed arrays. The script of Analysis/ opens the files lazily in the main process (xr.open_mfdataset) and lets the
+workers write the result (to_netcdf of Dask arrays): there the workers get the lazily opened datasets, with the netCDF locks of the main process.
+xarray's CachingFileManager.__del__ takes that lock with acquire(blocking=False), and CombinedLock.acquire(blocking=False) is not
+all-or-nothing: when the event loop of a worker runs __del__ while a write is between its two releases, it keeps one of the two locks for ever, and the
+next read of that worker waits for it for ever (seen on 2019 IMERG: about every second month of the step hung, measured 2026-11-14). Nothing of
+xarray's file handling crosses to a worker here, and the files are read by all the workers (the lazily opened datasets kept the reading on a few).
+
     <stats_outpath>monthly/mcs_rainmap_<YYYYMM>.nc      precipitation, mcs_precipitation [mm], mcs_precipitation_count,
                                                         mcs_cloud_count [hours], ntimes, latitude, longitude
 
@@ -19,6 +27,8 @@ import logging
 import os
 import time
 
+import dask
+import dask.array as da
 import numpy as np
 import xarray as xr
 
@@ -92,12 +102,81 @@ def expected_outputs(config):
     return [rainmap_file(config, y, m) for y, m in months_of_period(config) if pixel_files_of_month(config, y, m)]
 
 
+def read_pixel_file(path, pcp_varname=PCP_VARNAME, lat=None, lon=None):
+    """
+    The fields of one pixel-level file that the maps need, read and decoded where the function runs (a Dask task): the file is opened and
+    closed here, so no xarray file handle or lock is shared with another process.
+
+    Args:
+        path: string
+            Pixel-level file (one time step).
+        pcp_varname: string (default: PCP_VARNAME)
+            Name of the precipitation variable.
+        lat, lon: 1D arrays or None (default: None)
+            The grid of the first file of the month; if given, this file must have the same grid.
+
+    Returns:
+        cloud: bool array [1, lat, lon]
+            Pixels inside a tracked cold cloud shield (cloudtracknumber > 0).
+        pcp: bool array [1, lat, lon]
+            Pixels inside a tracked precipitation feature (pcptracknumber > 0).
+        precip: array [1, lat, lon]
+            Precipitation as decoded by xarray (NaN where there is no data).
+    """
+    with xr.open_dataset(path) as ds:
+        # The maps are sums over files: every file must hold one time and the grid of the others
+        if ds.sizes["time"] != 1:
+            raise ValueError(f"{path} holds {ds.sizes['time']} times, the rain maps need pixel-level files of one time step")
+        if lat is not None and (not np.array_equal(ds["lat"].values, lat) or not np.array_equal(ds["lon"].values, lon)):
+            raise ValueError(f"{path} has another grid than the first file of the month")
+        # The decoded fields (track numbers are masked where 0: NaN > 0 is False)
+        cloud = ds["cloudtracknumber"].values > 0
+        pcp = ds["pcptracknumber"].values > 0
+        precip = ds[pcp_varname].values
+    return cloud, pcp, precip
+
+
+def lazy_fields_of_month(mcsfiles, pcp_varname=PCP_VARNAME):
+    """
+    The fields of the files of a month as Dask arrays [time, lat, lon] with one chunk per file; every chunk is read by its own task
+    (read_pixel_file), nothing is opened here except the first file for the grid.
+
+    Args:
+        mcsfiles: list of strings
+            The pixel-level files in time order (at least one).
+        pcp_varname: string (default: PCP_VARNAME)
+            Name of the precipitation variable.
+
+    Returns:
+        fields: dictionary
+            cloud, pcp, precip: DataArrays [time, lat, lon] (lazy); lat, lon: 1D arrays; longitude, latitude: DataArrays [lat, lon] of
+            the first file (with their attributes).
+    """
+    # The grid, the 2D coordinates and the dtype of the precipitation from the first file
+    with xr.open_dataset(mcsfiles[0]) as d0:
+        lat, lon = d0["lat"].values, d0["lon"].values
+        ny, nx = lat.size, lon.size
+        pcp_dtype = d0[pcp_varname].dtype
+        longitude, latitude = (d0[name].isel(time=0) if "time" in d0[name].dims else d0[name] for name in ("longitude", "latitude"))
+        longitude, latitude = longitude.load(), latitude.load()
+    # One task per file (three fields each), one chunk per file and field
+    read = dask.delayed(read_pixel_file, nout=3, pure=False)
+    parts = [read(f, pcp_varname, lat, lon) for f in mcsfiles]
+    dims = ("time", "lat", "lon")
+    fields = {}
+    for i, (name, dtype) in enumerate((("cloud", bool), ("pcp", bool), ("precip", pcp_dtype))):
+        chunks = [da.from_delayed(p[i], shape=(1, ny, nx), dtype=dtype) for p in parts]
+        fields[name] = xr.DataArray(da.concatenate(chunks, axis=0), dims=dims)
+    fields.update(lat=lat, lon=lon, longitude=longitude, latitude=latitude)
+    return fields
+
+
 def compute_monthly_rainmap(config, year, month):
     """
     The maps of one month, written to rainmap_file(config, year, month).
 
-    The computation is lazy (xarray and dask): the graph is built from the files of the month and run while the file is written, by the
-    Dask client of the run if there is one, otherwise by the threaded scheduler.
+    The maps are a lazy computation (xarray and dask) over the files of the month, run by the Dask client of the run if there is one, otherwise
+    by the threaded scheduler; every file is read by a task of its own (read_pixel_file). The computed maps are written by this process.
 
     Args:
         config: dictionary
@@ -119,22 +198,20 @@ def compute_monthly_rainmap(config, year, month):
     t0 = time.time()
 
     #########################################################################
-    # The files of the month, opened lazily (one chunk per file)
+    # The files of the month, one chunk per file (read by the tasks)
     #########################################################################
-    ds = xr.open_mfdataset(mcsfiles, concat_dim="time", combine="nested")
-    ntimes = ds.sizes["time"]
-    # The grid is the same in every file: the coordinates of the first one
-    longitude = ds["longitude"].isel(time=0).compute()
-    latitude = ds["latitude"].isel(time=0).compute()
+    fields = lazy_fields_of_month(mcsfiles, PCP_VARNAME)
+    cloud, pcp, precip = fields["cloud"], fields["pcp"], fields["precip"]
+    ntimes = cloud.sizes["time"]
+    longitude, latitude = fields["longitude"], fields["latitude"]
 
     #########################################################################
     # The maps (the graph; nothing is calculated before the file is written)
     #########################################################################
-    mcscloudct = (ds["cloudtracknumber"] > 0).sum(dim="time")
-    mcsprecip = ds[PCP_VARNAME].where(ds["cloudtracknumber"] > 0).sum(dim="time")
-    totprecip = ds[PCP_VARNAME].sum(dim="time")
-    mcspcpmask = xr.where(ds["pcptracknumber"] > 0, 1, 0)
-    mcspcpct = mcspcpmask.sum(dim="time")
+    mcscloudct = cloud.sum(dim="time")
+    mcsprecip = precip.where(cloud).sum(dim="time")
+    totprecip = precip.sum(dim="time")
+    mcspcpct = pcp.sum(dim="time")
     # The time of the month: the first second of it, in Epoch time
     months = np.zeros(1, dtype=int)
     months[0] = calendar.timegm(datetime.datetime(int(year), int(month), 1, 0, 0, 0).timetuple())
@@ -151,7 +228,7 @@ def compute_monthly_rainmap(config, year, month):
         "mcs_cloud_count": (["time", "lat", "lon"], mcscloudct.expand_dims("time", axis=0).data),
         "ntimes": (["time"], xr.DataArray(ntimes).expand_dims("time", axis=0).data),
     }
-    coord_dict = {"time": (["time"], months), "lat": (["lat"], ds["lat"].data), "lon": (["lon"], ds["lon"].data)}
+    coord_dict = {"time": (["time"], months), "lat": (["lat"], fields["lat"]), "lon": (["lon"], fields["lon"])}
     gattr_dict = {"title": "MCS precipitation accumulation", "contact": "Zhe Feng, zhe.feng@pnnl.gov", "created_on": time.ctime(time.time())}
     dsout = xr.Dataset(var_dict, coords=coord_dict, attrs=gattr_dict)
     attrs = {
@@ -168,14 +245,14 @@ def compute_monthly_rainmap(config, year, month):
         dsout[name].attrs.update(values)
 
     #########################################################################
-    # Write (the calculation happens here)
+    # Calculate (the files are read here, by the tasks), then write from this process
     #########################################################################
+    dsout = dsout.compute()
     comp = dict(zlib=True, _FillValue=np.nan, dtype="float32")
     encoding = {var: comp for var in dsout.data_vars}
     if os.path.isfile(outfile):
         os.remove(outfile)
     dsout.to_netcdf(path=outfile, mode="w", format="NETCDF4", unlimited_dims="time", encoding=encoding)
-    ds.close()
     logger.info(f"{outfile}: {ntimes} files, {time.time() - t0:.0f} s")
     return outfile
 

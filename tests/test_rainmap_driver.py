@@ -98,3 +98,52 @@ def test_a_second_run_replaces_the_files_and_rainmap_outdir_moves_them(run, tmp_
     moved = dict(config, rainmap_outdir=str(tmp_path / "maps"))
     R.rainmap_driver(moved)
     assert os.path.isfile(str(tmp_path / "maps" / "mcs_rainmap_200901.nc")) and R.expected_outputs(moved)[0].startswith(str(tmp_path / "maps"))
+
+
+def test_no_xarray_file_handle_or_lock_is_in_the_graph(run):
+    """
+    The graph of the maps holds paths and arrays only. A lazily opened dataset (open_mfdataset) puts its file handles and the netCDF locks of the
+    main process into the graph; on the workers the lock was left locked by xarray's CachingFileManager.__del__ (CombinedLock.acquire(blocking=False)
+    is not all-or-nothing) and the step hung (2019 IMERG, 2026-11-14).
+    """
+    cloudpickle = pytest.importorskip("cloudpickle")
+    config, fields = run
+    files = R.pixel_files_of_month(config, 2009, 1)
+    lazy = R.lazy_fields_of_month(files)
+    graph = cloudpickle.dumps([lazy[k].data.__dask_graph__() for k in ("cloud", "pcp", "precip")])
+    assert b"xarray.backends" not in graph
+    # the control: the way of the script of Analysis/ does put them into the graph
+    ds = xr.open_mfdataset(files, concat_dim="time", combine="nested")
+    assert b"xarray.backends" in cloudpickle.dumps(ds["precipitation"].data.__dask_graph__())
+    ds.close()
+
+
+def test_a_dask_cluster_gives_the_same_files_as_the_threaded_scheduler(run, tmp_path):
+    distributed = pytest.importorskip("distributed")
+    config, fields = run
+    R.rainmap_driver(config)                                                          # no client: the threaded scheduler
+    other = dict(config, rainmap_outdir=str(tmp_path / "cluster"))
+    # two worker processes with one thread each, as the workers of a campaign
+    with distributed.LocalCluster(n_workers=2, threads_per_worker=1, processes=True, dashboard_address=None) as cluster, \
+            distributed.Client(cluster):
+        R.rainmap_driver(other)
+    for year, month in ((2009, 1), (2009, 2)):
+        assert netcdf_differences(R.rainmap_file(config, year, month), R.rainmap_file(other, year, month), ignore_global_attrs=("created_on",)) == []
+
+
+def test_a_file_with_another_grid_or_with_two_times_is_refused(run):
+    config, fields = run
+    files = R.pixel_files_of_month(config, 2009, 2)
+    # the grid of the second file is shifted
+    with xr.open_dataset(files[1]) as ds:
+        ds = ds.load()
+    ds.assign_coords(lat=ds["lat"] + 1).to_netcdf(files[1])
+    with pytest.raises(ValueError, match="another grid"):
+        R.compute_monthly_rainmap(config, 2009, 2)
+    # the third file holds two times
+    with xr.open_dataset(files[2]) as ds:
+        ds = ds.load()
+    xr.concat([ds, ds], dim="time").to_netcdf(files[2])
+    ds.to_netcdf(files[1])                                                            # the second file is the original again
+    with pytest.raises(ValueError, match="holds 2 times"):
+        R.compute_monthly_rainmap(config, 2009, 2)

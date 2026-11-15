@@ -277,6 +277,11 @@ cold cloud shield of the MCSs, `cloudtracknumber`), `mcs_cloud_count` (hours wit
 `pcptracknumber`) and `ntimes`, in `stats/monthly/mcs_rainmap_<YYYYMM>.nc` (`rainmap_outdir` moves them). It is the calculation of
 [calc_tbpf_mcs_monthly_rainmap.py](../Analysis/calc_tbpf_mcs_monthly_rainmap.py) (the same variables, values and attributes: a test compares the files), as a step of the run, so a year of 12 months runs in the stats job.
 
+With a Dask client every pixel-level file is read by a task of its own (opened and closed inside the task, so all the workers read) and the maps are written by the main process. The script of
+`Analysis/` opens the files lazily in the main process and lets the workers write the file; under a distributed client that leaves the netCDF lock of a worker locked now and then (xarray's
+`CombinedLock.acquire(blocking=False)` is not all-or-nothing, and the garbage collection of a file manager calls it), and the next read of that worker waits for ever: the step hung in about
+every second month of the 2019 IMERG year ([performance_tbpf.md](performance_tbpf.md)). The files of both ways are identical (tests; E3SM 2009 and IMERG 2019: all 23 monthly files equal bit by bit).
+
 **`run_trackpcp` (off in the template): the precipitation of every MCS at every pixel, over its life.** This is step 2 of the track-matched precipitation of the radar pipeline
 ([track_precipitation.md](track_precipitation.md)) for Tb+PF: for every robust MCS, the precipitation of the hours at the pixels of its cloud shield mask (`cloudtracknumber`: the merging and
 splitting small clouds are in the mask, one owner per pixel and hour), summed over its life. The precipitation is the `precipitation` of the pixel-level files of the run itself
