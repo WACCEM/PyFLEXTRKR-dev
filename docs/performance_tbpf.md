@@ -160,7 +160,7 @@ With the step changed, **the last two steps ran on one interactive node of mine*
 (17 min), the wait for the stats job (a property of the queue), the 0.63 h of the stats steps and the last two steps
 (23 min on one node; they gain little from more nodes, see the E3SM campaign).
 
-The tracking found 8,753 frames (6 of the 8,760 hourly inputs were skipped for too much missing data), 2,237,492 tracks, 62,305 Tb MCS and 41,501 robust MCS (MCSMIP); the PF
+The tracking found 8,755 frames (6 of the 8,761 input files, the 8,760 hours of the year and the first hour of the next, were skipped for too much missing data), 2,237,492 tracks, 62,305 Tb MCS and 41,501 robust MCS (MCSMIP); the PF
 statistics matched all 999,751 MCS entries. The files: 121 GB of cloudid and track files, 126 GB of pixel-level files and 3.7 GB of statistics, rain maps
 and 243 million (MCS, pixel) rows of the accumulation along the tracks (2.4 GB Parquet): 251 GB.
 
