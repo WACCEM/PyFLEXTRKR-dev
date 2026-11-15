@@ -327,7 +327,7 @@ def check_schema(data):
 
 def campaign_rows(derived):
     """
-    The numbers of the rows of Figure 2 and of the other figures.
+    The numbers of the rows of the campaign figure and of the other figures.
 
     Args:
         derived: dictionary
@@ -337,12 +337,17 @@ def campaign_rows(derived):
         c: dictionary
             jobs (track jobs), stats, nodes (stats job), per_month {step: array of minutes of the months}, track {step: (node-hours, wall minutes of
             the mean job)}, stats_rows [(step, node-hours, wall minutes)] (setup, trackstats ... speed), post_rows [(step, node-hours, wall minutes)]
-            (rainmap, trackpcp: those the stats job ran and those of jobs of their own, each with the nodes of the job that ran it), post_nodes (the
-            node counts of those jobs), post_source {step: where it ran}, post_scale (the nodes the row stands for), post_jobs, totals (track_nh, stats_nh, post_nh, charged_nh = the node-hours of the work), job_min_mean/sd (the
-            three track steps together), speed_end_h (when the last step before the post-processing ended, hours since the first start), other_nh
-            (charged minus drawn).
+            (rainmap, trackpcp: the LAST run of each step supplies the numbers, whether it is the stats job's own or a job of its own with the nodes of
+            that job; the earlier runs are superseded), post_nodes (the node counts of the drawn runs), post_source {step: where it ran},
+            post_job_of {step: name of the post job that ran it, None for the stats job}, drawn_post_jobs (names of the post jobs that supply a drawn
+            step), post_scale (the nodes the post row stands for), post_jobs, totals (track_nh, stats_nh, post_nh, charged_nh = the node-hours of the
+            work, superseded runs included), superseded_nh (node-hours of the runs that a later run of the same step replaces: charged, not drawn),
+            other_nh (charged minus drawn minus superseded), job_min_mean/sd (the three track steps together), track_longest_min (the longest track job),
+            stats_compute_min (the stats job without the hung time and without the steps that a post job re-ran), post_compute_min (the post jobs
+            that supply drawn steps), compute_min (the critical path without queue waits: the three together), speed_end_h (hours since the first start).
     """
     jobs, stats = derived["track_jobs"], derived["stats_job"]
+    post_jobs = derived.get("post_jobs") or []
     steps = [s for s in TRACK_STEPS if any(s in j["steps_min"] for j in jobs)]
     per_month = {s: np.array([j["steps_min"].get(s, 0.0) for j in jobs], dtype=float) for s in steps}
     together = sum(per_month.values()) if per_month else np.zeros(len(jobs))
@@ -351,17 +356,27 @@ def campaign_rows(derived):
     nodes = stats["nodes"]
     stats_rows = [("setup", stats["setup_min"] * nodes / 60.0, stats["setup_min"])]
     stats_rows += [(s, stats["steps_min"][s] * nodes / 60.0, stats["steps_min"][s]) for s in STATS_STEPS if s in stats["steps_min"]]
-    # The post-processing: the steps the stats job ran (its nodes), and those of jobs of their own (their nodes: e.g. the rain maps on 2 nodes)
-    post_rows = [(s, stats["steps_min"][s] * nodes / 60.0, stats["steps_min"][s]) for s in POST_STEPS if s in stats["steps_min"]]
-    post_nodes = {nodes} if post_rows else set()
-    post_source = {r[0]: f"stats job, {nodes} nodes" for r in post_rows}
-    for job in derived.get("post_jobs") or []:
+    # The post-processing steps: every run of a step (the stats job's own and those of jobs of their own, each with the nodes of the job that ran it) in
+    # time order; the LAST run supplies the numbers that are drawn, the earlier runs are superseded (their node-hours stay charged)
+    runs = {}
+    for s in POST_STEPS:
+        if s in stats["steps_min"]:
+            runs.setdefault(s, []).append((stats["start_h"], stats["steps_min"][s] * nodes / 60.0, stats["steps_min"][s], nodes, f"stats job, {nodes} nodes", None))
+    for job in post_jobs:
         for s in (*STATS_STEPS, *POST_STEPS):
             if s in job["steps_min"]:
-                post_rows.append((s, job["steps_min"][s] * job["nodes"] / 60.0, job["steps_min"][s]))
-                post_nodes.add(job["nodes"])
-                post_source[s] = f"{nodes_text([job['nodes']])}{', interactive' if job.get('interactive') else ''}"
+                where = f"post job, {nodes_text([job['nodes']])}{', interactive' if job.get('interactive') else ''}"
+                runs.setdefault(s, []).append((job["start_h"], job["steps_min"][s] * job["nodes"] / 60.0, job["steps_min"][s], job["nodes"], where, job["name"]))
+    post_rows, post_source, post_job_of, post_nodes, superseded_nh = [], {}, {}, set(), 0.0
+    for s, step_runs in runs.items():
+        step_runs.sort(key=lambda r: r[0])
+        last = step_runs[-1]
+        post_rows.append((s, last[1], last[2]))
+        post_source[s], post_job_of[s] = last[4], last[5]
+        post_nodes.add(last[3])
+        superseded_nh += sum(r[1] for r in step_runs[:-1])
     post_rows.sort(key=lambda r: POST_STEPS.index(r[0]) if r[0] in POST_STEPS else len(POST_STEPS))
+    drawn_post_jobs = sorted({name for name in post_job_of.values() if name})
     # The nodes the post row stands for on the wall-clock axis: node-hours over hours (the count itself if every step ran on the same number)
     post_wall_h = sum(r[2] for r in post_rows) / 60.0
     post_scale = sum(r[1] for r in post_rows) / post_wall_h if post_wall_h > 0 else float(nodes)
@@ -370,10 +385,20 @@ def campaign_rows(derived):
     charged = nh["track"] + nh["stats"] + nh.get("post", 0.0)
     drawn = totals["track_nh"] + totals["stats_nh"] + totals["post_nh"]
     speed_end_h = stats["start_h"] + sum(r[2] for r in stats_rows) / 60.0
+    # The compute time: the longest track job, the stats job (not its hung time, not the steps that a post job ran again), the post jobs that supply
+    # drawn steps; queue waits are not part of it
+    track_longest = max(j["elapsed_min"] for j in jobs)
+    rerun_in_stats = [s for s in POST_STEPS if s in stats["steps_min"] and not post_source.get(s, "").startswith("stats job")]
+    stats_compute = stats["setup_min"] + sum(v for s, v in stats["steps_min"].items() if s not in rerun_in_stats)
+    if not stats.get("incomplete"):
+        stats_compute += stats.get("other_min", 0.0)
+    post_compute = sum(j["elapsed_min"] for j in post_jobs if j["name"] in drawn_post_jobs)
     return {"jobs": jobs, "stats": stats, "nodes": nodes, "per_month": per_month, "track": track, "stats_rows": stats_rows, "post_rows": post_rows,
             "totals": dict(totals, charged_nh=charged), "job_min_mean": float(together.mean()), "job_min_sd": float(together.std(ddof=1)) if len(jobs) > 1 else 0.0,
-            "speed_end_h": speed_end_h, "other_nh": charged - drawn, "post_nodes": sorted(post_nodes), "post_jobs": derived.get("post_jobs") or [],
-            "post_source": post_source, "post_scale": post_scale}
+            "speed_end_h": speed_end_h, "other_nh": charged - drawn - superseded_nh, "superseded_nh": superseded_nh, "post_nodes": sorted(post_nodes),
+            "post_jobs": post_jobs, "post_source": post_source, "post_job_of": post_job_of, "drawn_post_jobs": drawn_post_jobs, "post_scale": post_scale,
+            "track_longest_min": track_longest, "stats_compute_min": stats_compute, "post_compute_min": post_compute,
+            "compute_min": track_longest + stats_compute + post_compute}
 
 
 def nodes_text(nodes):
@@ -452,6 +477,9 @@ def fig_campaign(data, outdir, name):
     c = campaign_rows(d)
     njobs, nodes = len(c["jobs"]), c["nodes"]
     track_nodes = c["jobs"][0]["nodes"]
+    # The compute time of the tracking (rows 1 and 2): the longest track job and the stats job up to speed (no queue waits)
+    tracking_compute_h = (c["track_longest_min"] + sum(seg[2] for seg in c["stats_rows"])) / 60.0
+    own_jobs = any(not src.startswith("stats job") for src in c["post_source"].values())
     rows = [("track", [(s, c["track"][s][0], c["track"][s][1]) for s in c["track"]]), ("stats", c["stats_rows"])]
     if c["post_rows"]:
         rows.append(("post", c["post_rows"]))
@@ -459,7 +487,9 @@ def fig_campaign(data, outdir, name):
     figw, row_in, gap_in = 14.0, 1.24, 1.12
     left_in, right_in = 1.75, 0.3
     width_in = figw - left_in - right_in
-    top_in, bottom_in = 2.05, 1.4
+    # The notes at the bottom: 5 lines, one more for a superseded run, for a cancelled stats job and for the steps under a minute
+    n_notes = 5 + (c["superseded_nh"] > 0) + bool(c["stats"].get("incomplete")) + 1
+    top_in, bottom_in = 2.05, 0.45 + 0.17 * n_notes
     # The gaps below the rows (the wall-clock axis of the row); the one above the post-processing row also holds the dashed line and its label
     gaps = [gap_in] * (nrow - 1) + [gap_in - 0.5]
     if nrow == 3:
@@ -478,7 +508,7 @@ def fig_campaign(data, outdir, name):
     label_in = {}
     for key, (big, small) in labels.items():
         label_in[key] = max(text_size_in(fig, big, fontsize=10.5, fontweight="bold")[0], text_size_in(fig, small, fontsize=9)[0])
-    brace_text_in = max(text_size_in(fig, f"{d['wall_h']:.1f} h wall-clock", fontsize=13.5, fontweight="bold")[0],
+    brace_text_in = max(text_size_in(fig, f"{tracking_compute_h:.1f} h of compute", fontsize=13.5, fontweight="bold")[0],
                         text_size_in(fig, "tracking: all jobs, hours × nodes", fontsize=9)[0],
                         text_size_in(fig, f"+ {wall_post_h:.2f} h, + {c['totals']['post_nh']:.1f} node-hours", fontsize=11.5, fontweight="bold")[0])
     # The axis: every row (its bars + whisker + label) and the brace with its text fit; node-hours per inch follow from that
@@ -575,12 +605,13 @@ def fig_campaign(data, outdir, name):
     if c["post_rows"]:
         y_line = y_tops[2] + 0.30
         fig.add_artist(Line2D([0.012, 0.99], [y_line / figh] * 2, transform=fig.transFigure, color=INK2, linewidth=0.9, linestyle=(0, (5, 4))))
-        own_jobs = any(src != f"stats job, {nodes} nodes" for src in c["post_source"].values())
-        fig.text(0.012, (y_line + 0.06) / figh,
-                 ("post-processing (optional steps) in jobs of their own, after the stats job was cancelled in the rain maps: rain maps, precipitation accumulated along the tracks"
-                  if own_jobs else
-                  "post-processing in the same allocation, after the steps above (optional steps): rain maps, precipitation accumulated along the tracks"),
-                 ha="left", va="bottom", fontsize=9.3, color=INK2, style="italic")
+        if own_jobs:
+            why = (", after the stats job was cancelled in the rain maps" if c["stats"].get("incomplete") else
+                   ", a re-run with the fixed rain-map step" if c["superseded_nh"] > 0 else "")
+            post_label = f"post-processing (optional steps) in a job of its own{why}: rain maps, precipitation accumulated along the tracks"
+        else:
+            post_label = "post-processing in the same allocation, after the steps above (optional steps): rain maps, precipitation accumulated along the tracks"
+        fig.text(0.012, (y_line + 0.06) / figh, post_label, ha="left", va="bottom", fontsize=9.3, color=INK2, style="italic")
 
     # Braces right of the rows: the tracking campaign (rows 1 and 2), then the cost of the post-processing
     inv = fig.dpi_scale_trans.inverted()
@@ -590,10 +621,9 @@ def fig_campaign(data, outdir, name):
     tip_x = curly_brace(fig, top_pt[0], bot_pt[1], top_pt[1], 0.34, INK2)
     mid_y = 0.5 * (top_pt[1] + bot_pt[1])
     t = fig.dpi_scale_trans
-    tracking_wall_h = c["speed_end_h"]
     tracking_nh = c["totals"]["track_nh"] + c["totals"]["stats_nh"]
-    for dy, text, kwargs in ((0.22, f"{tracking_wall_h:.1f} h wall-clock", dict(fontsize=13.5, fontweight="bold", color=INK)),
-                             (-0.06, "first start to the last tracking step", dict(fontsize=9, color=INK2)),
+    for dy, text, kwargs in ((0.22, f"{tracking_compute_h:.1f} h of compute", dict(fontsize=13.5, fontweight="bold", color=INK)),
+                             (-0.06, "longest track job + stats job up to speed", dict(fontsize=9, color=INK2)),
                              (-0.40, f"{tracking_nh:.1f} node-hours", dict(fontsize=13.5, color=INK)),
                              (-0.68, "tracking: all jobs, hours × nodes", dict(fontsize=9, color=INK2))):
         fig.add_artist(matplotlib.text.Text(tip_x + 0.18, mid_y + dy, text, transform=t, ha="left", va="center", **kwargs))
@@ -604,8 +634,7 @@ def fig_campaign(data, outdir, name):
         mid3 = 0.5 * (top3[1] + bot3[1])
         fig.add_artist(matplotlib.text.Text(tip3 + 0.18, mid3 + 0.10, f"+ {wall_post_h:.2f} h, + {c['totals']['post_nh']:.1f} node-hours", transform=t, ha="left",
                                             va="center", fontsize=11.5, fontweight="bold", color=INK))
-        with_them = (f"with them: {tracking_nh + c['totals']['post_nh']:.1f} node-hours" if c["stats"].get("incomplete") else
-                     f"with them: {d['wall_h']:.1f} h, {tracking_nh + c['totals']['post_nh']:.1f} node-hours")
+        with_them = f"with them: {c['compute_min'] / 60.0:.1f} h of compute, {tracking_nh + c['totals']['post_nh']:.1f} node-hours"
         fig.add_artist(matplotlib.text.Text(tip3 + 0.18, mid3 - 0.17, with_them, transform=t, ha="left", va="center", fontsize=9, color=INK2))
 
     all_steps = [s for s in (*TRACK_STEPS, "setup", *STATS_STEPS) if any(s == r[0] for _, segs in rows[:2] for r in segs)]
@@ -615,13 +644,17 @@ def fig_campaign(data, outdir, name):
     pm = c["per_month"]
     note = [f"Track jobs: the mean of the {njobs} months for one job (± SD): " + ", ".join(f"{s} {pm[s].mean():.1f} ± {pm[s].std(ddof=1) if njobs > 1 else 0:.1f}" for s in pm) +
             f" min, together {c['job_min_mean']:.1f} ± {c['job_min_sd']:.1f}; the bar is {njobs} × these means, the whisker {njobs} × the SD of the monthly total.",
-            "Wall-clock hours are the physical time the jobs took; node-hours count every node of a job during every step, also the serial ones of the stats job.",
+            "In the segments: the wall-clock minutes of the step and (its node-hours). Wall-clock times are the run times of the jobs; queue waits are not counted.",
+            "Node-hours count every node of a job during every step, also the serial ones of the stats job.",
             f"The step times drawn add to {c['totals']['track_nh'] + c['totals']['stats_nh'] + c['totals']['post_nh']:.1f} of the {c['totals']['charged_nh']:.1f} node-hours charged; "
             f"the rest ({c['other_nh']:.1f}) is the start and shutdown of the jobs and the checks between the steps. node-h = node-hours."]
     started = (f"the {njobs} track jobs started over {d['track_start_spread_min']:.0f} min as nodes became free" if d["track_start_spread_min"] >= 1.0
                else f"the {njobs} track jobs all started at the same time")
-    note.append(f"The wall-clock time of the campaign includes the {d['stats_wait_min']:.0f} min that the stats job waited in the queue for its {nodes} nodes after "
-                f"the last track job ended; {started}.")
+    note.append(f"Compute time = the longest track job + the stats job (+ the post job): {c['compute_min'] / 60.0:.2f} h. Queue waits are not in it: the stats job waited "
+                f"{d['stats_wait_min']:.0f} min for its {nodes} nodes; {started}.")
+    if c["superseded_nh"] > 0:
+        note.append(f"Superseded: an earlier run of the post-processing steps ({c['superseded_nh']:.1f} node-hours) is charged but not drawn; the figure shows the "
+                    f"{nodes_text(c['post_nodes'])} re-run.")
     if c["stats"].get("incomplete"):
         s_ = c["stats"]
         note.append(f"The stats job was cancelled after {s_['elapsed_min'] / 60:.2f} h in a hung step: the {s_['other_min'] / 60:.2f} h after its last finished step are not drawn "
@@ -631,20 +664,79 @@ def fig_campaign(data, outdir, name):
     fig.text(0.012, 0.15 / figh, "\n".join(note), ha="left", va="bottom", fontsize=8.3, color=INK2, linespacing=1.45)
     sub = counts_text(data)
     nh = d["node_hours"]
-    title(fig, f"MCS tracking, {data['campaign']['tag']}: wall-clock time and node-hours by step",
-          f"{sub + '. ' if sub else ''}{njobs} track jobs and one stats job on {nodes} nodes"
-          f"{' (cancelled after ' + format(c['stats']['elapsed_min'] / 60, '.2f') + ' h)' if c['stats'].get('incomplete') else ''}; {nh['total']:.1f} node-hours charged in all"
-          f"{' (' + format(nh['failed'], '.1f') + ' of them in failed attempts)' if nh['failed'] > 0 else ''}.\n"
-          "In the segments: the wall-clock minutes of the step and (its node-hours).")
+    cancelled = f" (cancelled after {c['stats']['elapsed_min'] / 60:.2f} h)" if c["stats"].get("incomplete") else ""
+    post_job = f" and a post-processing job on {nodes_text(c['post_nodes'])}" if own_jobs else ""
+    failed = f" ({nh['failed']:.1f} of them in failed attempts)" if nh["failed"] > 0 else ""
+    title(fig, f"MCS tracking, {data['campaign']['tag']}: compute time and node-hours by step",
+          (f"{sub}.\n" if sub else "") + f"{njobs} track jobs and one stats job on {nodes} nodes{cancelled}{post_job}; {nh['total']:.1f} node-hours charged in all{failed}.")
     return save(fig, outdir, f"perf_tbpf_{name}_campaign")
 
 
 ########################################################################################################################
-# Figure 10: the campaign on the clock
+# Figure 10: the campaign in compute time
 ########################################################################################################################
+def timeline_layout(c):
+    """
+    The geometry of the compute-time timeline, in hours: every track job starts at 0 (they run side by side), the stats job starts when the longest track
+    job ends, and the steps of the post-processing jobs follow it. Queue waits and the hung time of a cancelled stats job are not part of it.
+
+    Args:
+        c: dictionary
+            campaign_rows result.
+
+    Returns:
+        layout: dictionary
+            track_rows [{name, month, elapsed_min, segments [(step, start_h, length_h)]}] (setup, the steps, what is left of the job: the gray 'setup'),
+            stats_segments [(step, start_h, length_h)] (the stats job, then the post jobs that supply drawn steps), stats_start_h, end_h (end of the
+            stats row) and post_span (start_h, end_h) of the post jobs' segments (None without them).
+    """
+    track_rows = []
+    for job in c["jobs"]:
+        left, segs = 0.0, []
+        for step, minutes in [("setup", job.get("setup_min", 0.0))] + [(s, job["steps_min"].get(s, 0.0)) for s in TRACK_STEPS]:
+            if minutes > 0:
+                segs.append((step, left, minutes / 60.0))
+                left += minutes / 60.0
+        rest = job["elapsed_min"] / 60.0 - left
+        if rest > 1e-9:
+            segs.append(("setup", left, rest))
+        track_rows.append({"name": job["name"], "month": job.get("month"), "elapsed_min": job["elapsed_min"], "segments": segs})
+    stats = c["stats"]
+    start = c["track_longest_min"] / 60.0
+    state = {"left": start, "segs": []}
+
+    def add(step, minutes):
+        if minutes and minutes > 0:
+            state["segs"].append((step, state["left"], minutes / 60.0))
+            state["left"] += minutes / 60.0
+
+    # The stats job: setup, the steps up to speed, the post steps it ran itself (and kept), its shutdown (a cancelled job has none: its hung time is not drawn)
+    add("setup", stats["setup_min"])
+    for s in STATS_STEPS:
+        if s in stats["steps_min"]:
+            add(s, stats["steps_min"][s])
+    for s in POST_STEPS:
+        if s in stats["steps_min"] and c["post_source"].get(s, "").startswith("stats job"):
+            add(s, stats["steps_min"][s])
+    if not stats.get("incomplete"):
+        add("setup", stats.get("other_min", 0.0))
+    post_start = state["left"]
+    # The post jobs that supply drawn steps, in time order: setup, their steps, shutdown
+    for job in sorted((j for j in c["post_jobs"] if j["name"] in c["drawn_post_jobs"]), key=lambda j: j["start_h"]):
+        add("setup", job.get("setup_min", 0.0))
+        for s in (*STATS_STEPS, *POST_STEPS):
+            if c["post_job_of"].get(s) == job["name"] and s in job["steps_min"]:
+                add(s, job["steps_min"][s])
+        add("setup", job.get("other_min", 0.0))
+    post_span = (post_start, state["left"]) if state["left"] > post_start + 1e-9 else None
+    return {"track_rows": track_rows, "stats_segments": state["segs"], "stats_start_h": start, "end_h": state["left"], "post_span": post_span}
+
+
 def fig_timeline(data, outdir, name):
     """
-    The campaign on a wall-clock axis, every track job and the stats job split into their steps.
+    The campaign in compute time: the 12 track jobs side by side from 0, every job split into its steps (the gray is setup and shutdown), the stats job
+    from the end of the longest track job, followed by the post steps. The axis is the run time of the jobs only: queue waits (they differ from day to day)
+    and the hung time of a cancelled job are not drawn.
 
     Args:
         data: dictionary
@@ -659,59 +751,55 @@ def fig_timeline(data, outdir, name):
     """
     d = data["derived"]
     c = campaign_rows(d)
-    jobs, stats = c["jobs"], c["stats"]
-    nrow = len(jobs)
-    figw, figh = 11.5, 2.4 + 0.3 * (nrow + 1)
+    lay = timeline_layout(c)
+    stats, nrow = c["stats"], len(lay["track_rows"])
+    figw, figh = 11.5, 2.75 + 0.3 * (nrow + 1)
     fig = plt.figure(figsize=(figw, figh))
-    ax = fig.add_axes([1.25 / figw, 0.95 / figh, (figw - 1.25 - 0.25) / figw, (figh - 0.95 - 1.6) / figh])
-    for i, job in enumerate(jobs):
+    ax = fig.add_axes([1.45 / figw, 0.95 / figh, (figw - 1.45 - 0.25) / figw, (figh - 0.95 - 1.9) / figh])
+    end_h = lay["end_h"]
+    for i, row in enumerate(lay["track_rows"]):
         y = nrow + 1 - i
-        left = job["start_h"]
-        for step in TRACK_STEPS:
-            v = job["steps_min"].get(step, 0.0) / 60.0
-            bar(ax, y, left, v, 0.74, STEP_COLOR[step])
-            left += v
-        ax.text(left + 0.01 * stats["end_h"], y, f"{job['elapsed_min']:.0f} min", ha="left", va="center", fontsize=8.2, color=INK2)
-    left = stats["start_h"]
-    end_stats = stats["start_h"] + (stats["setup_min"] + sum(stats["steps_min"].get(s, 0.0) for s in (*STATS_STEPS, *POST_STEPS))) / 60.0
-    for step, minutes in [("setup", stats["setup_min"])] + [(s, stats["steps_min"][s]) for s in (*STATS_STEPS, *POST_STEPS) if s in stats["steps_min"]]:
-        v = minutes / 60.0
-        bar(ax, 0, left, v, 0.9, STEP_COLOR[step])
-        wide = v / max(stats["end_h"], 1e-9) * (figw - 1.5) >= 0.62
+        for step, start, length in row["segments"]:
+            bar(ax, y, start, length, 0.74, STEP_COLOR[step])
+        ax.text(row["elapsed_min"] / 60.0 + 0.01 * end_h, y, f"{row['elapsed_min']:.0f} min", ha="left", va="center", fontsize=8.2, color=INK2)
+    # The stats row, from the end of the longest track job (a short dotted line joins the stats row to the track rows above it)
+    ax.plot([lay["stats_start_h"]] * 2, [0.5, 1.6], color=INK2, linewidth=0.8, linestyle=(0, (2, 3)), zorder=1)
+    for step, start, length in lay["stats_segments"]:
+        bar(ax, 0, start, length, 0.9, STEP_COLOR[step])
+        wide = length / max(end_h, 1e-9) * (figw - 1.7) >= 0.62
         if step != "setup" and wide:
-            ax.text(left + v / 2, 0, f"{STEP_LABEL.get(step, step)}\n{minutes:.0f} min", ha="center", va="center", fontsize=7.4, color=text_color(STEP_COLOR[step]),
+            ax.text(start + length / 2, 0, f"{STEP_LABEL.get(step, step)}\n{length * 60:.0f} min", ha="center", va="center", fontsize=7.4, color=text_color(STEP_COLOR[step]),
                     linespacing=1.15)
-        left += v
-    # A stats job that was cancelled in a hung step: the time after its last finished step, hatched
-    if stats.get("incomplete") and stats["end_h"] > left:
-        bar(ax, 0, left, stats["end_h"] - left, 0.9, SURFACE, hatch="////")
-        ax.text((left + stats["end_h"]) / 2, 0, f"hung in a step, cancelled\n{(stats['end_h'] - left) * 60:.0f} min", ha="center", va="center", fontsize=8.2, color=INK,
-                linespacing=1.15, bbox=dict(boxstyle="round,pad=0.25", facecolor=SURFACE, edgecolor="none"), zorder=6)
-        left = stats["end_h"]
-    ax.text(max(left, stats["end_h"]) + 0.01 * stats["end_h"], 0, f"{stats['elapsed_min'] / 60:.2f} h\n{c['nodes']} nodes", ha="left", va="center", fontsize=9.5,
-            color=INK, fontweight="semibold")
-    last_end = max(j["end_h"] for j in jobs)
+    row_nodes = sorted({c["nodes"]} | set(c["post_nodes"]))
+    ax.text(end_h + 0.01 * end_h, 0, f"{end_h - lay['stats_start_h']:.2f} h\n{nodes_text(row_nodes)}", ha="left", va="center", fontsize=9.5, color=INK, fontweight="semibold")
+    # A bracket under the post steps: they are a job of their own (a re-run)
+    if lay["post_span"]:
+        x0, x1 = lay["post_span"]
+        ax.plot([x0, x1], [-0.62, -0.62], color=INK2, linewidth=0.9, zorder=4)
+        ax.text((x0 + x1) / 2, -0.7, f"job of its own, {nodes_text(c['post_nodes'])}", ha="center", va="top", fontsize=8, color=INK2)
     ax.set_yticks(list(range(nrow + 1, 1, -1)) + [0])
-    ax.set_yticklabels([j["month"] or j["name"] for j in jobs] + ["stats job"], fontsize=9)
-    ax.set_ylim(-0.7, nrow + 1.7)
-    ax.set_xlim(0, stats["end_h"] * 1.16)
-    ax.set_xlabel("hours since the first track job started")
+    ax.set_yticklabels([r["month"] or r["name"] for r in lay["track_rows"]] + ["stats job" + ("\n+ post-processing" if lay["post_span"] or c["post_rows"] else "")], fontsize=9)
+    ax.set_ylim(-1.25, nrow + 1.7)
+    ax.set_xlim(0, end_h * 1.16)
+    ax.set_xlabel("compute time (h): run times of the jobs only, queue waits removed")
     style(ax, grid="x")
     ax.spines["left"].set_visible(False)
-    all_steps = [s for s in (*TRACK_STEPS, "setup", *STATS_STEPS, *POST_STEPS) if s in STEP_COLOR]
-    legend_steps = [s for s in all_steps if s in {*TRACK_STEPS, "setup"} or s in stats["steps_min"]]
-    step_legend(fig, 1.25 / figw, 1 - 1.05 / figh, legend_steps, ncol=min(len(legend_steps), 7))
+    used = {seg[0] for row in lay["track_rows"] for seg in row["segments"]} | {seg[0] for seg in lay["stats_segments"]}
+    legend_steps = [s for s in (*TRACK_STEPS, "setup", *STATS_STEPS, *POST_STEPS) if s in used and s in STEP_COLOR]
+    step_legend(fig, 1.45 / figw, 1 - 1.3 / figh, legend_steps, ncol=min(len(legend_steps), 7))
     nh = d["node_hours"]
-    spread = (f"The queue spread the start of the track jobs over {d['track_start_spread_min']:.0f} min" if d["track_start_spread_min"] >= 1.0
-              else "The track jobs all started at the same time")
+    spread = (f"The track jobs started over {d['track_start_spread_min']:.0f} min in the queue" if d["track_start_spread_min"] >= 1.0 else "The track jobs started together")
+    lines = [f"The {nrow} track jobs run side by side from 0; the stats job starts when the longest ends ({c['track_longest_min']:.0f} min). Queue waits are not drawn:",
+             f"the stats job waited {d['stats_wait_min']:.0f} min for its {c['nodes']} nodes. {spread}."]
     if stats.get("incomplete"):
-        sub = (f"{spread}; the last track job ends at {last_end:.2f} h, the stats job starts {d['stats_wait_min']:.0f} min later at {stats['start_h']:.2f} h\n"
-               f"and was cancelled at {stats['end_h']:.2f} h, hung in a step. The steps it did not finish ran afterwards in jobs of their own (third row of the campaign\n"
-               f"figure). {nh['total']:.1f} node-hours charged in all.")
+        lines.append(f"The stats job was cancelled in the rain maps (hung for {stats['other_min'] / 60:.1f} h, not drawn); the post steps are the re-run job's. "
+                     f"{c['compute_min'] / 60:.2f} h of compute, {nh['total']:.1f} node-hours charged.")
+    elif lay["post_span"]:
+        lines.append(f"The post steps are the re-run job's (the stats job's first run of them is not drawn). {c['compute_min'] / 60:.2f} h of compute, "
+                     f"{nh['total']:.1f} node-hours charged.")
     else:
-        sub = (f"{d['wall_h']:.1f} h from the first start to the last end, {nh['total']:.1f} node-hours. {spread}; the last "
-               f"track job ends at {last_end:.2f} h,\nthe stats job starts {d['stats_wait_min']:.0f} min later at {stats['start_h']:.2f} h and ends at {stats['end_h']:.2f} h.")
-    title(fig, f"MCS tracking, {data['campaign']['tag']}, on the clock: {nrow} track jobs, then one stats job", sub)
+        lines.append(f"{c['compute_min'] / 60:.2f} h of compute, {nh['total']:.1f} node-hours charged.")
+    title(fig, f"MCS tracking, {data['campaign']['tag']}, in compute time: {nrow} track jobs, then one stats job", "\n".join(lines))
     return save(fig, outdir, f"perf_tbpf_{name}_timeline")
 
 

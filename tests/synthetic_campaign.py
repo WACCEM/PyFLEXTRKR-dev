@@ -13,7 +13,7 @@ import numpy as np
 SCHEMA = "tbpf_campaign_performance/1"
 
 
-def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, seed=7, tag="synthetic 2009", incident=False):
+def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, seed=7, tag="synthetic 2009", incident=False, rerun=False):
     """
     A campaign: n_jobs track jobs (one node each, started over 25 minutes as the queue frees nodes) and a stats job that starts 6 minutes after the last
     track job ends.
@@ -32,8 +32,10 @@ def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, se
         tag: string (default: 'synthetic 2009')
             Name of the campaign.
         incident: bool (default: False)
-            The stats job hung in the rain maps and was cancelled after 3 h; a debug job (2 nodes) for the rain maps timed out, and the two steps then ran
-            on one interactive node (post jobs of their own; post is ignored).
+            The stats job hung in the rain maps and was cancelled after 3 h; a debug job (2 nodes) for the rain maps timed out, the two steps then ran
+            on one interactive node, and again in a job of 4 nodes that replaces that run (post jobs of their own; post is ignored).
+        rerun: bool (default: False)
+            The stats job ran every step (post as above), and its two post steps were run again in a job of their own on 4 nodes, which replaces them.
 
     Returns:
         data: dictionary
@@ -72,12 +74,19 @@ def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, se
         post_jobs = [{"name": "post_rainmap", "start_h": round(debug_start, 4), "end_h": round(debug_start + 0.5, 4), "elapsed_min": 30.0, "nodes": 2,
                       "steps_min": {}, "setup_min": 1.5, "other_min": 28.5, "state": "TIMEOUT", "interactive": False},
                      {"name": "post_tail", "start_h": round(debug_start + 1.0, 4), "end_h": round(debug_start + 1.2, 4), "elapsed_min": 12.0, "nodes": 1,
-                      "steps_min": {"rainmap": 3.0, "trackpcp": 8.6}, "setup_min": 0.2, "other_min": 0.2, "state": "COMPLETED", "interactive": True}]
-        post_nh = 12.0 / 60.0
+                      "steps_min": {"rainmap": 3.0, "trackpcp": 8.6}, "setup_min": 0.2, "other_min": 0.2, "state": "COMPLETED", "interactive": True},
+                     {"name": "post_tail4", "start_h": round(debug_start + 4.0, 4), "end_h": round(debug_start + 4.25, 4), "elapsed_min": 15.0, "nodes": 4,
+                      "steps_min": {"rainmap": 1.5, "trackpcp": 11.3}, "setup_min": 1.4, "other_min": 0.8, "state": "COMPLETED", "interactive": False}]
+        post_nh = 12.0 / 60.0 + 15.0 * 4 / 60.0
+    if rerun:
+        # a job of its own on 4 nodes ran rainmap and trackpcp again (the fixed rain-map step), 3 hours after the stats job
+        post_jobs = [{"name": "post_tail4", "start_h": round(stats["end_h"] + 3.0, 4), "end_h": round(stats["end_h"] + 3.4, 4), "elapsed_min": 24.0, "nodes": 4,
+                      "steps_min": {"rainmap": 1.6, "trackpcp": 20.3}, "setup_min": 1.3, "other_min": 0.8, "state": "COMPLETED", "interactive": False}]
+        post_nh = 24.0 * 4 / 60.0
     derived = {"t0": "2026-11-20T10:00:00-08:00", "track_jobs": jobs, "stats_job": stats, "post_jobs": post_jobs,
                "node_hours": {"track": round(track_nh, 3), "stats": round(stats_nh, 3), "post": round(post_nh, 3), "failed": round(failed_node_hours, 3),
                               "total": round(track_nh + stats_nh + post_nh + failed_node_hours, 3)},
-               "wall_h": post_jobs[-1]["end_h"] if post_jobs else stats["end_h"], "track_start_spread_min": round(float(starts[-1]) * 60, 1), "stats_wait_min": 6.0,
+               "wall_h": max([stats["end_h"]] + [j["end_h"] for j in post_jobs]), "track_start_spread_min": round(float(starts[-1]) * 60, 1), "stats_wait_min": 6.0,
                "check_s_total": 12.0}
     counts = {"input_files": 8761, "cloudid_files": 8760, "frames_skipped": 1, "trackstats_tracks": 1180000, "identifymcs_mcs_tb": 41000,
               "robustmcs_mcs_robust": 7600}
@@ -86,7 +95,8 @@ def campaign_json(n_jobs=12, stats_nodes=4, post=True, failed_node_hours=0.0, se
 
 if __name__ == "__main__":
     out = sys.argv[1]
-    data = campaign_json(post="--no-post" not in sys.argv, stats_nodes=int(sys.argv[sys.argv.index("--nodes") + 1]) if "--nodes" in sys.argv else 4)
+    data = campaign_json(post="--no-post" not in sys.argv, stats_nodes=int(sys.argv[sys.argv.index("--nodes") + 1]) if "--nodes" in sys.argv else 4,
+                         incident="--incident" in sys.argv, rerun="--rerun" in sys.argv)
     with open(out, "w") as f:
         json.dump(data, f, indent=1)
     print(out)

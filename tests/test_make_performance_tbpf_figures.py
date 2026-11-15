@@ -93,17 +93,65 @@ def test_small_helpers():
 
 
 def test_a_campaign_with_a_hung_stats_job_and_post_jobs_of_their_own_renders_and_adds_up(tmp_path):
-    # the stats job (4 nodes) hung in the rain maps; a debug job (2 nodes) timed out; the two steps ran on one interactive node
+    # the stats job (4 nodes) hung in the rain maps; a debug job (2 nodes) timed out; the two steps ran on one interactive node and again on 4 nodes: the
+    # last run supplies the numbers, the 1-node run is superseded (charged, not drawn)
     data = campaign_json(incident=True)
     c = F.campaign_rows(data["derived"])
-    assert [r[0] for r in c["post_rows"]] == ["rainmap", "trackpcp"] and c["post_nodes"] == [1] and c["post_scale"] == pytest.approx(1.0)
-    assert c["post_source"] == {"rainmap": "1 node, interactive", "trackpcp": "1 node, interactive"}
-    # node-hours of the post row: the steps of the interactive run on 1 node; the hung time and the debug job are 'failed', not drawn
-    assert c["totals"]["post_nh"] == pytest.approx((3.0 + 8.6) / 60.0)
+    assert [r[0] for r in c["post_rows"]] == ["rainmap", "trackpcp"] and c["post_nodes"] == [4] and c["post_scale"] == pytest.approx(4.0)
+    assert c["post_source"] == {"rainmap": "post job, 4 nodes", "trackpcp": "post job, 4 nodes"} and c["drawn_post_jobs"] == ["post_tail4"]
+    # node-hours of the post row: the steps of the 4-node job; the 1-node run is superseded; the hung time and the debug job are 'failed', not drawn
+    assert c["totals"]["post_nh"] == pytest.approx((1.5 + 11.3) * 4 / 60.0)
+    assert c["superseded_nh"] == pytest.approx((3.0 + 8.6) / 60.0)
     nh = data["derived"]["node_hours"]
     assert nh["failed"] > 10 and c["totals"]["charged_nh"] == pytest.approx(nh["track"] + nh["stats"] + nh["post"])
+    assert 0 < c["other_nh"] < 0.2 * c["totals"]["charged_nh"]
     paths = F.make_figures(data, str(tmp_path), name="incident")
     assert len(paths) == 3 and all(os.path.getsize(p) > 5000 for p in paths)
+
+
+def test_post_steps_that_a_post_job_ran_again_replace_those_of_the_stats_job():
+    data = campaign_json(rerun=True)
+    c = F.campaign_rows(data["derived"])
+    stats = data["derived"]["stats_job"]
+    # the stats job's own rainmap and trackpcp (5.2 and 14.8 min on 4 nodes) are superseded by the 4-node job's
+    assert dict((r[0], r[2]) for r in c["post_rows"]) == {"rainmap": 1.6, "trackpcp": 20.3}
+    assert c["post_source"] == {"rainmap": "post job, 4 nodes", "trackpcp": "post job, 4 nodes"}
+    assert c["superseded_nh"] == pytest.approx((5.2 + 14.8) * 4 / 60.0)
+    # the node-hours charged are the stats job's (all its steps) and the post job's; what is drawn plus what is superseded plus the rest is that
+    assert c["totals"]["charged_nh"] == pytest.approx(data["derived"]["node_hours"]["track"] + data["derived"]["node_hours"]["stats"] + data["derived"]["node_hours"]["post"])
+    assert 0 < c["other_nh"] < 0.1 * c["totals"]["charged_nh"]
+    # compute time: the longest track job + the stats job without the superseded steps + the post job (queue waits are not in it)
+    longest = max(j["elapsed_min"] for j in data["derived"]["track_jobs"])
+    stats_min = stats["setup_min"] + sum(v for k, v in stats["steps_min"].items() if k not in ("rainmap", "trackpcp")) + stats["other_min"]
+    assert c["track_longest_min"] == pytest.approx(longest) and c["stats_compute_min"] == pytest.approx(stats_min)
+    assert c["post_compute_min"] == pytest.approx(24.0) and c["compute_min"] == pytest.approx(longest + stats_min + 24.0)
+
+
+def test_without_post_jobs_the_compute_time_is_the_longest_track_job_plus_the_stats_job():
+    data = campaign_json()
+    c = F.campaign_rows(data["derived"])
+    longest = max(j["elapsed_min"] for j in data["derived"]["track_jobs"])
+    assert c["superseded_nh"] == 0 and c["drawn_post_jobs"] == [] and c["post_compute_min"] == 0
+    assert c["compute_min"] == pytest.approx(longest + data["derived"]["stats_job"]["elapsed_min"])
+
+
+@pytest.mark.parametrize("kwargs", [dict(), dict(incident=True), dict(rerun=True), dict(post=False), dict(stats_nodes=1)])
+def test_the_timeline_has_no_queue_wait_the_stats_job_starts_when_the_longest_track_job_ends(kwargs):
+    data = campaign_json(**kwargs)
+    c = F.campaign_rows(data["derived"])
+    lay = F.timeline_layout(c)
+    longest = max(j["elapsed_min"] for j in data["derived"]["track_jobs"]) / 60.0
+    # every track job starts at 0 and has the length of its elapsed time; the stats row starts at the end of the longest one
+    assert all(row["segments"][0][1] == 0.0 for row in lay["track_rows"])
+    assert [round(sum(seg[2] for seg in row["segments"]), 6) for row in lay["track_rows"]] == [round(j["elapsed_min"] / 60.0, 6) for j in data["derived"]["track_jobs"]]
+    assert lay["stats_start_h"] == pytest.approx(longest) and lay["stats_segments"][0][1] == pytest.approx(longest)
+    # no gap in the stats row, and its length is the compute time of the stats job and the post jobs that supply steps
+    ends = [seg[1] + seg[2] for seg in lay["stats_segments"]]
+    assert all(a == pytest.approx(b[1]) for a, b in zip(ends, lay["stats_segments"][1:]))
+    assert lay["end_h"] - longest == pytest.approx((c["stats_compute_min"] + c["post_compute_min"]) / 60.0)
+    # a cancelled stats job's hung time is not on the axis
+    if kwargs.get("incident"):
+        assert lay["end_h"] < longest + 2.0 and lay["post_span"] is not None
 
 
 def test_a_campaign_with_post_steps_in_the_stats_job_still_says_so():
