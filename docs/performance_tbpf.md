@@ -230,7 +230,7 @@ in the stats job on 4 nodes (the file of January was created at 16:52, then noth
 
 1. The Python stack of the stuck worker (`faulthandler` run on it with `client.run`): its only pool thread waits in `SerializableLock.__enter__`, called by `CombinedLock.__enter__` in `NetCDF4ArrayWrapper._getitem`: a read of `mcstrack_20190205_060000.nc` waits for a netCDF lock of xarray.
 2. **Nobody holds that lock.** The worker has one pool thread, and it is the thread that waits. The lock is one of the two netCDF locks of the *main process*, as the worker received them with the lazily opened dataset (one locked, one free); the worker's own locks are free.
-3. Releasing the locked lock by hand from the worker's event loop let the task go on at once: February finished after 1,165 s. The same was needed 5 more times in the next 8 minutes (6 leaks in the 11 months that finished, in 5 of them: a watcher released each one); the months took 46-66 s each.
+3. Releasing the locked lock by hand from the worker's event loop let the task go on at once: February finished after 1,165 s. The same was needed 5 more times in the next 8 minutes (a watcher released each one: 6 leaks in the 11 months that finished, in 5 of the months); the months took 46-66 s each.
 4. A ring buffer of all lock calls of every worker caught one in the act: the worker's event loop thread (`MainThread`) called `acquire(blocking=False)` on the `CombinedLock` of a dataset: the first lock was taken (`True`), the second was busy (`False`, the pool thread
    held it), and the first one was never released.
 
@@ -238,7 +238,7 @@ in the stats job on 4 nodes (the file of January was created at 16:52, then noth
 `all(acquire(lock) for lock in self.locks)`: **it is not all-or-nothing**. If the first lock is free and a later one is busy it returns `False` and keeps the first one locked. The rain-map step opened the 744 files of a month lazily in the
 main process (`xr.open_mfdataset`) and let the workers write the maps (`to_netcdf` of Dask arrays), so the workers held the netCDF locks of the main process, and a Dask worker frees the lazily opened datasets on its event loop thread, `__del__`
 included, while its pool thread reads or writes. A write takes the two locks and a distributed lock (a round trip to the scheduler of 40-100 ms) and releases them in that order, so for that time the first lock is free and the second is held; if
-a `__del__` runs then, the first lock stays locked for ever and the next read of that worker waits for it for ever. 6 leaks in the 11 months that finished, in 5 of them. A second finding: only 5 of the 128 workers of the debug job had the main process's locks, that is
+a `__del__` runs then, the first lock stays locked for ever and the next read of that worker waits for it for ever. It leaked 6 times in the 11 months that finished (in 5 of the months). A second finding: only 5 of the 128 workers of the debug job had the main process's locks, that is
 did all the reading of a month, so the step did not use the other workers (why the scheduler placed the work this way was not examined).
 
 **The fix** (commit 1e7d2c4, `pyflextrkr/rainmap_driver.py`): every pixel-level file is read by a task of its own that opens and closes it (`read_pixel_file`), so the graph holds paths and arrays only and no xarray file handle or lock leaves a
