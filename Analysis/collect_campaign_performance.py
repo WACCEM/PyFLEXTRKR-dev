@@ -559,7 +559,8 @@ def campaign_counts(jobs):
             input_files and cloudid_files (summed over the track jobs, minus the files that neighbouring months share), frames_skipped, and the
             counts of the stats job's steps.
     """
-    track = [j for j in jobs if j["kind"] != "stats"]
+    # The jobs of the months (not the post jobs, which have no idfeature step and are no month)
+    track = [j for j in jobs if j["kind"] in ("track", "month")]
     per_month = [merged_counts(j["attempts"], j["final"]).get("idfeature", {}) for j in track]
     n_seam = max(len(track) - 1, 0)
     out = {"input_files": sum(c.get("input_files", 0) for c in per_month) - n_seam, "cloudid_files": sum(c.get("cloudid_files", 0) for c in per_month) - n_seam,

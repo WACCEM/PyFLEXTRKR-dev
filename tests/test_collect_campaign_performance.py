@@ -327,3 +327,15 @@ def test_a_run_on_an_interactive_allocation_is_an_attempt_with_the_times_of_its_
     assert d["post_jobs"][0]["interactive"] is True and d["post_jobs"][0]["nodes"] == 1 and d["post_jobs"][0]["steps_min"] == {"rainmap": 3.0, "trackpcp": 10.0}
     # the node-hours of the tail are its 15 minutes on one node
     assert d["node_hours"]["post"] == pytest.approx(0.25, abs=1e-3)
+
+
+def test_the_frames_of_a_campaign_are_those_of_the_track_jobs_minus_the_files_that_neighbouring_months_share():
+    def job(name, kind, counts=None):
+        a = {"steps": {"idfeature": {"status": "ok"}} if counts else {}, "counts": {"idfeature": counts} if counts else {}}
+        return {"name": name, "kind": kind, "attempts": [a], "final": 0}
+    months = [job("track202001", "track", {"input_files": 745, "cloudid_files": 744, "frames_skipped": 1}),
+              job("track202002", "track", {"input_files": 673, "cloudid_files": 673, "frames_skipped": 0})]
+    # each month reads the first file of the next one: the 745 + 673 inputs are 1417 files; the post jobs are no months and take off no seam
+    posts = [job("post_rainmap", "post"), job("post_tail", "post")]
+    assert C.campaign_counts(months)["input_files"] == 1417 and C.campaign_counts(months + posts) == C.campaign_counts(months)
+    assert C.campaign_counts(months + posts)["cloudid_files"] == 1416 and C.campaign_counts(months + posts)["frames_skipped"] == 1
