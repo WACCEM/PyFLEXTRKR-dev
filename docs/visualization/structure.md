@@ -48,46 +48,47 @@ four names stands for the four families (the table above has one row for each); 
 **Click a name to open its source file** (in the preview of VS Code; GitHub does not make links in diagrams clickable, use the list below the diagram).
 
 ```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontSize": "20px", "lineColor": "#4b5563", "primaryTextColor": "#111111", "edgeLabelBackground": "#ffffff"}, "flowchart": {"htmlLabels": true, "nodeSpacing": 40, "rankSpacing": 56, "padding": 22, "diagramPadding": 0, "curve": "basis", "subGraphTitleMargin": {"top": 12, "bottom": 30}}}}%%
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "20px", "lineColor": "#4b5563", "primaryTextColor": "#111111", "edgeLabelBackground": "#ffffff"}, "themeCSS": "background-color: #ffffff;", "flowchart": {"htmlLabels": true, "nodeSpacing": 40, "rankSpacing": 28, "padding": 22, "diagramPadding": 0, "curve": "basis", "subGraphTitleMargin": {"top": 4, "bottom": 8}}}}%%
 flowchart TB
-  subgraph all["&nbsp;"]
-    direction TB
-    subgraph vis["<b style='font-size:26px;color:#111111'>visualization/ (scripts)</b>"]
-      PS["<a href='../../visualization/plot_mcs_tracks.py' style='color:inherit;text-decoration:underline dotted'>plot_mcs_tracks.py</a><br/><a href='../../visualization/plot_cell_tracks.py' style='color:inherit;text-decoration:underline dotted'>plot_cell_tracks.py</a><br/><a href='../../visualization/plot_generic_tracks.py' style='color:inherit;text-decoration:underline dotted'>plot_generic_tracks.py</a><br/><a href='../../visualization/plot_cartesian_tracks.py' style='color:inherit;text-decoration:underline dotted'>plot_cartesian_tracks.py</a>"]
-      WR["examples/: <a href='../../visualization/examples/make_mcs_animation.py' style='color:inherit;text-decoration:underline dotted'>make_mcs_animation</a> · <a href='../../visualization/examples/make_cell_animation_nexrad.py' style='color:inherit;text-decoration:underline dotted'>cell_nexrad</a> · <a href='../../visualization/examples/make_mcs_animation_wrf_tbze.py' style='color:inherit;text-decoration:underline dotted'>wrf_tbze</a> · <a href='../../visualization/examples/make_mcs_animation_imerg_1panel.py' style='color:inherit;text-decoration:underline dotted'>imerg_1panel</a> · <a href='../../visualization/examples/make_mcs_animation_himawari_tb.py' style='color:inherit;text-decoration:underline dotted'>himawari_tb</a>"]
-      PA["<a href='../../visualization/pngs_to_animation.py' style='color:inherit;text-decoration:underline dotted'>pngs_to_animation.py</a><br/>PNG files to mp4, GIF"]
-    end
-    subgraph old["<b style='font-size:26px;color:#111111'>Analysis/ (old names, stubs)</b>"]
-      ST["<a href='inventory.md#old-script---new-command' style='color:inherit;text-decoration:underline dotted'>12 plot_subset_*.py</a><br/>main(legacy_name=...)"]
-    end
-    subgraph cli["<b style='font-size:26px;color:#111111'>pyflextrkr/visualization: command lines</b>"]
-      CL["<a href='../../pyflextrkr/visualization/mcs_cli.py' style='color:inherit;text-decoration:underline dotted'>mcs_cli.main</a><br/><a href='../../pyflextrkr/visualization/cell_cli.py' style='color:inherit;text-decoration:underline dotted'>cell_cli.main</a><br/><a href='../../pyflextrkr/visualization/generic_cli.py' style='color:inherit;text-decoration:underline dotted'>generic_cli.main</a><br/><a href='../../pyflextrkr/visualization/cartesian_cli.py' style='color:inherit;text-decoration:underline dotted'>cartesian_cli.main</a>"]
-    end
-    subgraph run["<b style='font-size:26px;color:#111111'>building blocks: arguments, tracks, loop</b>"]
-      CC["<a href='../../pyflextrkr/visualization/cli_common.py' style='color:inherit;text-decoration:underline dotted'>cli_common</a>"]
-      LG["<a href='../../pyflextrkr/visualization/legacy.py' style='color:inherit;text-decoration:underline dotted'>legacy</a>"]
-      TS["<a href='../../pyflextrkr/visualization/trackstats.py' style='color:inherit;text-decoration:underline dotted'>trackstats</a>"]
-      RUN["<a href='../../pyflextrkr/visualization/runner.py' style='color:inherit;text-decoration:underline dotted'>runner</a>.run_frames"]
-      AN["<a href='../../pyflextrkr/visualization/animation.py' style='color:inherit;text-decoration:underline dotted'>animation</a>"]
-    end
-    subgraph plot["<b style='font-size:26px;color:#111111'>pyflextrkr/visualization: plot modules</b>"]
-      MP["<a href='../../pyflextrkr/visualization/mcs_map.py' style='color:inherit;text-decoration:underline dotted'>mcs_map</a> · <a href='../../pyflextrkr/visualization/cell_map.py' style='color:inherit;text-decoration:underline dotted'>cell_map</a><br/><a href='../../pyflextrkr/visualization/generic_map.py' style='color:inherit;text-decoration:underline dotted'>generic_map</a> · <a href='../../pyflextrkr/visualization/cartesian_map.py' style='color:inherit;text-decoration:underline dotted'>cartesian_map</a><br/>work_for_time_loop, plot_map"]
-    end
-    subgraph maps["<b style='font-size:26px;color:#111111'>building blocks: map, masks, halo</b>"]
-      MC["<a href='../../pyflextrkr/visualization/mapcore.py' style='color:inherit;text-decoration:underline dotted'>mapcore</a>"]
-      MK["<a href='../../pyflextrkr/visualization/masks.py' style='color:inherit;text-decoration:underline dotted'>masks</a>"]
-      TD["<a href='../../pyflextrkr/visualization/trackdraw.py' style='color:inherit;text-decoration:underline dotted'>trackdraw</a>"]
-      PX2["<a href='../../pyflextrkr/visualization/pixelio.py' style='color:inherit;text-decoration:underline dotted'>pixelio</a>"]
-    end
+  direction TB
+  subgraph vis["<b style='font-size:22px;color:#111111'>visualization/ (scripts)</b>"]
+    PS["<a href='../../visualization/plot_mcs_tracks.py' style='color:inherit;text-decoration:underline dotted'>plot_mcs_tracks.py</a><br/><a href='../../visualization/plot_cell_tracks.py' style='color:inherit;text-decoration:underline dotted'>plot_cell_tracks.py</a><br/><a href='../../visualization/plot_generic_tracks.py' style='color:inherit;text-decoration:underline dotted'>plot_generic_tracks.py</a><br/><a href='../../visualization/plot_cartesian_tracks.py' style='color:inherit;text-decoration:underline dotted'>plot_cartesian_tracks.py</a>"]
+    WR["examples/: <a href='../../visualization/examples/make_mcs_animation.py' style='color:inherit;text-decoration:underline dotted'>make_mcs_animation</a> · <a href='../../visualization/examples/make_cell_animation_nexrad.py' style='color:inherit;text-decoration:underline dotted'>cell_nexrad</a> · <a href='../../visualization/examples/make_mcs_animation_wrf_tbze.py' style='color:inherit;text-decoration:underline dotted'>wrf_tbze</a> · <a href='../../visualization/examples/make_mcs_animation_imerg_1panel.py' style='color:inherit;text-decoration:underline dotted'>imerg_1panel</a> · <a href='../../visualization/examples/make_mcs_animation_himawari_tb.py' style='color:inherit;text-decoration:underline dotted'>himawari_tb</a><br/>via <a href='../../pyflextrkr/visualization/mcs_animation.py' style='color:inherit;text-decoration:underline dotted'>mcs_animation.main</a>"]
+    PA["<a href='../../visualization/pngs_to_animation.py' style='color:inherit;text-decoration:underline dotted'>pngs_to_animation.py</a><br/>PNG files to mp4, GIF"]
   end
-  PS --> CL
-  WR -->|"<a href='../../pyflextrkr/visualization/mcs_animation.py' style='color:inherit;text-decoration:underline dotted'>mcs_animation.main</a>"| CL
-  ST --> CL
-  WR --> AN
-  PA --> AN
-  CL --> CC & LG & TS & RUN
-  RUN -->|"one call per frame"| MP
-  MP --> MC & MK & TD & PX2
+  subgraph old["<b style='font-size:22px;color:#111111'>Analysis/ (old names, stubs)</b>"]
+    ST["<a href='inventory.md#old-script---new-command' style='color:inherit;text-decoration:underline dotted'>12 plot_subset_*.py</a><br/>main(legacy_name=...)"]
+  end
+  subgraph cli["<b style='font-size:22px;color:#111111'>pyflextrkr/visualization: command lines</b>"]
+    CL["<a href='../../pyflextrkr/visualization/mcs_cli.py' style='color:inherit;text-decoration:underline dotted'>mcs_cli.main</a><br/><a href='../../pyflextrkr/visualization/cell_cli.py' style='color:inherit;text-decoration:underline dotted'>cell_cli.main</a><br/><a href='../../pyflextrkr/visualization/generic_cli.py' style='color:inherit;text-decoration:underline dotted'>generic_cli.main</a><br/><a href='../../pyflextrkr/visualization/cartesian_cli.py' style='color:inherit;text-decoration:underline dotted'>cartesian_cli.main</a>"]
+  end
+  subgraph anim["<b style='font-size:22px;color:#111111'>building block: animation</b>"]
+    AN["<a href='../../pyflextrkr/visualization/animation.py' style='color:inherit;text-decoration:underline dotted'>animation</a>"]
+  end
+  subgraph run["<b style='font-size:22px;color:#111111'>building blocks: arguments, tracks, loop</b>"]
+    CC["<a href='../../pyflextrkr/visualization/cli_common.py' style='color:inherit;text-decoration:underline dotted'>cli_common</a>"]
+    RUN["<a href='../../pyflextrkr/visualization/runner.py' style='color:inherit;text-decoration:underline dotted'>runner</a>.run_frames<br/>(one call per frame)"]
+    LG["<a href='../../pyflextrkr/visualization/legacy.py' style='color:inherit;text-decoration:underline dotted'>legacy</a>"]
+    TS["<a href='../../pyflextrkr/visualization/trackstats.py' style='color:inherit;text-decoration:underline dotted'>trackstats</a>"]
+  end
+  subgraph plot["<b style='font-size:22px;color:#111111'>pyflextrkr/visualization: plot modules</b>"]
+    MP["<a href='../../pyflextrkr/visualization/mcs_map.py' style='color:inherit;text-decoration:underline dotted'>mcs_map</a> · <a href='../../pyflextrkr/visualization/cell_map.py' style='color:inherit;text-decoration:underline dotted'>cell_map</a><br/><a href='../../pyflextrkr/visualization/generic_map.py' style='color:inherit;text-decoration:underline dotted'>generic_map</a> · <a href='../../pyflextrkr/visualization/cartesian_map.py' style='color:inherit;text-decoration:underline dotted'>cartesian_map</a><br/>work_for_time_loop, plot_map"]
+  end
+  subgraph maps["<b style='font-size:22px;color:#111111'>building blocks: map, masks, halo</b>"]
+    MC["<a href='../../pyflextrkr/visualization/mapcore.py' style='color:inherit;text-decoration:underline dotted'>mapcore</a>"]
+    MK["<a href='../../pyflextrkr/visualization/masks.py' style='color:inherit;text-decoration:underline dotted'>masks</a>"]
+    TD["<a href='../../pyflextrkr/visualization/trackdraw.py' style='color:inherit;text-decoration:underline dotted'>trackdraw</a>"]
+    PX2["<a href='../../pyflextrkr/visualization/pixelio.py' style='color:inherit;text-decoration:underline dotted'>pixelio</a>"]
+  end
+  PS --> cli
+  WR --> cli
+  ST --> cli
+  WR --> anim
+  PA --> anim
+  CL --> run
+  RUN --> plot
+  CC & LG & TS ~~~ plot
+  MP --> maps
   classDef cvis fill:#bfdbfe,stroke:#1d4ed8,stroke-width:2px,color:#0b1f4d
   classDef cold fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#3b2300
   classDef ccli fill:#bbf7d0,stroke:#15803d,stroke-width:2px,color:#052e16
@@ -98,12 +99,12 @@ flowchart TB
   class CL ccli
   class MP cplot
   class CC,LG,TS,RUN,AN,MC,MK,TD,PX2 cblk
-  style all fill:#ffffff,stroke:#ffffff
   style vis fill:#eff6ff,stroke:#1d4ed8,stroke-width:3px
   style old fill:#fffbeb,stroke:#b45309,stroke-width:3px
   style cli fill:#f0fdf4,stroke:#15803d,stroke-width:3px
   style plot fill:#faf5ff,stroke:#7e22ce,stroke-width:3px
   style run fill:#fff1f2,stroke:#be123c,stroke-width:3px
+  style anim fill:#fff1f2,stroke:#be123c,stroke-width:3px
   style maps fill:#fff1f2,stroke:#be123c,stroke-width:3px
   linkStyle default stroke-width:3px
 ```
@@ -142,7 +143,7 @@ What `python visualization/plot_mcs_tracks.py -s ... -e ... -c config.yml` does,
 one frame, done for every pixel-level file (serial, or on Dask workers); the two functions in it are in `mcs_map.py`. Click a name to open its source file (VS Code preview).
 
 ```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontSize": "20px", "lineColor": "#4b5563", "primaryTextColor": "#111111", "edgeLabelBackground": "#ffffff"}, "flowchart": {"htmlLabels": true, "nodeSpacing": 40, "rankSpacing": 46, "padding": 22, "diagramPadding": 0, "curve": "basis", "subGraphTitleMargin": {"top": 6, "bottom": 6}}}}%%
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "20px", "lineColor": "#4b5563", "primaryTextColor": "#111111", "edgeLabelBackground": "#ffffff"}, "flowchart": {"htmlLabels": true, "nodeSpacing": 40, "rankSpacing": 28, "padding": 22, "diagramPadding": 0, "curve": "basis", "subGraphTitleMargin": {"top": 4, "bottom": 6}}}}%%
 flowchart TB
   subgraph all["&nbsp;"]
     direction TB
@@ -159,7 +160,7 @@ flowchart TB
   S -->|"<b>1</b> · main(argv)"| C
   C -->|"<b>2</b> · tracks of the period"| T
   C -->|"<b>3</b> · run_frames(...)"| R
-  R -->|"<b>4</b> · one call per file"| W
+  R -->|"<b>4</b> · one call per file"| frame
   W -->|"<b>5</b> · plot_map_2panels"| PL
   PL -->|"<b>6</b> · savefig"| O
   classDef cvis fill:#bfdbfe,stroke:#1d4ed8,stroke-width:2px,color:#0b1f4d
