@@ -58,15 +58,78 @@ start with a message that names both options, the old scripts each one replaces 
 
 ## Overview
 
+Every box is one kind of job or step; **click a step name** to open its source file (in the VS Code preview; GitHub does not make links in diagrams clickable, use the table below the diagram).
+
 ```mermaid
-flowchart TD
-  A["input: hourly Tb or OLR + precipitation files"] --> B["track job per month, 1 node<br/>idfeature, tracksingle, gettracks"]
-  B --> C["stats job per chunk of months<br/>links, stitch track numbers"]
-  C --> D["trackstats, identifymcs, matchpf, robustmcs<br/>(row tables)"]
-  D --> E["mapfeature, speed<br/>pixel files, movement"]
-  E --> F["optional: dense_netcdf (on), rainmap (on), trackpcp (off)"]
-  F --> G["stats/*.rows, stats/mcs_tracks_final_*.nc, mcstracking/*.nc, stats/monthly/*.nc"]
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "20px", "lineColor": "#4b5563", "primaryTextColor": "#111111", "edgeLabelBackground": "#ffffff"}, "flowchart": {"htmlLabels": true, "nodeSpacing": 40, "rankSpacing": 10, "padding": 22, "diagramPadding": 0, "curve": "basis", "wrappingWidth": 700, "subGraphTitleMargin": {"top": 2, "bottom": 4}}}}%%
+flowchart TB
+  IN["<b>Input:</b> hourly Tb or OLR + precipitation files"]
+  subgraph single["&nbsp;"]
+    TITLE["<b style='font-size:20px;color:#111111'>Single-node: one job per month (multiple jobs, all at once)</b>"]
+    T1["track job<br/>month <b>1</b> (1 node)<br/><a href='../pyflextrkr/idfeature_driver.py' style='color:inherit;text-decoration:underline dotted'>idfeature</a>,<br/><a href='../pyflextrkr/tracksingle_driver.py' style='color:inherit;text-decoration:underline dotted'>tracksingle</a>,<br/><a href='../pyflextrkr/gettracks.py' style='color:inherit;text-decoration:underline dotted'>gettracks</a>"]
+    T2["track job<br/>month <b>2</b> (1 node)<br/><a href='../pyflextrkr/idfeature_driver.py' style='color:inherit;text-decoration:underline dotted'>idfeature</a>,<br/><a href='../pyflextrkr/tracksingle_driver.py' style='color:inherit;text-decoration:underline dotted'>tracksingle</a>,<br/><a href='../pyflextrkr/gettracks.py' style='color:inherit;text-decoration:underline dotted'>gettracks</a>"]
+    DOTS["<b>...</b>"]
+    TN["track job<br/>month <b>N</b> (1 node)<br/><a href='../pyflextrkr/idfeature_driver.py' style='color:inherit;text-decoration:underline dotted'>idfeature</a>,<br/><a href='../pyflextrkr/tracksingle_driver.py' style='color:inherit;text-decoration:underline dotted'>tracksingle</a>,<br/><a href='../pyflextrkr/gettracks.py' style='color:inherit;text-decoration:underline dotted'>gettracks</a>"]
+  end
+  subgraph multi["<b style='font-size:20px;color:#111111'>Multi-node: one stats job per chunk of months (1 job, 4 nodes for a year)</b>"]
+    ST["stats job per chunk of months<br/><a href='../runscripts/link_period_folders.py' style='color:inherit;text-decoration:underline dotted'>links</a>, <b><a href='../runscripts/stitch_tracknumbers.py' style='color:inherit;text-decoration:underline dotted'>stitch</a></b> track numbers"]
+    RW["<a href='../pyflextrkr/trackstats_driver.py' style='color:inherit;text-decoration:underline dotted'>trackstats</a>, <a href='../pyflextrkr/identifymcs_tb_rows.py' style='color:inherit;text-decoration:underline dotted'>identifymcs</a>,<br/><a href='../pyflextrkr/matchtbpf_rows.py' style='color:inherit;text-decoration:underline dotted'>matchpf</a>, <a href='../pyflextrkr/robustmcs_rows.py' style='color:inherit;text-decoration:underline dotted'>robustmcs</a><br/>(row tables)"]
+    PX["<a href='../pyflextrkr/mapfeature_rows.py' style='color:inherit;text-decoration:underline dotted'>mapfeature</a>, <a href='../pyflextrkr/movement_speed_rows.py' style='color:inherit;text-decoration:underline dotted'>speed</a><br/>pixel files, movement"]
+    OP["<b>optional:</b> <a href='../pyflextrkr/dense_netcdf_driver.py' style='color:inherit;text-decoration:underline dotted'>dense_netcdf</a> (on),<br/><a href='../pyflextrkr/rainmap_driver.py' style='color:inherit;text-decoration:underline dotted'>rainmap</a> (on), <a href='../pyflextrkr/trackpcp_driver.py' style='color:inherit;text-decoration:underline dotted'>trackpcp</a> (off)"]
+    OUT["<b>Final outputs</b><br/>stats/*.rows,<br/>stats/mcs_tracks_final_*.nc,<br/>mcstracking/*.nc,<br/>stats/monthly/*.nc"]
+    ST --> RW --> PX --> OP --> OUT
+  end
+  IN ~~~ TITLE
+  TITLE ~~~ T1 & T2 & DOTS & TN
+  IN --> T1
+  IN --> T2
+  IN ~~~ DOTS
+  IN --> TN
+  T1 --> multi
+  T2 --> multi
+  DOTS ~~~ multi
+  TN --> multi
+  classDef cin fill:#e8e8e8,stroke:#334155,stroke-width:2px,color:#111111
+  classDef ctrack fill:#2b78d6,stroke:#1d4ed8,stroke-width:2px,color:#ffffff
+  classDef cdots fill:none,stroke:none,color:#111111
+  classDef cstitch fill:#9a9994,stroke:#57534e,stroke-width:2px,color:#111111
+  classDef crows fill:#eea100,stroke:#b45309,stroke-width:2px,color:#111111
+  classDef cpix fill:#6250d7,stroke:#4338ca,stroke-width:2px,color:#ffffff
+  classDef copt fill:#24a6ad,stroke:#0e7490,stroke-width:2px,color:#111111
+  classDef cout fill:#47d45a,stroke:#15803d,stroke-width:2px,color:#111111
+  class IN cin
+  class T1,T2,TN ctrack
+  class DOTS,TITLE cdots
+  class ST cstitch
+  class RW crows
+  class PX cpix
+  class OP copt
+  class OUT cout
+  style single fill:#eff6ff,stroke:#1d4ed8,stroke-width:3px
+  style multi fill:#f8fafc,stroke:#475569,stroke-width:3px
+  linkStyle default stroke-width:3px
 ```
+
+The same steps as a table (the links work on GitHub and in VS Code). `identifymcs` to `speed` have a module for `stats_format: rows` (the default of the templates) and one for `stats_format: dense`; the other steps are the same in both.
+
+| step | what it does | source (`stats_format: rows`) | flag | module of `stats_format: dense` |
+|---|---|---|---|---|
+| links, stitch | one folder of links to the cloudid and track files of the months, and the track numbers of the months joined into one set | [link_period_folders.py](../runscripts/link_period_folders.py), [stitch_tracknumbers.py](../runscripts/stitch_tracknumbers.py) ([stitch_tracks.py](../pyflextrkr/stitch_tracks.py)) | the first thing of every stats job | the same |
+| idfeature | cold clouds and precipitation features of every hour | [idfeature_driver.py](../pyflextrkr/idfeature_driver.py) | `run_idfeature` | the same |
+| tracksingle | links the features of consecutive hours | [tracksingle_driver.py](../pyflextrkr/tracksingle_driver.py) | `run_tracksingle` | the same |
+| gettracks | gives every chain of links a track number | [gettracks.py](../pyflextrkr/gettracks.py) | `run_gettracks` | the same |
+| trackstats | statistics of every track (the sparse file) | [trackstats_driver.py](../pyflextrkr/trackstats_driver.py) | `run_trackstats` | the same |
+| identifymcs | the Tb MCSs | [identifymcs_tb_rows.py](../pyflextrkr/identifymcs_tb_rows.py) | `run_identifymcs` | [identifymcs.py](../pyflextrkr/identifymcs.py) |
+| matchpf | the precipitation features of every MCS | [matchtbpf_rows.py](../pyflextrkr/matchtbpf_rows.py) | `run_matchpf` | [matchtbpf_driver.py](../pyflextrkr/matchtbpf_driver.py) |
+| robustmcs | the robust MCSs (`mcsmip` or `feng21`) | [robustmcs_rows.py](../pyflextrkr/robustmcs_rows.py) | `run_robustmcs` | [robustmcspf_saag.py](../pyflextrkr/robustmcspf_saag.py), [robustmcspf.py](../pyflextrkr/robustmcspf.py) |
+| mapfeature | the pixel-level files of the MCSs (`mcstracking/`) | [mapfeature_rows.py](../pyflextrkr/mapfeature_rows.py) | `run_mapfeature` | [mapfeature_driver.py](../pyflextrkr/mapfeature_driver.py) |
+| speed | the movement of every MCS | [movement_speed_rows.py](../pyflextrkr/movement_speed_rows.py) | `run_speed` | [movement_speed.py](../pyflextrkr/movement_speed.py) |
+| dense_netcdf | the dense `mcs_tracks_final_*.nc` from the row tables | [dense_netcdf_driver.py](../pyflextrkr/dense_netcdf_driver.py) | `run_dense_netcdf` (on) | none: the file is the dense file |
+| rainmap | the monthly rain maps | [rainmap_driver.py](../pyflextrkr/rainmap_driver.py) | `run_rainmap` (on) | the same |
+| trackpcp | the precipitation of every MCS at every pixel over its life | [trackpcp_driver.py](../pyflextrkr/trackpcp_driver.py) | `run_trackpcp` (off) | the same |
+
+The jobs are made by [generate_tbpf_mcstracking_scripts.py](../config/generate_tbpf_mcstracking_scripts.py), the steps run through `run_step` of [step_outputs.py](../pyflextrkr/step_outputs.py) in
+[run_mcs_tbpf_unified.py](../runscripts/run_mcs_tbpf_unified.py).
 
 A chunk of one month is the plain job: all steps in one job on one node, with the same file names. `run_mcs_tbpf_unified.py config.yml` on its own runs
 the steps whose `run_<step>` flags are on, for the dates of the config, with no generator at all.

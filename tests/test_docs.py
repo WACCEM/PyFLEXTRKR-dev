@@ -68,6 +68,29 @@ def test_relative_links_exist():
     assert not bad, 'links to files that do not exist:\n' + '\n'.join(bad)
 
 
+MERMAID_BLOCK = re.compile(r'```mermaid\n(.*?)```', re.S)
+MERMAID_HREF = re.compile(r"""href=['"]([^'"]+)['"]""")
+
+
+def test_the_links_inside_mermaid_diagrams_exist():
+    """
+    The names in a Mermaid diagram that link to a source file (<a href='../pyflextrkr/x.py'> in a node label, as in docs/visualization/structure.md
+    and the flowchart of docs/tbpf_mcs_workflow.md) point to files that exist: a renamed module breaks this test, not the link. Links to https
+    addresses and to anchors are not checked.
+    """
+    bad = []
+    for path in markdown_files():
+        text = open(os.path.join(REPO, path), encoding='utf-8', errors='ignore').read()
+        for block in MERMAID_BLOCK.findall(text):
+            for url in MERMAID_HREF.findall(block):
+                if re.match(r'(https?:|mailto:|#)', url):
+                    continue
+                target = os.path.normpath(os.path.join(REPO, os.path.dirname(path), url.split('#')[0]))
+                if not os.path.exists(target):
+                    bad.append(f'{path}: {url}')
+    assert not bad, 'links in Mermaid diagrams to files that do not exist:\n' + '\n'.join(bad)
+
+
 def table_cells(line):
     """The cells of a table row: split on `|` that is not escaped, without the outer pipes."""
     s = line.strip()
