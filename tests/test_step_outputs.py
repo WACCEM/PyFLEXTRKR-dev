@@ -113,6 +113,41 @@ def test_gettracks_needs_the_last_file(run):
     assert not ok and "last file of the track numbers" in message
 
 
+def test_gettracks_accepts_a_last_cloudid_file_that_is_a_gap_and_not_a_missing_track_file(tmp_path):
+    # Frames 9 and 10 do not exist: the last frame (11) is 15 min after frame 8, not closer than timegap (0.25 h), so no pair ends in it.
+    # It is in no track file and not in the track numbers, which end in frame 8: not an incomplete run
+    info, config, _ = make_run(tmp_path, skip_frames=(9, 10))
+    config = dict(config, startdate="t", enddate="t")
+    gettracks.gettracknumbers(config)
+    ok, message = so.check_step_outputs("gettracks", config)
+    assert ok and "(a gap): it starts no pair" in message
+    # the same when the last file is in no pair because its track file is missing (closer than timegap): that one is an error
+    info, config, _ = make_run(tmp_path / "second", skip_track_files=(11,))
+    config = dict(config, startdate="t", enddate="t")
+    gettracks.gettracknumbers(config)
+    ok, message = so.check_step_outputs("gettracks", config)
+    assert not ok and "last file of the track numbers" in message
+
+
+def test_gettracks_check_asks_for_the_noleap_calendar_when_the_gap_is_29_february(tmp_path, caplog):
+    # The February chunk of a model with no 29 February: hourly files from 28 February 20:00 to 1 March 00:00 (frame 4). The standard
+    # calendar makes no track file for the pair 23:00 -> 00:00 (25 h apart), so the track numbers end at 23:00 and the last cloudid file
+    # is 25 h later
+    info, config, _ = make_run(tmp_path, dt=3600, t0="2012-02-28 20:00:00", timegap_hours=3.1, calendar="noleap",
+                               skip_frames=tuple(range(5, 12)), skip_track_files=(4,))
+    config = dict(config, startdate="t", enddate="t", timegap=3.1)
+    gettracks.gettracknumbers(config)
+    with caplog.at_level("WARNING"):
+        ok, message = so.check_step_outputs("gettracks", config)
+    assert ok and "a gap" in message
+    assert "set `calendar: noleap`" in caplog.text
+    # with the calendar of the data the pair 23:00 -> 00:00 is 1 h apart and has no track file: the run is incomplete, whatever the gap says
+    config = dict(config, startdate="u", enddate="u", calendar="noleap")
+    gettracks.gettracknumbers(config)
+    ok, message = so.check_step_outputs("gettracks", config)
+    assert not ok and "last file of the track numbers" in message
+
+
 def test_statistics_files_robust_attributes_pixel_files_and_speed(run):
     info, config, tmp_path = run
     os.makedirs(config["stats_outpath"], exist_ok=True)

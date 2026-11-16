@@ -558,6 +558,85 @@ def get_timestamp_from_filename_single(
         file_timestamp = np.nan
     return file_timestamp
 
+########################################################################################################################
+# Calendar of the data: time differences between files
+########################################################################################################################
+# Values of the config key `calendar` and the calendar each one means
+CALENDAR_NAMES = {
+    "standard": "standard", "gregorian": "standard", "proleptic_gregorian": "standard",
+    "noleap": "noleap", "no_leap": "noleap", "365_day": "noleap",
+}
+
+
+def get_calendar(config):
+    """
+    The calendar of the data, from the config key `calendar`.
+
+    The file names and the times of the data are read as dates of the Gregorian calendar (seconds since 1970, `base_time`). A model with
+    a noleap calendar (E3SM) has no 29 February, so in a leap year its files go from 28 February 23:00 to 1 March 00:00, which is 1 hour
+    in the model and 25 hours in the Gregorian calendar. With `calendar: noleap` the tests that decide whether two files are consecutive
+    (tracksingle, gettracks, the step checks, the stitching) use the time in the model calendar (elapsed_seconds). The stored times and file
+    names do not change.
+
+    Args:
+        config: dictionary
+            Loaded config; the key `calendar` is optional.
+
+    Returns:
+        calendar: string
+            'standard' (the key is absent or null: the Gregorian calendar, the behavior before this key) or 'noleap'.
+
+    Raises:
+        ValueError: if the key has another value.
+    """
+    value = config.get("calendar")
+    if value is None:
+        return "standard"
+    name = CALENDAR_NAMES.get(str(value).lower())
+    if name is None:
+        raise ValueError(f"calendar must be one of {sorted(CALENDAR_NAMES)} (or null = standard), not {value!r}")
+    return name
+
+
+def elapsed_seconds(t_new, t_ref, calendar="standard"):
+    """
+    Time between two instants [s] in the calendar of the data.
+
+    Args:
+        t_new, t_ref: float, int or array-like
+            Epoch time [s] of the instants, the Gregorian calendar of the file names (numpy broadcasting applies).
+        calendar: string (default: 'standard')
+            'standard': the difference of the two times. 'noleap': the difference minus the 29 Februaries (86,400 s each)
+            between the two times, so that 28 February 23:00 -> 1 March 00:00 of a leap year is 3,600 s. A value from get_calendar.
+
+    Returns:
+        seconds: float or numpy array of float
+            t_new - t_ref in that calendar (negative if t_new is before t_ref).
+
+    Raises:
+        ValueError: if the calendar is not 'standard' or 'noleap'.
+    """
+    new = np.asarray(t_new, dtype=float)
+    ref = np.asarray(t_ref, dtype=float)
+    if calendar == "standard":
+        return new - ref
+    if calendar != "noleap":
+        raise ValueError(f"calendar must be 'standard' or 'noleap', not {calendar!r}")
+    seconds = new - ref
+    if seconds.size == 0 or not np.all(np.isfinite(seconds)):
+        return seconds
+    # The years the two times (all of them, for arrays) fall in
+    first_year = pd.to_datetime(float(min(new.min(), ref.min())), unit="s").year
+    last_year = pd.to_datetime(float(max(new.max(), ref.max())), unit="s").year
+    for year in range(first_year, last_year + 1):
+        # A leap year: remove the part of its 29 February that lies between the two times
+        if (year % 4 == 0 and year % 100 != 0) or year % 400 == 0:
+            day_start = float(datetime.datetime(year, 2, 29, tzinfo=utc).timestamp())
+            day_end = day_start + 86400.0
+            seconds = seconds - (np.clip(new, day_start, day_end) - np.clip(ref, day_start, day_end))
+    return seconds
+
+
 def convert_to_cftime(datetime, calendar):
     """
     Convert a pandas.Timestamp object to a cftime object based on the calendar type.

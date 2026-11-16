@@ -303,6 +303,7 @@ What differs, and why:
 | `databasename`, `time_format` | `merg_`, `yyyymoddhh` | `ne120_olr_pcp_`, `yyyymoddhh` | the file names |
 | `clouddata_subdir_format` | none | `'%Y'` | one folder per year |
 | `input_format` | `inptut_format` (typo, harmless: netcdf is the default) | `input_format: netcdf` | spelling |
+| `calendar` | (no such key) | `noleap` | the model has no 29 February: [Leap years](#leap-years-and-the-calendar-of-the-data) |
 | `robustmcs_definition` | (the script chose it) | `mcsmip` | explicit |
 | `stats_format`, `trackstats_dense_netcdf` | dense, `1` | `rows`, `0` | the MCS steps read the sparse trackstats file; the dense file of a global year is not needed |
 | `tracking_path_name` | `tracking` | `tracking/YEAR-MONTH` | one folder per month |
@@ -312,6 +313,22 @@ What differs, and why:
 measured on the 6-hour and the 3-day runs below). The frame is skipped by `miss_thresh: 0.4` (no cloudid file); `idfeature_driver` records the skipped frames in
 `idfeature_manifest.json`, so the output check counts them ([Checks while the job runs](#checks-while-the-job-runs)). The two cloudid files around a skipped frame are linked as a pair like any other
 pair, as in the old scripts. Look at `n_calls_skipped` in the manifest of each month: a month with many skipped frames has a data problem.
+
+### Leap years and the calendar of the data
+
+The file names and the times of the data are read as dates of the Gregorian calendar (seconds since 1970, the `base_time` of the statistics). A model with a **noleap** calendar (E3SM) has
+no 29 February: in a leap year its hourly files go from `..._2012022823` to `..._2012030100`, which is 1 hour in the model and **25 hours** when the names are read as Gregorian dates. Without
+the key `calendar` this 25 h is a data gap (longer than `timegap: 3.1`): tracksingle makes no pair for it, an MCS alive at midnight 28 / 29 February is cut into two tracks, and the February
+chunk of a campaign has a last cloudid file (1 March 00:00, the seam file) that is in no pair.
+
+`calendar: noleap` (the E3SM templates) makes the tests that decide whether two files are consecutive measure the time in the calendar of the data (`ft_utilities.elapsed_seconds`, no 29
+February): the pair test of tracksingle, the gap test of gettracks, the missing-pair check of the step checks and the stitching (a global attribute `calendar` of the track numbers file, written
+only when it is not `standard`, tells the stitching). Nothing else changes: file names and the stored `base_time` keep the Gregorian dates, so the `base_time` of a track that crosses 29 February has a jump of 25 h
+at that step in the files (compute durations from the number of times, not from `base_time` differences). Years without a 29 February give the same files with either value. Data with a real
+29 February (IMERG, GPM, WRF with a standard calendar) use `standard` (or no key).
+
+The gettracks check also accepts a last cloudid file that is a genuine gap after the file before it (more than `timegap` later, in the calendar of the data): such a file starts no pair, so it is
+in no track file and not in the track numbers. If that gap is a 29 February of a noleap model while `calendar` is `standard`, the check passes with a warning that says to set `calendar: noleap`.
 
 ## Reading the outputs
 
@@ -527,6 +544,7 @@ the year of the pixel table is 0.015 % above the sum of the 12 monthly maps unti
 | `run_rainmap`, `run_trackpcp` | `True`, `False` | the optional steps after `speed` |
 | `run_preprocess`, `run_remap_healpix`, `run_regrid_mask` | `False` | the optional steps of the WRF and HEALPix workflows (no output check: they run when their flag is on and are never skipped) |
 | `miss_thresh` | `0.4` | frames with a missing fraction above it are skipped (no cloudid file) |
+| `calendar` | `noleap` (E3SM template), `standard` (IMERG template); no key or `null` = `standard` | the calendar of the data ([Leap years](#leap-years-and-the-calendar-of-the-data)): `noleap` for a model without a 29 February; any other value stops the run at the start |
 
 ## Restarting a job that ran out of time or failed
 
@@ -641,6 +659,7 @@ few GB of statistics, rain maps and `trackpcp` tables (the 3 days have 0.9 milli
 | `No MCS identified` or `No robust MCS found` (a warning, then the check fails) | the thresholds are not met in the period: look at `mcs_tb_area_thresh`, `mcs_tb_duration_thresh` and the PF criteria of the definition |
 | a job that should have run stays PENDING with the reason `Dependency` | it waits for the jobs it needs ([How the jobs wait for each other](#how-the-jobs-wait-for-each-other)); `scontrol show job <id>` lists them |
 | a job is PENDING with `DependencyNeverSatisfied`, or was CANCELLED without having run | a job it needed did not end COMPLETED 0:0: find it with `sacct`, fix it, submit it and the waiting job again (`--jobs`) |
+| `Step gettracks did not make complete outputs: the last file of the track numbers is cloudid_YYYY0228_230000.nc, the last cloudid file is cloudid_YYYY0301_000000.nc` (an E3SM February) | an older code that has no `calendar` key; the model has no 29 February: set `calendar: noleap` and run the month again with `skip_completed_steps: False` (the track file of the pair 23:00 -> 00:00 is missing: [Leap years](#leap-years-and-the-calendar-of-the-data)) |
 | the stitch step stops with `... share no cloudid file, so no pair links them` | the cloudid file of the seam is not in the window of the period that ends there: the time of the cloudid files is not the time in the names of the input files; use `--seam-offset-minutes` ([Seams](#seams-and-the-time-of-the-cloudid-files)) |
 | the stitch step reports a mismatching cloudid file at a seam | the months do not share the first file of the next month: use the generator (the end date of a month is the start date of the next) |
 | a script written for the dense files fails on `.rows` | read it with `load_trackstats` ([Reading the outputs](#reading-the-outputs)); pass `variables=` and `tracks=` for a year |

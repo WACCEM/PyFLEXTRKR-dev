@@ -7,7 +7,7 @@ import math
 from netCDF4 import Dataset
 import xarray as xr
 import logging
-from pyflextrkr.ft_utilities import subset_files_timerange, find_maxnclouds
+from pyflextrkr.ft_utilities import subset_files_timerange, find_maxnclouds, elapsed_seconds, get_calendar
 
 # gettracknumbers stops if more than this fraction of the track files is missing in the middle of the data
 # (each missing track file restarts the tracks there, see the chain check in gettracknumbers)
@@ -78,7 +78,7 @@ def _link_group(seed, fwd_new_of_ref, bwd_new_of_ref, fwd_ref_of_new):
 
 def write_tracknumbers(tracknumbers_outfile, itrack, basetime, cloudidfiles, tracknumber, trackstatus,
                        trackmergenumber, tracksplitnumber, trackreset, singletrack_filebase, startdate, enddate,
-                       timegap, n_chain_breaks=0):
+                       timegap, n_chain_breaks=0, calendar="standard"):
     """
     Write the track numbers file (the output of gettracknumbers). Also used by stitch_tracks.stitch_tracknumbers.
 
@@ -100,6 +100,9 @@ def write_tracknumbers(tracknumbers_outfile, itrack, basetime, cloudidfiles, tra
             Maximum time gap [hour], written to the attributes.
         n_chain_breaks: int (default: 0)
             Number of places where a track file was missing and the tracks were restarted, written to the attributes.
+        calendar: string (default: 'standard')
+            Calendar of the data (ft_utilities.get_calendar). Written to the attributes only when it is not 'standard', so that the
+            files of a run without the config key `calendar` are the same as before; the stitching reads it.
 
     Returns:
         None
@@ -148,6 +151,9 @@ def write_tracknumbers(tracknumbers_outfile, itrack, basetime, cloudidfiles, tra
         "timegap": str(timegap) + "-hours",
         "n_chain_breaks": int(n_chain_breaks),
     }
+    # The calendar of the data, when it is not the standard one: the stitching of periods tests their time gaps with it
+    if calendar != "standard":
+        gattr_dict["calendar"] = calendar
     # Define Xarray dataset
     ds_out = xr.Dataset(var_dict, coords=coord_dict, attrs=gattr_dict,)
 
@@ -268,6 +274,8 @@ def gettracknumbers(config):
     startdate = config["startdate"]
     enddate = config["enddate"]
     timegap = config["timegap"]
+    # Calendar of the data ('noleap': no 29 February, so a file after 28 February 23:00 of a leap year is 1 h later, not 25 h)
+    calendar = get_calendar(config)
     maxnclouds = config["maxnclouds"]
     featuresize_varname = config.get("featuresize_varname", "npix_feature")
     start_basetime = config["start_basetime"]
@@ -442,7 +450,7 @@ def gettracknumbers(config):
         # Check if files immediately follow each other. Missing files can exist.
         # If missing files exist need to increment track numbers
         if ifile > 0:
-            time_diff = np.array([time_new - time_prev]).astype(float)
+            time_diff = np.atleast_1d(elapsed_seconds(time_new, time_prev, calendar))
             time_gap_found = time_diff > (timegap * 3600)
             # The reference file of this track file must be the new file of the previous one. If a track file is missing
             # in between and the two new times are closer than timegap, the test on the time difference does not see it, and
@@ -802,7 +810,7 @@ def gettracknumbers(config):
     t_write0 = time.perf_counter()
     write_tracknumbers(tracknumbers_outfile, itrack, basetime[:nfiles], cloudidfiles[:nfiles, :], tracknumber[:, :nfiles, :],
                        trackstatus[:, :nfiles, :], trackmergenumber[:, :nfiles, :], tracksplitnumber[:, :nfiles, :],
-                       trackreset[:, :nfiles, :], singletrack_filebase, startdate, enddate, timegap, n_chain_breaks)
+                       trackreset[:, :nfiles, :], singletrack_filebase, startdate, enddate, timegap, n_chain_breaks, calendar)
     logger.info(f"gettracks timing: writing the track numbers file took {time.perf_counter() - t_write0:.1f} s")
     logger.info(tracknumbers_outfile)
     logger.info('Get track numbers done.')

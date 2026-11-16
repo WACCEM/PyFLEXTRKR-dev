@@ -35,7 +35,7 @@ import numpy as np
 import pandas as pd
 from netCDF4 import Dataset
 
-from pyflextrkr.ft_utilities import subset_files_timerange
+from pyflextrkr.ft_utilities import elapsed_seconds, get_calendar, subset_files_timerange
 from pyflextrkr.step_timing import timed_step
 
 STEPS = ("idfeature", "tracksingle", "gettracks", "trackstats", "identifymcs", "matchpf", "robustmcs", "regionprops", "mapfeature",
@@ -60,7 +60,7 @@ def track_file_name(new_basetime, filebase="track_"):
     return f"{filebase}{stamp.strftime('%Y%m%d')}_{stamp.strftime('%H%M%S')}.nc"
 
 
-def find_missing_pairs(cloudid_files, cloudid_basetimes, existing_names, timegap_hours, filebase="track_"):
+def find_missing_pairs(cloudid_files, cloudid_basetimes, existing_names, timegap_hours, filebase="track_", calendar="standard"):
     """
     Pairs of consecutive cloudid files that should have a track file but have none.
 
@@ -75,6 +75,8 @@ def find_missing_pairs(cloudid_files, cloudid_basetimes, existing_names, timegap
             Pairs further apart than this get no track file (tracksingle would not link them either).
         filebase: string (default: 'track_')
             Prefix of the track files.
+        calendar: string (default: 'standard')
+            Calendar of the data (ft_utilities.get_calendar): the time between two files is measured in it, as tracksingle does.
 
     Returns:
         pairs: list of tuples
@@ -83,7 +85,7 @@ def find_missing_pairs(cloudid_files, cloudid_basetimes, existing_names, timegap
     times = np.asarray(cloudid_basetimes)
     missing = []
     for i in range(len(cloudid_files) - 1):
-        hours = (times[i + 1] - times[i]) / 3600.0
+        hours = float(elapsed_seconds(times[i + 1], times[i], calendar)) / 3600.0
         if 0 < hours < timegap_hours and track_file_name(times[i + 1], filebase) not in existing_names:
             missing.append((cloudid_files[i], cloudid_files[i + 1], int(times[i]), int(times[i + 1])))
     return missing
@@ -283,7 +285,7 @@ def _check_tracksingle(config, strict):
     files, times = _cloudid_files(config)
     base = config.get("singletrack_filebase", "track_")
     names = {n for n in os.listdir(config["tracking_outpath"]) if n.startswith(base)}
-    missing = find_missing_pairs(files, times, names, config["timegap"], base)
+    missing = find_missing_pairs(files, times, names, config["timegap"], base, get_calendar(config))
     if missing:
         return False, f"{len(missing)} pair(s) of cloudid files without a track file, the first {os.path.basename(missing[0][1])}"
     return len(files) > 1, f"track files for all {max(len(files) - 1, 0)} pairs of the {len(files)} cloudid files"
@@ -298,12 +300,27 @@ def _check_gettracks(config, strict):
         last = b"".join(np.asarray(ds["cloudid_files"][-1]).ravel().tolist()).decode().strip("\x00 ")
         n_breaks = int(ds.getncattr("n_chain_breaks")) if "n_chain_breaks" in ds.ncattrs() else 0
         ntracks = int(np.asarray(ds["ntracks"][:]).ravel()[0])
-    files, _ = _cloudid_files(config)
+    files, times = _cloudid_files(config)
+    # The last cloudid file of the period is the last file of the track numbers, except when it is a genuine gap after the file before it
+    # (more than timegap later): it starts no pair, so tracksingle writes no track file for it and it is not in the track numbers
+    note = ""
+    if files and os.path.basename(files[-1]) != last and len(files) > 1 and os.path.basename(files[-2]) == last:
+        calendar = get_calendar(config)
+        gap_hours = float(elapsed_seconds(times[-1], times[-2], calendar)) / 3600.0
+        if gap_hours >= config["timegap"]:
+            note = f", the last cloudid file {os.path.basename(files[-1])} is {gap_hours:.1f} h after the one before (a gap): it starts no pair"
+            # A model with no 29 February (E3SM) looks like a gap of 25 h in a leap year when the calendar is the standard one
+            if calendar == "standard" and float(elapsed_seconds(times[-1], times[-2], "noleap")) / 3600.0 < config["timegap"]:
+                logging.getLogger(__name__).warning(
+                    f"The last cloudid file {os.path.basename(files[-1])} is {gap_hours:.1f} h after the one before, but it is "
+                    f"{float(elapsed_seconds(times[-1], times[-2], 'noleap')) / 3600.0:.1f} h in a calendar without 29 February: "
+                    f"if the data have a noleap calendar (E3SM), set `calendar: noleap`, or their tracks are cut at 29 February.")
+            files = files[:-1]
     if not files or os.path.basename(files[-1]) != last:
         return False, f"the last file of the track numbers is {last}, the last cloudid file is {os.path.basename(files[-1]) if files else None}"
     if ntracks <= 1 and period_has_no_features(config):
         return True, f"{EMPTY_NOTE}, last file {last}"
-    return ntracks > 1, f"{ntracks - 1} track numbers, last file {last}" + (f", {n_breaks} chain break(s)" if n_breaks else "")
+    return ntracks > 1, f"{ntracks - 1} track numbers, last file {last}" + (f", {n_breaks} chain break(s)" if n_breaks else "") + note
 
 
 def _check_trackstats(config, strict):

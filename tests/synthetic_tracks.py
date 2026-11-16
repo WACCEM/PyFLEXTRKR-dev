@@ -14,12 +14,44 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+from pyflextrkr.ft_utilities import elapsed_seconds
+
 FILLVAL = -9999
 TIME_ENCODING = {"dtype": "int64", "zlib": True, "units": "seconds since 1970-01-01"}
 INDEX_ENCODING = {"dtype": "int", "zlib": True, "_FillValue": FILLVAL}
 # Variables of a tracknumbers file that carry the tracking result
 TRACK_VARIABLES = ("ntracks", "basetimes", "cloudid_files", "track_numbers", "track_status", "track_mergenumbers",
                    "track_splitnumbers", "track_reset")
+
+
+def model_to_epoch(seconds, calendar="standard", t0=0):
+    """
+    The epoch time [s] (Gregorian calendar, the one the file names are read in) of a time of a model calendar.
+
+    Args:
+        seconds: int
+            Seconds since 1970-01-01 counted in the calendar of the model: 'noleap' has no 29 February, so the day after
+            28 February of a leap year is 1 March.
+        calendar: string (default: 'standard')
+            'standard' (nothing changes) or 'noleap'.
+        t0: int (default: 0)
+            Start of the run [s]: the 29 Februaries before it are not counted (the times of the run are its start plus the
+            model time elapsed).
+
+    Returns:
+        epoch: int
+            Seconds since 1970-01-01 in the Gregorian calendar.
+    """
+    if calendar == "standard":
+        return seconds
+    shifted = seconds
+    # Every 29 February that lies before the time in the Gregorian calendar adds a day (loop over the years that matter)
+    for year in range(1970, 2101):
+        if (year % 4 == 0 and year % 100 != 0) or year % 400 == 0:
+            day_start = int(pd.Timestamp(f"{year}-02-29", tz="UTC").timestamp())
+            if day_start >= t0 and shifted >= day_start:
+                shifted += 86400
+    return shifted
 
 
 def _stamp(epoch):
@@ -97,7 +129,7 @@ def _transpose_links(forward, n_to, nlinks):
 
 def write_synthetic_tracking(folder, nframes=12, seed=0, max_clouds=8, nlinks=4, dt=300, t0="2020-01-01 00:00:00",
                              skip_frames=(), skip_track_files=(), timegap_hours=0.25, link_density=0.8,
-                             symmetric_links=False, zero_frames=()):
+                             symmetric_links=False, zero_frames=(), calendar="standard"):
     """
     Write cloudid_*.nc and track_*.nc files of random clouds.
 
@@ -132,6 +164,11 @@ def write_synthetic_tracking(folder, nframes=12, seed=0, max_clouds=8, nlinks=4,
             Frames that exist but have no feature (nfeatures = 0, as idfeature_radar3d writes for an echo-free frame). Their
             clouds are drawn first and then removed, so the other frames are the same as without this option.
 
+        calendar: string (default: 'standard')
+            'noleap': the frames are dt apart in a calendar without 29 February, so the file names (read as dates of the Gregorian
+            calendar) jump by a day over 29 February of a leap year, as those of an E3SM run do; the pairs that get a track file are
+            decided in that calendar.
+
     Returns:
         info: dictionary
             frames (existing frame indices), epoch {frame: seconds}, names {frame: cloudid file name}, ncl {frame: clouds},
@@ -141,7 +178,7 @@ def write_synthetic_tracking(folder, nframes=12, seed=0, max_clouds=8, nlinks=4,
     os.makedirs(folder, exist_ok=True)
     t0_epoch = int(pd.Timestamp(t0, tz="UTC").timestamp())
     frames = [i for i in range(nframes) if i not in skip_frames]
-    epoch = {i: t0_epoch + i * dt for i in frames}
+    epoch = {i: model_to_epoch(t0_epoch + i * dt, calendar, t0_epoch) for i in frames}
     ncl = {i: int(rng.integers(1, max_clouds + 1)) for i in frames}
     npix = {i: rng.integers(1, 60, ncl[i]).astype(np.int32) for i in frames}
     for i in zero_frames:
@@ -154,7 +191,7 @@ def write_synthetic_tracking(folder, nframes=12, seed=0, max_clouds=8, nlinks=4,
 
     pairs = []
     for a, b in zip(frames[:-1], frames[1:]):
-        hours = (epoch[b] - epoch[a]) / 3600.0
+        hours = float(elapsed_seconds(epoch[b], epoch[a], calendar)) / 3600.0
         if not (0 < hours < timegap_hours) or b in skip_track_files:
             continue
         forward = _random_links(rng, ncl[a], ncl[b], nlinks, link_density)

@@ -5,6 +5,7 @@ import xarray as xr
 import pandas as pd
 import time
 import logging
+from pyflextrkr.ft_utilities import elapsed_seconds, get_calendar
 
 def trackclouds(
         cloudid_filepairs,
@@ -73,7 +74,8 @@ def trackclouds(
     # Check that new and reference files differ by less than timegap in hours.
     # Use base time (which is the seconds since 01-Jan-1970 00:00:00).
     # Divide base time difference between the files by 3600 to get difference in hours
-    hour_diff = (np.subtract(new_basetime, reference_basetime)) / float(3600)
+    # (in the calendar of the data: config key `calendar`, 'noleap' has no 29 February, see ft_utilities.get_calendar)
+    hour_diff = elapsed_seconds(new_basetime, reference_basetime, get_calendar(config)) / float(3600)
     if hour_diff < timegap and hour_diff > 0:
         logger.debug("Linking:")
 

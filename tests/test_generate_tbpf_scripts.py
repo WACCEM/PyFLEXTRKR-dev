@@ -202,7 +202,9 @@ def test_the_imerg_and_the_e3sm_templates_differ_only_in_the_data_keys():
     imerg, e3sm = (yaml.safe_load(_read(p)) for p in (IMERG_TEMPLATE, TEMPLATE))
     assert {k for k in set(imerg) | set(e3sm) if imerg.get(k) != e3sm.get(k)} == {
         "databasename", "olr2tb", "olr_varname", "tb_varname", "pcp_varname", "pcp_convert_factor", "clouddatasource", "idclouds_hourly",
-        "idclouds_minute", "idclouds_dt_thresh"}
+        "idclouds_minute", "idclouds_dt_thresh", "calendar"}
+    # the model has no 29 February, the observations have one
+    assert (e3sm["calendar"], imerg["calendar"]) == ("noleap", "standard")
 
 
 def test_an_imerg_campaign_has_the_same_jobs_without_a_seam_offset_and_its_configs_load(tmp_path):

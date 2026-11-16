@@ -41,7 +41,7 @@ import sys
 import dask
 from dask.distributed import Client, LocalCluster
 
-from pyflextrkr.ft_utilities import load_config, setup_logging
+from pyflextrkr.ft_utilities import get_calendar, load_config, setup_logging
 from pyflextrkr.gettracks import gettracknumbers
 from pyflextrkr.idfeature_driver import idfeature_driver
 from pyflextrkr.identifymcs import identifymcs_tb
@@ -98,7 +98,7 @@ def fail_on_silent_exit(step, func):
 
 def check_config(config):
     """
-    Check the config before any work is done (and before any queue wait is wasted): the feature type, stats_format and the robust MCS
+    Check the config before any work is done (and before any queue wait is wasted): the feature type, stats_format, the calendar and the robust MCS
     definition with its keys.
 
     Args:
@@ -118,6 +118,13 @@ def check_config(config):
     stats_format = config.get("stats_format", "dense")
     if stats_format not in ("dense", "rows"):
         sys.exit(f"stats_format must be 'dense' or 'rows', not '{stats_format}'")
+    # The calendar of the data (optional): a typo would silently be the standard calendar, which cuts E3SM tracks at 29 February
+    try:
+        calendar = get_calendar(config)
+    except ValueError as err:
+        sys.exit(str(err))
+    if calendar != "standard":
+        logger.info(f"Calendar of the data: {calendar} (time between files is measured without 29 February)")
     # The robust MCS definition: required, with its keys, when the step runs; a wrong value is an error whenever it is given
     from pyflextrkr.robustmcs_rows import DEFINITIONS, robustmcs_params
     definition = config.get("robustmcs_definition")

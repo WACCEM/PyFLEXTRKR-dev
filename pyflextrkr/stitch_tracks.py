@@ -29,6 +29,7 @@ import netCDF4
 import numpy as np
 
 from pyflextrkr.gettracks import write_tracknumbers
+from pyflextrkr.ft_utilities import elapsed_seconds
 
 FILLVAL = -9999
 # Variables that hold track numbers and must be renumbered
@@ -173,12 +174,14 @@ def stitch_arrays(periods, restart="warn"):
         last_time, first_time = basetimes[-1][-1], p["basetimes"][0]
         last_name, first_name = cloudid[-1][-1].tobytes(), p["cloudid"][0].tobytes()
         timegap = _timegap_hours(p["attrs"]) * 3600.0
+        # The calendar of the data (written by gettracknumbers when it is not the standard one): 29 February of a noleap model has no time
+        calendar = str(p["attrs"].get("calendar", "standard"))
         if first_time == last_time and first_name == last_name:
             kind = "seam"
         elif first_time == last_time or first_time < last_time:
             raise ValueError(f"periods {index - 1} and {index} overlap ({periods[index - 1]['path']}, {p['path']}): they must "
                              f"share exactly one cloudid file or none")
-        elif first_time - last_time < timegap:
+        elif float(elapsed_seconds(first_time, last_time, calendar)) < timegap:
             if restart == "error":
                 raise ValueError(f"periods {index - 1} and {index} are {(first_time - last_time) / 60.0:.1f} min apart and share no cloudid file, "
                                  f"so no pair links them ({periods[index - 1]['path']}, {p['path']}). Periods that follow each other have to "
@@ -276,7 +279,7 @@ def stitch_tracknumbers(paths, outfile, tracking_dirs=None, featuresize_varname=
         outfile, result["ntracks"], result["basetimes"], result["cloudid"],
         result["track_numbers"][None], result["track_status"][None], result["track_mergenumbers"][None],
         result["track_splitnumbers"][None], result["track_reset"][None], first["singletrack_filebase"], first["startdate"],
-        last["enddate"], _timegap_hours(first), result["n_chain_breaks"])
+        last["enddate"], _timegap_hours(first), result["n_chain_breaks"], str(first.get("calendar", "standard")))
     return outfile
 
 
